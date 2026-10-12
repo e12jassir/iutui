@@ -3,6 +3,24 @@
 
 play_video() { # mode id url title channel dur
     local mode=$1 id=$2 title=$4 url vfmt
+
+    # Resolve auto mode dynamically based on the active tab/view
+    if [ "$mode" = "auto" ] || [ -z "$mode" ]; then
+        local current_view
+        current_view=$(cat "$YT_RUNDIR/view" 2>/dev/null || true)
+        if [ "$current_view" = "music" ]; then
+            mode="audio"
+        else
+            mode="${YT_DEFAULT_MODE:-window}"
+        fi
+    fi
+
+    # If the item is a YouTube Mix playlist, route to continuous mix radio playback
+    if [[ $id == RD* ]]; then
+        play_mix "$id" "$title" "${5:--}"
+        return 0
+    fi
+
     url=$(canonical_url "$id" "$3")
     record_history "$id" "$title" "${5:--}" "${6:--}" "$url"
 
@@ -70,12 +88,13 @@ play_video() { # mode id url title channel dur
 play_mix() { # id title channel
     local id=$1 title=$2 channel=${3:--}
     valid_id "$id" || return 0
-    local mix_url="https://www.youtube.com/watch?v=${id}&list=RD${id}"
+    local clean_id="${id#RD}"
+    local mix_url="https://www.youtube.com/watch?v=${clean_id}&list=RD${clean_id}"
     record_history "$id" "$title (Mix)" "$channel" "MIX" "$mix_url"
 
-    local thumb_file="$THUMB_DIR/${id}_maxresdefault.jpg"
-    [ -s "$thumb_file" ] || thumb_file="$THUMB_DIR/${id}_hqdefault.jpg"
-    [ -s "$thumb_file" ] || thumb_file="$THUMB_DIR/${id}_mqdefault.jpg"
+    local thumb_file="$THUMB_DIR/${clean_id}_maxresdefault.jpg"
+    [ -s "$thumb_file" ] || thumb_file="$THUMB_DIR/${clean_id}_hqdefault.jpg"
+    [ -s "$thumb_file" ] || thumb_file="$THUMB_DIR/${clean_id}_mqdefault.jpg"
 
     if [ -s "$thumb_file" ] && [ "${YT_NOTIFY:-1}" = 1 ] && have notify-send; then
         notify-send --app-name=yt -i "$thumb_file" "📻 Mix Radio: $title" "$channel" >/dev/null 2>&1 || notify "📻 Mix: $title"
@@ -92,7 +111,13 @@ play_mix() { # id title channel
         --cache-pause=no
         --demuxer-readahead-secs=2
         --ytdl-format="ba/b"
+        --ytdl-raw-options=yes-playlist=
     )
+
+    prepare_cookies fast
+    if [ "${#COOKIE_ARGS[@]}" -ge 2 ] && [ "${COOKIE_ARGS[0]}" = "--cookies" ]; then
+        mo+=(--ytdl-raw-options-append="cookies=${COOKIE_ARGS[1]}")
+    fi
 
     if [ "$YT_MUSIC_MODE" = "term" ]; then
         mpv "${mo[@]}" "$mix_url"
@@ -100,8 +125,7 @@ play_mix() { # id title channel
     fi
 
     (
-        prepare_cookies fast
-        mpv "${mo[@]}" --no-terminal "${COOKIE_ARGS[@]}" "$mix_url"
+        mpv "${mo[@]}" --no-terminal "$mix_url"
     ) </dev/null >/dev/null 2>&1 &
     disown 2>/dev/null || true
 }

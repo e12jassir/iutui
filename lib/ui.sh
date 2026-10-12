@@ -47,12 +47,7 @@ browse() { # view [query]
     else F+=(--color "${YT_FZF_COLORS:-bg:-1,bg+:-1,gutter:-1,border:238,header:241,info:241,prompt:1,pointer:1,marker:2,hl:4,hl+:4,spinner:1,label:238,query:-1,fg:-1,fg+:15}"); fi
     version_ge "$(fzf_version)" 0.58.0 && F+=(--ghost="$(t ghost)")
 
-    local default_play="window"
-    if [ "$view" = "music" ] || [ "$YT_DEFAULT_MODE" = "audio" ]; then
-        default_play="audio"
-    fi
-
-    B+=(--bind "enter:execute-silent($act play $default_play {1} {2} {3} {4} {5})")
+    B+=(--bind "enter:execute-silent($act play auto {1} {2} {3} {4} {5})")
     B+=(--bind "ctrl-m:execute-silent($act mix {1} {3} {4})")
     B+=(--bind "ctrl-p:execute-silent($act play pip {1} {2} {3} {4} {5})")
     B+=(--bind "ctrl-f:execute-silent($act play fs {1} {2} {3} {4} {5})")

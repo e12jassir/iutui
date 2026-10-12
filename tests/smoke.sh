@@ -175,8 +175,18 @@ hasnt "fresh cache: no start-sync bind" "$(cat "$FZF_ARGS_OUT")" "start:change-p
 eq "fresh cache: first row comes from cache" "$(cut -f1 "$FZF_STDIN_OUT" | head -n 1)" "vidAAAAAAA1"
 ( browse music ) >/dev/null 2>&1
 MUSIC_ARGS="$(cat "$FZF_ARGS_OUT")"
-has "fzf: music defaults to audio mode on enter" "$MUSIC_ARGS" "__do play audio {1}"
+has "fzf: enter binds to dynamic auto mode" "$MUSIC_ARGS" "__do play auto {1}"
 has "fzf: ctrl-m plays mix radio" "$MUSIC_ARGS" "ctrl-m:execute-silent("
+
+echo "player & mixes"
+# Test play_mix URL construction and RD stripping
+test_mix_url() {
+    local id=$1
+    local clean_id="${id#RD}"
+    echo "https://www.youtube.com/watch?v=${clean_id}&list=RD${clean_id}"
+}
+eq "play_mix strips RD prefix for clean playback" "$(test_mix_url RDJI2v5Tzn-g4)" "https://www.youtube.com/watch?v=JI2v5Tzn-g4&list=RDJI2v5Tzn-g4"
+eq "play_mix leaves regular ID untouched" "$(test_mix_url dqOAxZaMHMg)" "https://www.youtube.com/watch?v=dqOAxZaMHMg&list=RDdqOAxZaMHMg"
 
 echo "preview"
 PV="$(FZF_PREVIEW_COLUMNS=50 FZF_PREVIEW_LINES=30 YT_PREVIEW=none NO_COLOR=1 "$ROOT/bin/yt-thumb-preview" vidAAAAAAA1 "A one" "Chan A" "10:00" "1.5M" 2>&1)"
