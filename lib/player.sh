@@ -51,7 +51,7 @@ play_video() { # mode id url title channel dur
         # Fast path: extract direct stream URL via Android client (bypasses n-sig & web bot checks, ~1.5s)
         # and start mpv with instant zero-probe buffer (~0.05s)
         local stream_url=""
-        stream_url=$(ytdlp -g --no-warnings --extractor-args "youtube:player_client=android" -f "$vfmt" -- "$url" 2>/dev/null | head -n 1 || true)
+        stream_url=$(ytdlp --no-playlist -g --no-warnings --extractor-args "youtube:player_client=android" -f "$vfmt" -- "$url" 2>/dev/null | head -n 1 || true)
         if [ -n "$stream_url" ]; then
             mpv "${mo[@]}" "$stream_url" && exit 0
         fi

@@ -153,6 +153,7 @@ eq "history shows newest first" "$(emit_view history cached | cut -f1 | head -n 
 echo "actions"
 eq "ids are validated" "$(valid_id 'x; rm -rf /' && echo bad || echo ok)" "ok"
 eq "URLs never start with a dash" "$(canonical_url abcdefghijk '-oevil')" "https://www.youtube.com/watch?v=abcdefghijk"
+eq "canonical_url transforms RD mix playlist correctly" "$(canonical_url RDfWh0t69MGVk 'https://www.youtube.com/playlist?list=RDfWh0t69MGVk')" "https://www.youtube.com/watch?v=fWh0t69MGVk&list=RDfWh0t69MGVk"
 do_action copy 'not valid!' ; ok "invalid ids are ignored by actions"
 
 echo "ui wiring (fzf stub records its arguments)"

@@ -129,5 +129,24 @@ open_url() {
 }
 
 canonical_url() { # id url -> a safe https URL (never something that starts with "-")
-    case $2 in https://*) printf '%s' "$2" ;; *) printf 'https://www.youtube.com/watch?v=%s' "$1" ;; esac
+    local raw_id=$1 raw_url=$2
+    if [[ $raw_id == RD* ]]; then
+        local stripped="${raw_id#RD}"
+        printf 'https://www.youtube.com/watch?v=%s&list=%s' "$stripped" "$raw_id"
+        return 0
+    fi
+    case "$raw_url" in
+        *"list=RD"*'&'*v=*)
+            printf '%s' "$raw_url" ;;
+        *v=*'&'*"list=RD"*)
+            printf '%s' "$raw_url" ;;
+        *"playlist?list=RD"*)
+            local p_id="${raw_url##*list=RD}"
+            p_id="${p_id%%&*}"
+            printf 'https://www.youtube.com/watch?v=%s&list=RD%s' "$p_id" "$p_id" ;;
+        https://*)
+            printf '%s' "$raw_url" ;;
+        *)
+            printf 'https://www.youtube.com/watch?v=%s' "$raw_id" ;;
+    esac
 }
