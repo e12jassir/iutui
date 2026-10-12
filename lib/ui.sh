@@ -48,7 +48,7 @@ browse() { # view [query]
     version_ge "$(fzf_version)" 0.58.0 && F+=(--ghost="$(t ghost)")
 
     B+=(--bind "enter:execute-silent($act play auto {1} {2} {3} {4} {5})")
-    B+=(--bind "ctrl-m:execute-silent($act mix {1} {3} {4})")
+    B+=(--bind "alt-m:execute-silent($act mix {1} {3} {4})" --bind "ctrl-x:execute-silent($act mix {1} {3} {4})")
     B+=(--bind "ctrl-p:execute-silent($act play pip {1} {2} {3} {4} {5})")
     B+=(--bind "ctrl-f:execute-silent($act play fs {1} {2} {3} {4} {5})")
     B+=(--bind "ctrl-a:execute-silent($act play audio {1} {2} {3} {4} {5})")

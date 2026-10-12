@@ -111,7 +111,6 @@ play_mix() { # id title channel
         --cache-pause=no
         --demuxer-readahead-secs=2
         --ytdl-format="ba/b"
-        --ytdl-raw-options=yes-playlist=
     )
 
     prepare_cookies fast

@@ -176,7 +176,9 @@ eq "fresh cache: first row comes from cache" "$(cut -f1 "$FZF_STDIN_OUT" | head 
 ( browse music ) >/dev/null 2>&1
 MUSIC_ARGS="$(cat "$FZF_ARGS_OUT")"
 has "fzf: enter binds to dynamic auto mode" "$MUSIC_ARGS" "__do play auto {1}"
-has "fzf: ctrl-m plays mix radio" "$MUSIC_ARGS" "ctrl-m:execute-silent("
+has "fzf: alt-m plays mix radio" "$MUSIC_ARGS" "alt-m:execute-silent("
+has "fzf: ctrl-x plays mix radio" "$MUSIC_ARGS" "ctrl-x:execute-silent("
+hasnt "fzf: ctrl-m is never bound (prevents enter hijack)" "$MUSIC_ARGS" "ctrl-m:"
 
 echo "player & mixes"
 # Test play_mix URL construction and RD stripping
