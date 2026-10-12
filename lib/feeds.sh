@@ -93,7 +93,7 @@ emit_rows() { # view mode query
         foryou)  [ "$YT_INTERLEAVE" = 1 ] && o+=(--interleave)
                  view_raw foryou "$mode" | format_rows "${o[@]}" ;;
         subs)    view_raw subs "$mode" | format_rows "${o[@]}" ;;
-        music)   view_raw music "$mode" | format_rows "${o[@]}" ;;
+        music)   view_raw music "$mode" | format_rows --music "${o[@]}" ;;
         later)   format_rows --stored --reverse < "$WATCHLATER_FILE" ;;
         history) format_rows --stored --reverse < "$HISTORY_FILE" ;;
         search)  [ -n "$query" ] && search_raw "$query" "$mode" | format_rows "${o[@]}" ;;

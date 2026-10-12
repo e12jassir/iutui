@@ -82,6 +82,8 @@ PY
 )" "ok"
 NC="$(printf '%s\n' "$RAW" | NO_COLOR=1 "$ROOT/bin/yt-fmt" | cut -f7 | head -n 1)"
 hasnt "NO_COLOR removes ANSI" "$NC" $'\033'
+MC="$(printf '%s\n' "$RAW" | "$ROOT/bin/yt-fmt" --music --no-color | cut -f7 | head -n 1)"
+has "music icon rendered in rows" "$MC" "󰎆"
 printf 'idid00000\tT\tC\t1:00\thttps://x\t1\tNA\textra\n' | "$ROOT/bin/yt-fmt" --stored >/dev/null && ok "stored rows accepted"
 
 echo "config"

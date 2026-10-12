@@ -153,6 +153,7 @@ def main():
     ap.add_argument("--history", default="")
     ap.add_argument("--later", default="")
     ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--music", action="store_true", help="render music track icons")
     args = ap.parse_args()
 
     color = not (args.no_color or os.environ.get("NO_COLOR"))
@@ -195,6 +196,8 @@ def main():
             mark = (YELLOW + "★ " + RESET) if color else "★ "
         elif row["id"] in watched:
             mark = (DIM + "✓ " + RESET) if color else "✓ "
+        elif args.music:
+            mark = (YELLOW + "󰎆 " + RESET) if color else "󰎆 "
         else:
             mark = "  "
         title = fit(row["title"], title_w)
