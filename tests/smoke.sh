@@ -162,7 +162,7 @@ has "fzf: enter plays without leaving the list" "$ARGS" "enter:execute-silent("
 has "fzf: stale-while-revalidate bind on start" "$ARGS" "start:change-prompt("
 has "fzf: ctrl-r reloads the current view" "$ARGS" "reload-sync("
 has "fzf: ctrl-s searches with {q}" "$ARGS" "search {q})"
-has "fzf: tabs alt-1..4" "$ARGS" "alt-4:"
+has "fzf: tabs alt-1..5" "$ARGS" "alt-5:"
 has "fzf: preview wired to helper" "$ARGS" "yt-thumb-preview {1} {3} {4} {5} {6}"
 has "fzf: ghost text on fzf >= 0.58" "$ARGS" "--ghost="
 has "no cache yet: list starts with a syncing row" "$(cat "$FZF_STDIN_OUT")" "syncing"
@@ -170,6 +170,9 @@ emit_view foryou refresh >/dev/null
 ( browse foryou ) >/dev/null 2>&1
 hasnt "fresh cache: no start-sync bind" "$(cat "$FZF_ARGS_OUT")" "start:change-prompt("
 eq "fresh cache: first row comes from cache" "$(cut -f1 "$FZF_STDIN_OUT" | head -n 1)" "vidAAAAAAA1"
+( browse music ) >/dev/null 2>&1
+MUSIC_ARGS="$(cat "$FZF_ARGS_OUT")"
+has "fzf: music defaults to audio mode on enter" "$MUSIC_ARGS" "__do play audio {1}"
 
 echo "preview"
 PV="$(FZF_PREVIEW_COLUMNS=50 FZF_PREVIEW_LINES=30 YT_PREVIEW=none NO_COLOR=1 "$ROOT/bin/yt-thumb-preview" vidAAAAAAA1 "A one" "Chan A" "10:00" "1.5M" 2>&1)"
@@ -185,6 +188,9 @@ has "doctor lists fzf" "$DOC" "fzf"
 has "doctor checks the JS runtime" "$DOC" "js runtime"
 eq "doctor passes with all deps present" "$RC" "0"
 has "usage mentions search" "$(bash "$ROOT/bin/yt" --help)" "search YouTube"
+has "usage mentions settings" "$(bash "$ROOT/bin/yt" --help)" "--settings"
+has "menu options include music and settings" "$(build_menu_options)" "música"
+hasnt "menu options do not include trending" "$(build_menu_options)" "tendencias"
 
 echo
 printf '%d passed, %d failed\n' "$PASS" "$FAIL"

@@ -14,9 +14,11 @@ YT_COOKIE_TTL=21600         # seconds between reads of your browser's cookie dat
 YT_PREFETCH=24              # thumbnails pre-downloaded in parallel (0 = off)
 YT_THUMB_QUALITY=mq         # mq (fast, 16:9) | hq | max
 
-# ── playback ─────────────────────────────────────────────
-YT_DEFAULT_MODE=window      # window | pip | fs
-YT_QUALITY=1080             # max video height (0 = no limit)
+# ── playback & music ─────────────────────────────────────
+YT_DEFAULT_MODE=window      # window | pip | fs | audio
+YT_QUALITY=1080             # max video height (0 = no limit, 1080, 720, 480)
+YT_AUDIO_VOLUME=75          # initial mpv volume (0-150)
+YT_MUSIC_MODE=bg            # bg (background detached + notification) | term (foreground interactive)
 YT_PLAYBACK=pipe            # pipe (instant & reliable, bypasses 403 hang) | direct | auto
 
 # ── login (cookies) ──────────────────────────────────────
@@ -25,12 +27,14 @@ YT_BROWSERS="zen firefox librewolf brave chromium chrome"   # detection order
 # YT_BROWSER=firefox:/path/to/profile    # force one source (any yt-dlp --cookies-from-browser spec)
 # YT_COOKIES_FILE=~/cookies.txt          # or use an exported Netscape cookies file
 
-# ── interface ────────────────────────────────────────────
+# ── interface & downloads ────────────────────────────────
 YT_LANG=auto                # auto | es | en
 YT_PREVIEW=auto             # auto | kitty | chafa | none
 YT_HEIGHT=95%
 YT_NOTIFY=1
 # YT_BROWSER_CMD=firefox    # ^o opens this (default: $BROWSER, xdg-open or open)
 # YT_DOWNLOAD_DIR=~/Videos
+# YT_DOWNLOAD_AUDIO=0       # 1 = download audio-only (mp3/m4a), 0 = video
 # YT_YTDLP_ARGS="--js-runtimes deno"   # extra yt-dlp flags
 # YT_FZF_OPTS=""
+

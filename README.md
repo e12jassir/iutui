@@ -37,20 +37,21 @@ yt --doctor         # verifies everything below
 ```sh
 yt                 # home view (for you if you are signed in, else history/search)
 yt lofi hip hop    # search
-yt --view subs     # foryou | subs | later | history | search
+yt --view music    # foryou | music | subs | later | history | search
+yt --settings      # interactive settings menu (quality, volume, preview, cookies)
 ```
 
 | Key | Action | Key | Action |
 |---|---|---|---|
-| `enter` | play (window) | `^w` | save / unsave |
+| `enter` | play (window / audio in music) | `^w` | save / unsave |
 | `^p` | mini picture-in-picture | `^y` | copy `youtu.be` link |
-| `^f` | fullscreen | `^d` | download |
+| `^f` | fullscreen | `^d` | download (video/mp3) |
 | `^a` | audio only | `^o` | open in browser |
 | `^s` | search YouTube with what you typed | `^r` | reload this view |
-| `alt-1…4` | for you · subscriptions · saved · history | `^/` | toggle preview |
+| `alt-1…5` | for you · music · subs · saved · history | `^/` | toggle preview |
 
 Signed in? `yt` reads the session from Zen, Firefox, LibreWolf, Brave, Chromium or Chrome.
-Not signed in? Search, history and saved videos still work. (YouTube retired its Trending page in 2025, so there is no guest feed.)
+Not signed in? Search, history, saved videos and manual audio playback still work.
 
 ## Configuration
 

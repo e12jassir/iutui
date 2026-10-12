@@ -1,16 +1,19 @@
 PREFIX ?= $(HOME)/.local
 BINDIR ?= $(PREFIX)/bin
+LIBDIR ?= $(PREFIX)/lib/yt
 FILES  := yt yt-fmt yt-thumb-preview
 
 .PHONY: install uninstall test lint
 
 install:
-	@mkdir -p $(BINDIR)
+	@mkdir -p $(BINDIR) $(LIBDIR)
 	@for f in $(FILES); do install -m 755 bin/$$f $(BINDIR)/$$f; done
-	@echo "yt installed in $(BINDIR)"
+	@install -m 644 lib/*.sh $(LIBDIR)/
+	@echo "yt installed in $(BINDIR) (libs in $(LIBDIR))"
 
 uninstall:
 	@for f in $(FILES); do rm -f $(BINDIR)/$$f; done
+	@rm -rf $(LIBDIR)
 	@echo "yt removed from $(BINDIR)"
 
 test:

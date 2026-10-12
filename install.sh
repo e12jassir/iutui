@@ -5,11 +5,13 @@ set -euo pipefail
 
 PREFIX="${PREFIX:-$HOME/.local}"
 BINDIR="${BINDIR:-$PREFIX/bin}"
+LIBDIR="${LIBDIR:-$PREFIX/lib/yt}"
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FILES=(yt yt-fmt yt-thumb-preview)
 
 if [ "${1:-}" = "--uninstall" ]; then
     for f in "${FILES[@]}"; do rm -f "$BINDIR/$f"; done
+    rm -rf "$LIBDIR"
     echo "yt removed from $BINDIR (config, cache and history were left untouched)"
     exit 0
 fi
@@ -20,8 +22,9 @@ if [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
 fi
 
 echo "==> Installing yt into $BINDIR"
-mkdir -p "$BINDIR"
+mkdir -p "$BINDIR" "$LIBDIR"
 for f in "${FILES[@]}"; do install -m 755 "$SRC/bin/$f" "$BINDIR/$f"; done
+install -m 644 "$SRC"/lib/*.sh "$LIBDIR/"
 
 CONFIG_DEST="${XDG_CONFIG_HOME:-$HOME/.config}/yt"
 if [ ! -f "$CONFIG_DEST/config" ]; then
