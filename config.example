@@ -12,7 +12,7 @@ YT_HOME=auto                # auto | foryou | subs | later | history | search
 YT_CACHE_TTL=900            # seconds a feed is considered fresh (stale data still shows instantly)
 YT_COOKIE_TTL=21600         # seconds between reads of your browser's cookie database
 YT_PREFETCH=24              # thumbnails pre-downloaded in parallel (0 = off)
-YT_THUMB_QUALITY=mq         # mq (fast, 16:9) | hq | max
+YT_THUMB_QUALITY=max         # max (HD maxresdefault with hq fallback) | hq | mq
 
 # ── playback & music ─────────────────────────────────────
 YT_DEFAULT_MODE=window      # window | pip | fs | audio

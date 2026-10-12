@@ -108,8 +108,17 @@ prefetch_thumbs() { # rows-file (deleted when done): warm the first N thumbnails
     awk -F'\t' -v n="$YT_PREFETCH" 'NR <= n && $1 ~ /^[A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-]+$/ { print $1 }' "$f" |
         xargs -P 8 -I{} sh -c '
             out="$1/$2_$3.jpg"; [ -s "$out" ] && exit 0
-            if curl -sfL --max-time 6 -o "$out.part.$$" "https://i.ytimg.com/vi/$2/$3.jpg" && [ -s "$out.part.$$" ]
-            then mv -f "$out.part.$$" "$out"; else rm -f "$out.part.$$"; fi' _ "$THUMB_DIR" {} "$q"
+            if curl -sfL --max-time 6 -o "$out.part.$$" "https://i.ytimg.com/vi/$2/$3.jpg" && [ -s "$out.part.$$" ]; then
+                if [ "$3" = "maxresdefault" ] && [ "$(stat -c%s "$out.part.$$" 2>/dev/null || echo 0)" -lt 3000 ]; then
+                    rm -f "$out.part.$$"
+                    curl -sfL --max-time 6 -o "$1/$2_hqdefault.jpg" "https://i.ytimg.com/vi/$2/hqdefault.jpg" 2>/dev/null || true
+                else
+                    mv -f "$out.part.$$" "$out"
+                fi
+            else
+                rm -f "$out.part.$$"
+                [ "$3" = "maxresdefault" ] && curl -sfL --max-time 6 -o "$1/$2_hqdefault.jpg" "https://i.ytimg.com/vi/$2/hqdefault.jpg" 2>/dev/null || true
+            fi' _ "$THUMB_DIR" {} "$q"
     rm -f "$f"
 }
 

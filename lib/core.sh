@@ -31,8 +31,16 @@ is_kitty_term() {
 
 kitty_clear() {
     if is_kitty_term; then
-        if have kitten; then kitten icat --clear --silent >/dev/null 2>&1
-        elif have kitty; then kitty +kitten icat --clear --silent >/dev/null 2>&1
+        if [ -c /dev/tty ]; then
+            if have kitten; then kitten icat --clear --silent </dev/tty >/dev/tty 2>/dev/null || true
+            elif have kitty; then kitty +kitten icat --clear --silent </dev/tty >/dev/tty 2>/dev/null || true
+            fi
+            printf '\033_Ga=d,d=a\033\\' >/dev/tty 2>/dev/null || true
+        elif [ -t 1 ]; then
+            if have kitten; then kitten icat --clear --silent 2>/dev/null || true
+            elif have kitty; then kitty +kitten icat --clear --silent 2>/dev/null || true
+            fi
+            printf '\033_Ga=d,d=a\033\\' 2>/dev/null || true
         fi
     fi
 }

@@ -220,6 +220,7 @@ main_menu() {
 
         if [ -n "$query" ]; then
             browse search "$query"
+            kitty_clear
         else
             [ -z "$item" ] && return 0
             case "$item" in
@@ -231,6 +232,7 @@ main_menu() {
                 *"ajustes"*)        settings_menu ;;
                 *"salir"*)          return 0 ;;
             esac
+            kitty_clear
         fi
     done
 }

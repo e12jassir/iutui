@@ -39,7 +39,7 @@ set_defaults() {
     : "${YT_COOKIE_TTL:=21600}" "${YT_AUDIO_VOLUME:=75}" "${YT_QUALITY:=1080}"
     : "${YT_MUSIC_MODE:=bg}" "${YT_DOWNLOAD_AUDIO:=0}"
     : "${YT_PREFETCH:=24}" "${YT_DEFAULT_MODE:=window}" "${YT_PLAYBACK:=auto}"
-    : "${YT_HOME:=auto}" "${YT_LANG:=auto}" "${YT_PREVIEW:=auto}" "${YT_THUMB_QUALITY:=mq}"
+    : "${YT_HOME:=auto}" "${YT_LANG:=auto}" "${YT_PREVIEW:=auto}" "${YT_THUMB_QUALITY:=max}"
     : "${YT_HIDE_SHORTS:=1}" "${YT_INTERLEAVE:=1}" "${YT_NOTIFY:=1}" "${YT_HEIGHT:=95%}"
     : "${YT_COOKIES:=auto}" "${YT_COOKIES_FILE:=}" "${YT_BROWSER:=}"
     : "${YT_BROWSERS:=zen firefox librewolf brave chromium chrome}"

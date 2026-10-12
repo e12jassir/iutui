@@ -17,8 +17,9 @@ icat() {
     fi
 }
 clear_icat() {
-    if is_kitty && [ -t 1 ]; then
-        icat --clear --silent 2>/dev/null || true
+    if is_kitty; then
+        icat --clear --silent </dev/tty >/dev/tty 2>/dev/null || true
+        printf '\033_Ga=d,d=a\033\\' >/dev/tty 2>/dev/null || printf '\033_Ga=d,d=a\033\\' 2>/dev/null || true
     fi
 }
 
@@ -70,8 +71,19 @@ fetch() { # quality -> file
 
 if [ "$mode" != "none" ] && [ ! -s "$file" ] && command -v curl >/dev/null 2>&1; then
     mkdir -p "$thumbs"
-    fetch "$q" || { [ "$q" = "maxresdefault" ] && q="hqdefault" && fetch "$q"; }
+    if ! fetch "$q"; then
+        if [ "$q" = "maxresdefault" ]; then
+            q="hqdefault"
+            file="$thumbs/${id}_${q}.jpg"
+            if ! fetch "$q"; then
+                q="mqdefault"
+                file="$thumbs/${id}_${q}.jpg"
+                fetch "$q" || true
+            fi
+        fi
+    fi
 fi
+
 
 
 cols="${FZF_PREVIEW_COLUMNS:-60}"
