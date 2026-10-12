@@ -190,6 +190,15 @@ test_mix_url() {
 eq "play_mix strips RD prefix for clean playback" "$(test_mix_url RDJI2v5Tzn-g4)" "https://www.youtube.com/watch?v=JI2v5Tzn-g4&list=RDJI2v5Tzn-g4"
 eq "play_mix leaves regular ID untouched" "$(test_mix_url dqOAxZaMHMg)" "https://www.youtube.com/watch?v=dqOAxZaMHMg&list=RDdqOAxZaMHMg"
 
+# Test stop_prev_playback PID file management
+sleep 10 &
+DUMMY_PID=$!
+echo "$DUMMY_PID" > "$STATE_DIR/audio.pid"
+stop_prev_playback
+kill -0 "$DUMMY_PID" 2>/dev/null && BAD_KILL=1 || BAD_KILL=0
+eq "stop_prev_playback terminates previous player process" "$BAD_KILL" "0"
+eq "stop_prev_playback cleans up PID file" "$([ -f "$STATE_DIR/audio.pid" ] && echo 1 || echo 0)" "0"
+
 echo "preview"
 PV="$(FZF_PREVIEW_COLUMNS=50 FZF_PREVIEW_LINES=30 YT_PREVIEW=none NO_COLOR=1 "$ROOT/bin/yt-thumb-preview" vidAAAAAAA1 "A one" "Chan A" "10:00" "1.5M" 2>&1)"
 has "preview prints title" "$PV" "A one"
