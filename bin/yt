@@ -109,6 +109,7 @@ do_action() {
     local act=${1:-}; shift
     case $act in
         play)     valid_id "${2:-}" && play_video "$@" ;;
+        mix)      valid_id "${1:-}" && play_mix "$@" ;;
         copy)     valid_id "${1:-}" && { copy_text "https://youtu.be/$1"; notify "📋 youtu.be/$1"; } ;;
         later)    toggle_later "$@" ;;
         download) valid_id "${1:-}" && download_video "$@" ;;

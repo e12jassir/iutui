@@ -175,6 +175,7 @@ eq "fresh cache: first row comes from cache" "$(cut -f1 "$FZF_STDIN_OUT" | head 
 ( browse music ) >/dev/null 2>&1
 MUSIC_ARGS="$(cat "$FZF_ARGS_OUT")"
 has "fzf: music defaults to audio mode on enter" "$MUSIC_ARGS" "__do play audio {1}"
+has "fzf: ctrl-m plays mix radio" "$MUSIC_ARGS" "ctrl-m:execute-silent("
 
 echo "preview"
 PV="$(FZF_PREVIEW_COLUMNS=50 FZF_PREVIEW_LINES=30 YT_PREVIEW=none NO_COLOR=1 "$ROOT/bin/yt-thumb-preview" vidAAAAAAA1 "A one" "Chan A" "10:00" "1.5M" 2>&1)"

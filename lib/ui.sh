@@ -53,6 +53,7 @@ browse() { # view [query]
     fi
 
     B+=(--bind "enter:execute-silent($act play $default_play {1} {2} {3} {4} {5})")
+    B+=(--bind "ctrl-m:execute-silent($act mix {1} {3} {4})")
     B+=(--bind "ctrl-p:execute-silent($act play pip {1} {2} {3} {4} {5})")
     B+=(--bind "ctrl-f:execute-silent($act play fs {1} {2} {3} {4} {5})")
     B+=(--bind "ctrl-a:execute-silent($act play audio {1} {2} {3} {4} {5})")

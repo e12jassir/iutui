@@ -66,3 +66,42 @@ play_video() { # mode id url title channel dur
     ) </dev/null >/dev/null 2>&1 &
     disown 2>/dev/null || true
 }
+
+play_mix() { # id title channel
+    local id=$1 title=$2 channel=${3:--}
+    valid_id "$id" || return 0
+    local mix_url="https://www.youtube.com/watch?v=${id}&list=RD${id}"
+    record_history "$id" "$title (Mix)" "$channel" "MIX" "$mix_url"
+
+    local thumb_file="$THUMB_DIR/${id}_maxresdefault.jpg"
+    [ -s "$thumb_file" ] || thumb_file="$THUMB_DIR/${id}_hqdefault.jpg"
+    [ -s "$thumb_file" ] || thumb_file="$THUMB_DIR/${id}_mqdefault.jpg"
+
+    if [ -s "$thumb_file" ] && [ "${YT_NOTIFY:-1}" = 1 ] && have notify-send; then
+        notify-send --app-name=yt -i "$thumb_file" "📻 Mix Radio: $title" "$channel" >/dev/null 2>&1 || notify "📻 Mix: $title"
+    else
+        notify "📻 Mix: $title"
+    fi
+
+    local -a mo=(
+        --hwdec=auto-safe
+        --really-quiet
+        --force-media-title="Mix: $title"
+        --no-video
+        --volume="$YT_AUDIO_VOLUME"
+        --cache-pause=no
+        --demuxer-readahead-secs=2
+        --ytdl-format="ba/b"
+    )
+
+    if [ "$YT_MUSIC_MODE" = "term" ]; then
+        mpv "${mo[@]}" "$mix_url"
+        return 0
+    fi
+
+    (
+        prepare_cookies fast
+        mpv "${mo[@]}" --no-terminal "${COOKIE_ARGS[@]}" "$mix_url"
+    ) </dev/null >/dev/null 2>&1 &
+    disown 2>/dev/null || true
+}

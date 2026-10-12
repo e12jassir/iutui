@@ -43,12 +43,13 @@ yt --settings      # interactive settings menu (quality, volume, preview, cookie
 
 | Key | Action | Key | Action |
 |---|---|---|---|
-| `enter` | play (window / audio in music) | `^w` | save / unsave |
-| `^p` | mini picture-in-picture | `^y` | copy `youtu.be` link |
-| `^f` | fullscreen | `^d` | download (video/mp3) |
-| `^a` | audio only | `^o` | open in browser |
-| `^s` | search YouTube with what you typed | `^r` | reload this view |
-| `alt-1…5` | for you · music · subs · saved · history | `^/` | toggle preview |
+| `enter` | play (window / audio in music) | `^m` | mix radio (continuous autoplay) |
+| `^p` | mini picture-in-picture | `^w` | save / unsave |
+| `^f` | fullscreen | `^y` | copy `youtu.be` link |
+| `^a` | audio only | `^d` | download (video/mp3) |
+| `^s` | search YouTube with what you typed | `^o` | open in browser |
+| `alt-1…5` | for you · music · subs · saved · history | `^r` | reload this view |
+| `^/` | toggle preview | | |
 
 Signed in? `yt` reads the session from Zen, Firefox, LibreWolf, Brave, Chromium or Chrome.
 Not signed in? Search, history, saved videos and manual audio playback still work.
