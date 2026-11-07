@@ -220,6 +220,7 @@ eq "bad number falls back to default" "$YT_QUALITY" "1080"
 [ ! -e "$TMP/pwned1" ] && [ ! -e "$TMP/pwned2" ] && ok "config is data, never executed" || bad "config executed code"
 eq "env beats config file" "$( ( YT_FEED_SIZE=9; init light; echo "$YT_FEED_SIZE" ) )" "9"
 rm -f "$XDG_CONFIG_HOME/yt/config"; unset YT_FEED_SIZE YT_SEARCH_SIZE YT_BROWSER_CMD YT_DOWNLOAD_DIR YT_QUALITY; init light
+eq "YT_PLAYBACK defaults to auto" "$( ( unset YT_PLAYBACK; set_defaults; echo "$YT_PLAYBACK" ) )" "auto"
 
 echo "cookies"
 prepare_cookies
@@ -521,6 +522,25 @@ for _ in $(seq 1 150); do [ -s "$MPV_LOG" ] && break; sleep 0.02; done
 MPV_ARGS="$(cat "$MPV_LOG")"
 has "mpv launches with the IPC server" "$MPV_ARGS" "--input-ipc-server=$YT_SOCK"
 has "mpv launches idle so the queue survives" "$MPV_ARGS" "--idle=yes"
+rm -f "$STATE_DIR/audio.pid"
+
+# ── F2-T3: native direct seek + authenticated pipe fallback ──────────────────
+: > "$MPV_LOG"; : > "$STUB_LOG"
+YT_PLAYBACK=direct play_video window vidAAAAAAA1 'https://www.youtube.com/watch?v=vidAAAAAAA1' 'A one' 'Chan A' '10:00' >/dev/null 2>&1
+for _ in $(seq 1 150); do [ -s "$MPV_LOG" ] && break; sleep 0.02; done
+DIRECT_ARGS="$(cat "$MPV_LOG")"
+has "direct playback configures mpv's ytdl format" "$DIRECT_ARGS" "--ytdl-format=bestvideo"
+has "direct playback authenticates ytdl_hook with cookies" "$DIRECT_ARGS" "--ytdl-raw-options-append=cookies="
+has "direct playback hands the URL to mpv natively" "$DIRECT_ARGS" "https://www.youtube.com/watch?v=vidAAAAAAA1"
+hasnt "direct playback never builds a yt-dlp pipe" "$(cat "$STUB_LOG")" "--remux-video mkv"
+
+: > "$MPV_LOG"; : > "$STUB_LOG"
+YT_PLAYBACK=pipe play_video window vidAAAAAAA1 'https://www.youtube.com/watch?v=vidAAAAAAA1' 'A one' 'Chan A' '10:00' >/dev/null 2>&1
+for _ in $(seq 1 150); do [ -s "$MPV_LOG" ] && break; sleep 0.02; done
+PIPE_ARGS="$(cat "$MPV_LOG")"
+has "pipe playback extracts through yt-dlp" "$(cat "$STUB_LOG")" "--remux-video mkv"
+has "pipe playback feeds mpv over stdin" "$PIPE_ARGS" " -"
+has "pipe playback still carries the ytdl format" "$PIPE_ARGS" "--ytdl-format=bestvideo"
 rm -f "$STATE_DIR/audio.pid"
 
 ( browse foryou ) >/dev/null 2>&1

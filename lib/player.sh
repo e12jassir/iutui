@@ -67,13 +67,24 @@ play_video() { # mode id url title channel dur
 
     vfmt=$(build_format "$mode" "$YT_QUALITY")
 
+    # ytdl_hook settings travel with every mpv instance so both native direct
+    # playback and later `loadfile ... replace` IPC swaps authenticate and
+    # resolve the same format without re-extraction.
+    prepare_cookies fast
+    local ck_tmp="${COOKIE_TEMP:-}"
+    COOKIE_TEMP=""
+
     local -a mo=(
         --hwdec=auto-safe
         --really-quiet
         --force-media-title="$title"
         --cache-pause=no
         --demuxer-readahead-secs=2
+        --ytdl-format="$vfmt"
     )
+    if [ "${#COOKIE_ARGS[@]}" -ge 2 ] && [ "${COOKIE_ARGS[0]}" = "--cookies" ]; then
+        mo+=(--ytdl-raw-options-append="cookies=${COOKIE_ARGS[1]}")
+    fi
     case $mode in
         pip)   mo+=(--no-terminal --no-fs --ontop --title="Picture-in-Picture" --geometry=30%x30%-20-20 --autofit=28%) ;;
         fs)    mo+=(--no-terminal --fs --title="$title") ;;
@@ -85,6 +96,7 @@ play_video() { # mode id url title channel dur
                 stop_prev_playback
                 # Foreground interactive player in terminal
                 mpv "${mo[@]}" "$url"
+                [ -n "$ck_tmp" ] && rm -f "$ck_tmp"
                 return 0
             else
                 mo+=(--no-terminal)
@@ -103,15 +115,27 @@ play_video() { # mode id url title channel dur
 
     stop_prev_playback
 
-    prepare_cookies fast
-    local ck_tmp="${COOKIE_TEMP:-}"
-    COOKIE_TEMP=""
-
     [ -n "${YT_SOCK:-}" ] && mo+=(--input-ipc-server="$YT_SOCK" --idle=yes)
+
+    # Native direct playback lets mpv's ytdl_hook talk to YouTube itself, so
+    # seeking works in both directions. Pipe mode keeps the authenticated
+    # yt-dlp stream as the reliability path; a direct attempt that exits with
+    # an error (403, region lock, ...) falls back to that same pipe.
+    local direct=0
+    case ${YT_PLAYBACK:-auto} in
+        direct|auto) direct=1 ;;
+    esac
 
     set -m
     (
         trap '[ -n "$ck_tmp" ] && rm -f "$ck_tmp"' EXIT
+        if [ "$direct" = 1 ]; then
+            mpv "${mo[@]}" "$url" </dev/null
+            direct_rc=$?
+            if [ "$direct_rc" -eq 0 ]; then
+                exit 0
+            fi
+        fi
         if [ "$mode" = "audio" ]; then
             ytdlp "${COOKIE_ARGS[@]}" -f "$vfmt" -o - -- "$url" 2>/dev/null | mpv "${mo[@]}" -
         else

@@ -19,7 +19,7 @@ YT_DEFAULT_MODE=window      # window | pip | fs | audio
 YT_QUALITY=1080             # max video height (0 = no limit, 1080, 720, 480)
 YT_AUDIO_VOLUME=75          # initial mpv volume (0-150)
 YT_MUSIC_MODE=bg            # bg (background detached + notification) | term (foreground interactive)
-YT_PLAYBACK=pipe            # pipe (instant & reliable, bypasses 403 hang) | direct | auto
+YT_PLAYBACK=auto            # auto (native direct, pipe fallback on 403) | direct | pipe
 
 # ── login (cookies) ──────────────────────────────────────
 YT_COOKIES=auto             # auto | off (guest: search only)
