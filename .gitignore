@@ -14,6 +14,9 @@ PLAN*.md
 PROPUESTAS*.md
 repomix*
 
+# Build artifacts
+bin/yt-tui
+
 # OS & Editor
 .DS_Store
 *.swp

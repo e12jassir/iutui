@@ -3,7 +3,13 @@ BINDIR ?= $(PREFIX)/bin
 LIBDIR ?= $(PREFIX)/lib/yt
 FILES  := yt yt-fmt yt-thumb-preview
 
-.PHONY: install uninstall test lint verify
+.PHONY: install uninstall test test-bash test-go build clean lint verify
+
+build:
+	@go build -o bin/yt-tui ./cmd/yt-tui
+
+clean:
+	@rm -f bin/yt-tui
 
 install:
 	@mkdir -p $(BINDIR) $(LIBDIR)
@@ -16,8 +22,13 @@ uninstall:
 	@rm -rf $(LIBDIR)
 	@echo "yt removed from $(BINDIR)"
 
-test:
+test-bash:
 	@bash tests/smoke.sh
+
+test-go:
+	@go test -v ./...
+
+test: test-bash test-go
 
 verify: lint test
 
