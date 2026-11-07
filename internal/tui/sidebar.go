@@ -9,7 +9,7 @@ import (
 )
 
 const (
-	SidebarWidth = 24
+	SidebarWidth = 22
 )
 
 var (
@@ -17,26 +17,22 @@ var (
 			Width(SidebarWidth).
 			BorderStyle(lipgloss.NormalBorder()).
 			BorderRight(true).
-			BorderForeground(lipgloss.Color("#2C2E3B")).
+			BorderForeground(lipgloss.Color("#2E3346")).
 			Padding(1, 1)
 
 	logoStyle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(lipgloss.Color("#FF3333"))
+			Foreground(lipgloss.Color("#FF2A55"))
 
 	tabActiveStyle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(lipgloss.Color("#FFFFFF")).
-			Background(lipgloss.Color("#FF3333")).
-			Padding(0, 1)
+			Foreground(lipgloss.Color("#FF2A55"))
 
 	tabNormalStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#9CA3AF")).
-			Padding(0, 1)
+			Foreground(lipgloss.Color("#9CA3AF"))
 
 	tabFocusedUnselectedStyle = lipgloss.NewStyle().
-					Foreground(lipgloss.Color("#00E5FF")).
-					Padding(0, 1)
+					Foreground(lipgloss.Color("#38BDF8"))
 
 	helpStyle = lipgloss.NewStyle().
 			Foreground(colorDim).
@@ -45,7 +41,7 @@ var (
 
 // RenderSidebar renders the left navigation panel with tabs and hotkey hints.
 func RenderSidebar(activeTab model.Tab, hasFocus bool, height int) string {
-	logo := logoStyle.Render("▶ YTX-CLI") + "\n" + lipgloss.NewStyle().Foreground(colorDim).Render("Terminal YouTube")
+	logo := logoStyle.Render("▶ YTX-CLI") + "\n" + lipgloss.NewStyle().Foreground(colorDim).Render("YouTube Terminal")
 
 	tabs := []model.Tab{
 		model.TabHome,
@@ -59,7 +55,7 @@ func RenderSidebar(activeTab model.Tab, hasFocus bool, height int) string {
 	for _, t := range tabs {
 		label := fmt.Sprintf("%s %s", t.Icon(), t.String())
 		if t == activeTab {
-			renderedTabs = append(renderedTabs, tabActiveStyle.Render(label))
+			renderedTabs = append(renderedTabs, tabActiveStyle.Render("▶ "+label))
 		} else if hasFocus {
 			renderedTabs = append(renderedTabs, tabFocusedUnselectedStyle.Render("  "+label))
 		} else {
@@ -72,10 +68,12 @@ func RenderSidebar(activeTab model.Tab, hasFocus bool, height int) string {
 	helpContent := lipgloss.JoinVertical(
 		lipgloss.Left,
 		helpStyle.Render("Atajos:"),
-		lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render("Tab    Panel"),
+		lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render("Tab    Paneles"),
 		lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render("h/j/k/l Mover"),
 		lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render("Enter  Play"),
+		lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render("Espacio Pausa"),
 		lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render("/      Buscar"),
+		lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render("r      Recargar"),
 		lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render("q      Salir"),
 	)
 

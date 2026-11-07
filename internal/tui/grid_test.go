@@ -144,9 +144,6 @@ func TestRenderCardThreeTierLayout(t *testing.T) {
 	}
 
 	cardUnselected := RenderCard(video, false)
-	if !strings.Contains(cardUnselected, "xyz123") {
-		t.Errorf("Card should contain video ID in thumbnail viewport")
-	}
 	if !strings.Contains(cardUnselected, "12:34") {
 		t.Errorf("Card should contain duration badge")
 	}

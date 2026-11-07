@@ -10,28 +10,30 @@ import (
 var (
 	headerStyle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(lipgloss.Color("#FFFFFF")).
-			Background(lipgloss.Color("#13151F")).
+			Foreground(lipgloss.Color("#E5E7EB")).
+			BorderStyle(lipgloss.NormalBorder()).
+			BorderBottom(true).
+			BorderForeground(lipgloss.Color("#2E3346")).
 			Padding(0, 1)
 
 	searchBarStyle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(lipgloss.Color("#00E5FF")).
-			Background(lipgloss.Color("#1B2236")).
+			Foreground(lipgloss.Color("#38BDF8")).
 			BorderStyle(lipgloss.NormalBorder()).
-			BorderForeground(lipgloss.Color("#00E5FF")).
+			BorderForeground(lipgloss.Color("#38BDF8")).
 			Padding(0, 1)
 
 	footerStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#8890A6")).
-			Background(lipgloss.Color("#10121A")).
+			BorderStyle(lipgloss.NormalBorder()).
+			BorderTop(true).
+			BorderForeground(lipgloss.Color("#2E3346")).
 			Padding(0, 1)
 
 	nowPlayingContainer = lipgloss.NewStyle().
-				Background(lipgloss.Color("#131622")).
 				BorderStyle(lipgloss.NormalBorder()).
 				BorderTop(true).
-				BorderForeground(lipgloss.Color("#262A3B")).
+				BorderForeground(lipgloss.Color("#2E3346")).
 				Padding(0, 1)
 
 	nowPlayingTitle = lipgloss.NewStyle().
@@ -40,7 +42,7 @@ var (
 
 	nowPlayingStatus = lipgloss.NewStyle().
 				Bold(true).
-				Foreground(lipgloss.Color("#00E5FF"))
+				Foreground(lipgloss.Color("#38BDF8"))
 
 	progressTimeStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("#6C728A"))
@@ -49,7 +51,7 @@ var (
 				Foreground(lipgloss.Color("#FF2A55"))
 )
 
-// View renders the complete modern YouTube TUI screen.
+// View renders the complete modern YouTube TUI screen with zero background overrides.
 func (m Model) View() string {
 	if !m.Ready {
 		return "\n  ⚡ Cargando ytx-cli Modern TUI..."
@@ -58,7 +60,7 @@ func (m Model) View() string {
 	// 1. Header or Search Omnibar
 	var header string
 	if m.Searching {
-		header = searchBarStyle.Width(m.Width - 2).Render(fmt.Sprintf("🔍 Buscar en YouTube: %s█", m.SearchQuery))
+		header = searchBarStyle.Width(m.Width - 2).Render(fmt.Sprintf("🔍 Buscar: %s█", m.SearchQuery))
 	} else {
 		headerText := fmt.Sprintf(" ▶ YTX-CLI • %s %s   |   [/] Buscar   [Tab] Paneles   [r] Recargar   [q] Salir",
 			m.ActiveTab.Icon(), m.ActiveTab.String())
@@ -81,7 +83,7 @@ func (m Model) View() string {
 
 	mainContent := lipgloss.JoinHorizontal(lipgloss.Top, sidebarView, gridView)
 
-	// 3. Bottom persistent Now Playing bar
+	// 3. Bottom persistent Now Playing bar (zero background overrides)
 	var bottomBar string
 	if m.PlayerStatus.IsRunning && m.PlayerStatus.Title != "" {
 		stText := "▶ REPRODUCIENDO"
