@@ -1,8 +1,18 @@
 # lib/player.sh — mpv invocation, fast Android stream extraction and audio background/interactive playback
 # Shellcheck source=/dev/null
 
+# IPC helpers live in lib/ipc.sh; load them when player.sh is sourced on its own.
+if ! declare -F mpv_send >/dev/null 2>&1 && [ -n "${LIB_DIR:-}" ] && [ -f "$LIB_DIR/ipc.sh" ]; then
+    # shellcheck source=./ipc.sh
+    . "$LIB_DIR/ipc.sh"
+fi
+
 stop_prev_playback() {
     local pid_file="$STATE_DIR/audio.pid"
+    if mpv_is_running && mpv_send quit >/dev/null 2>&1; then
+        rm -f "$pid_file"
+        return 0
+    fi
     if [ -f "$pid_file" ]; then
         local old_pid
         old_pid=$(cat "$pid_file" 2>/dev/null || true)
@@ -48,6 +58,13 @@ play_video() { # mode id url title channel dur
     url=$(canonical_url "$id" "$3")
     record_history "$id" "$title" "${5:--}" "${6:--}" "$url"
 
+    # Reuse a live mpv session instead of killing it: the IPC socket swaps the
+    # current stream in place so the player keeps its window, volume and queue.
+    if mpv_is_running && mpv_send loadfile "$url" replace >/dev/null 2>&1; then
+        notify "▶ $title"
+        return 0
+    fi
+
     vfmt=$(build_format "$mode" "$YT_QUALITY")
 
     local -a mo=(
@@ -90,6 +107,8 @@ play_video() { # mode id url title channel dur
     local ck_tmp="${COOKIE_TEMP:-}"
     COOKIE_TEMP=""
 
+    [ -n "${YT_SOCK:-}" ] && mo+=(--input-ipc-server="$YT_SOCK" --idle=yes)
+
     set -m
     (
         trap '[ -n "$ck_tmp" ] && rm -f "$ck_tmp"' EXIT
@@ -103,6 +122,23 @@ play_video() { # mode id url title channel dur
     set +m
     echo "$new_pid" > "$STATE_DIR/audio.pid"
     disown "$new_pid" 2>/dev/null || true
+}
+
+enqueue_video() { # id url title channel dur
+    local id=${1:-} url title=${3:-}
+    valid_id "$id" || return 0
+    url=$(canonical_url "$id" "${2:--}")
+
+    if ! mpv_is_running; then
+        notify "⚠ mpv is not running"
+        return 1
+    fi
+    if mpv_send loadfile "$url" append-play >/dev/null 2>&1; then
+        notify "➕ Encolado: $title"
+        return 0
+    fi
+    notify "⚠ Could not enqueue: $title"
+    return 1
 }
 
 play_mix() { # id title channel
@@ -147,6 +183,8 @@ play_mix() { # id title channel
         [ -n "$ck_tmp" ] && rm -f "$ck_tmp"
         return 0
     fi
+
+    [ -n "${YT_SOCK:-}" ] && mo+=(--input-ipc-server="$YT_SOCK" --idle=yes)
 
     set -m
     (

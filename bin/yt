@@ -36,6 +36,8 @@ source "$LIB_DIR/config.sh"
 source "$LIB_DIR/cookies.sh"
 # shellcheck source=../lib/feeds.sh
 source "$LIB_DIR/feeds.sh"
+# shellcheck source=../lib/ipc.sh
+source "$LIB_DIR/ipc.sh"
 # shellcheck source=../lib/player.sh
 source "$LIB_DIR/player.sh"
 # shellcheck source=../lib/download.sh
@@ -74,6 +76,9 @@ init() { # mode: full | light
         OWN_RUNDIR=1
     fi
     export YT_RUNDIR YT_CACHE_DIR="$CACHE_DIR" YT_PREVIEW YT_THUMB_QUALITY YT_LANG
+
+    YT_SOCK="$YT_RUNDIR/mpv.sock"
+    export YT_SOCK
 
     migrate_watchlater
     [ "${1:-full}" = full ] && housekeeping
@@ -115,12 +120,63 @@ do_action() {
     case $act in
         play)     valid_id "${2:-}" && play_video "$@" ;;
         mix)      valid_id "${1:-}" && play_mix "$@" ;;
+        enqueue)  valid_id "${1:-}" && enqueue_video "$@" ;;
+        transport) cmd_transport "$@" ;;
         copy)     valid_id "${1:-}" && { copy_text "https://youtu.be/$1"; notify "📋 youtu.be/$1"; } ;;
         later)    toggle_later "$@" ;;
         download) valid_id "${1:-}" && download_video "$@" ;;
         open)     valid_id "${1:-}" && open_url "$(canonical_url "$1" "${2:--}")" ;;
     esac
     return 0
+}
+
+_transport_require_running() {
+    mpv_is_running && return 0
+    printf 'yt: mpv is not running\n' >&2
+    return 1
+}
+
+cmd_transport() { # toggle-pause | pause | play | next | prev | seek <s> | status | stop
+    local act=${1:-} arg=${2:-}
+    case $act in
+        status)
+            _transport_require_running || return 1
+            mpv_get_status
+            ;;
+        seek)
+            [ -n "$arg" ] || { printf 'yt: --seek requires a value (e.g. +10 or -10)\n' >&2; return 2; }
+            _transport_require_running || return 1
+            mpv_send seek "$arg" >/dev/null 2>&1
+            ;;
+        stop)
+            _transport_require_running || return 1
+            mpv_send stop >/dev/null 2>&1
+            ;;
+        toggle-pause)
+            _transport_require_running || return 1
+            mpv_send cycle pause >/dev/null 2>&1
+            ;;
+        pause)
+            _transport_require_running || return 1
+            mpv_send set_property pause yes >/dev/null 2>&1
+            ;;
+        play)
+            _transport_require_running || return 1
+            mpv_send set_property pause no >/dev/null 2>&1
+            ;;
+        next)
+            _transport_require_running || return 1
+            mpv_send playlist-next >/dev/null 2>&1
+            ;;
+        prev)
+            _transport_require_running || return 1
+            mpv_send playlist-prev >/dev/null 2>&1
+            ;;
+        *)
+            printf 'yt: unknown transport command: %s\n' "$act" >&2
+            return 2
+            ;;
+    esac
 }
 
 require_deps() {
@@ -250,12 +306,19 @@ usage:
   yt --log              show the last 50 lines of the error log
   yt --print-url ID     print the canonical URL for a video id
   yt --print-url ID --direct   resolve the URL through yt-dlp instead
+  yt --status           print the mpv playback status as JSON
+  yt --toggle-pause     toggle play/pause of the running player
+  yt --pause | --play   pause or resume playback
+  yt --next | --prev    skip to the next or previous queue item
+  yt --seek SECONDS     seek relative (e.g. +10, -10)
+  yt --stop             stop playback
   yt --clear-cache      drop feed/search caches and thumbnails
   yt --forget-cookies   discard the cached cookie jar
   yt --version | --help
 
 keys: enter play · alt-m/^x mix · ^p mini · ^f fullscreen · ^a audio · ^w save
       ^y copy · ^d download · ^o browser · ^s search · ^r reload · alt-1..5 tabs
+      alt-space pause · alt-q queue · alt-n next · alt-p prev
 config: ${XDG_CONFIG_HOME:-~/.config}/yt/config  (see config.example)
 EOF
 }
@@ -274,6 +337,14 @@ main() {
         --doctor)         doctor ;;
         --log)            show_log ;;
         --print-url)      shift; print_url "$@" ;;
+        --status)         cmd_transport status ;;
+        --toggle-pause)   cmd_transport toggle-pause ;;
+        --pause)          cmd_transport pause ;;
+        --play)           cmd_transport play ;;
+        --next)           cmd_transport next ;;
+        --prev)           cmd_transport prev ;;
+        --seek)           shift; cmd_transport seek "${1:-}" ;;
+        --stop)           cmd_transport stop ;;
         --clear-cache)    clear_cache ;;
         --forget-cookies) forget_cookies ;;
         --view)           shift; browse "${1:-foryou}" ;;

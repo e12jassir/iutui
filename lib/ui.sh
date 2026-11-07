@@ -66,7 +66,11 @@ browse() { # view [query]
     B+=(--bind "ctrl-w:execute-silent($act later {1} {3} {4} {5} {2})")
     B+=(--bind "ctrl-d:execute-silent($act download {1} {2} {3})")
     B+=(--bind "ctrl-o:execute-silent($act open {1} {2})")
-    B+=(--bind "ctrl-/:toggle-preview" --bind "alt-p:toggle-preview")
+    B+=(--bind "alt-space:execute-silent($act transport toggle-pause)")
+    B+=(--bind "alt-q:execute-silent($act enqueue {1} {2} {3} {4} {5})")
+    B+=(--bind "alt-n:execute-silent($act transport next)")
+    B+=(--bind "alt-p:execute-silent($act transport prev)")
+    B+=(--bind "ctrl-/:toggle-preview" --bind "alt-v:toggle-preview")
     B+=(--bind "ctrl-r:change-prompt($P_SYNC)+reload-sync($list @current --refresh)+change-prompt($P_IDLE)")
     B+=(--bind "ctrl-s:change-border-label( $(tab_label search) )+change-prompt($P_SYNC)+reload-sync($list search {q})+change-prompt($P_IDLE)+clear-query")
     local v n=1

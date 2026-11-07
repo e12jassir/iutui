@@ -47,7 +47,112 @@ cat > "$TMP/bin/fzf" <<'STUB'
 printf '%s\n' "$@" > "$FZF_ARGS_OUT"
 cat > "$FZF_STDIN_OUT"
 STUB
-printf '#!/usr/bin/env bash\necho "mpv 0.38 stub"\n' > "$TMP/bin/mpv"
+cat > "$TMP/bin/mpv" <<'STUB'
+#!/usr/bin/env bash
+[ "$1" = "--version" ] && { echo "mpv 0.38 stub"; exit 0; }
+[ -n "${MPV_LOG:-}" ] && printf '%s\n' "$*" >> "$MPV_LOG"
+cat >/dev/null 2>/dev/null
+exit 0
+STUB
+cat > "$TMP/bin/notify-send" <<'STUB'
+#!/usr/bin/env bash
+[ -n "${NOTIFY_LOG:-}" ] && printf '%s\n' "${@: -1}" >> "$NOTIFY_LOG"
+exit 0
+STUB
+cat > "$TMP/bin/mpv-ipc-server.py" <<'PY'
+#!/usr/bin/env python3
+"""Tiny mpv IPC stand-in: answers get_property and logs every command."""
+import json
+import os
+import signal
+import socket
+import sys
+import threading
+
+sock_path, log_path, ready_path = sys.argv[1], sys.argv[2], sys.argv[3]
+
+PROPS = {
+    "media-title": "Test Video",
+    "time-pos": 42.5,
+    "duration": 300.0,
+    "pause": False,
+    "volume": 75.0,
+    "playlist-count": 3,
+}
+
+try:
+    os.unlink(sock_path)
+except OSError:
+    pass
+
+server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+server.bind(sock_path)
+server.listen(16)
+server.settimeout(0.2)
+with open(ready_path, "w", encoding="utf-8") as fh:
+    fh.write("ready")
+
+stopping = False
+
+
+def shutdown(signum, frame):
+    global stopping
+    stopping = True
+
+
+signal.signal(signal.SIGTERM, shutdown)
+signal.signal(signal.SIGINT, shutdown)
+
+
+def handle(conn):
+    try:
+        conn.settimeout(1.0)
+        buf = b""
+        while b"\n" not in buf:
+            chunk = conn.recv(65536)
+            if not chunk:
+                break
+            buf += chunk
+        line = buf.split(b"\n", 1)[0].decode("utf-8", "replace").strip()
+        if not line:
+            return
+        try:
+            msg = json.loads(line)
+        except Exception:
+            msg = {}
+        cmd = msg.get("command") or []
+        with open(log_path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(cmd) + "\n")
+        response = {"error": "success"}
+        if cmd and cmd[0] == "get_property" and len(cmd) > 1 and cmd[1] in PROPS:
+            response = {"data": PROPS[cmd[1]], "error": "success"}
+        conn.sendall((json.dumps(response) + "\n").encode("utf-8"))
+    except Exception:
+        pass
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+while not stopping:
+    try:
+        conn, _ = server.accept()
+    except socket.timeout:
+        continue
+    except OSError:
+        break
+    thread = threading.Thread(target=handle, args=(conn,))
+    thread.daemon = True
+    thread.start()
+
+server.close()
+try:
+    os.unlink(sock_path)
+except OSError:
+    pass
+PY
 printf '#!/usr/bin/env bash\necho "deno 1.0 stub"\n' > "$TMP/bin/deno"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$TMP/bin/ffmpeg"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$TMP/bin/curl"
@@ -307,6 +412,129 @@ eq "empty row falls back to the view message" "$(YT_LANG=en empty_row later | cu
 YT_STUB_FAIL='Sign in to confirm you are not a bot' YT_COOKIES=off search_raw "classify-$RANDOM" auto >/dev/null
 eq "fetch_raw stores the bot_check class" "$(cat "$YT_RUNDIR/last_err" 2>/dev/null)" "bot_check"
 rm -f "$YT_RUNDIR/last_err"
+
+echo "mpv ipc"
+IPC_DIR="$TMP/ipc"
+mkdir -p "$IPC_DIR"
+export YT_RUNDIR="$IPC_DIR"
+init light
+IPC_LOG="$TMP/ipc.log"
+IPC_READY="$TMP/ipc.ready"
+MPV_LOG="$TMP/mpv.log"
+NOTIFY_LOG="$TMP/notify.log"
+export MPV_LOG NOTIFY_LOG
+: > "$IPC_LOG"; : > "$MPV_LOG"; : > "$NOTIFY_LOG"; rm -f "$IPC_READY"
+
+start_ipc_server() { # echo the socket; wait until the mock player is listening
+    python3 "$TMP/bin/mpv-ipc-server.py" "$YT_SOCK" "$IPC_LOG" "$IPC_READY" >/dev/null 2>&1 &
+    IPC_PID=$!
+    local i
+    for i in $(seq 1 150); do
+        [ -s "$IPC_READY" ] && return 0
+        sleep 0.02
+    done
+    return 1
+}
+stop_ipc_server() {
+    [ -n "${IPC_PID:-}" ] || return 0
+    kill "$IPC_PID" 2>/dev/null || true
+    wait "$IPC_PID" 2>/dev/null || true
+    IPC_PID=""
+}
+
+start_ipc_server && ok "mock mpv IPC socket is listening" || bad "mock mpv IPC socket did not start"
+eq "mpv_is_running sees the live socket" "$(mpv_is_running; echo $?)" "0"
+
+: > "$IPC_LOG"
+eq "mpv_send returns the command response" "$(mpv_send loadfile 'https://example.test/v' replace | head -n 1)" '{"error": "success"}'
+has "mpv_send forwards loadfile arguments" "$(cat "$IPC_LOG")" '["loadfile", "https://example.test/v", "replace"]'
+: > "$IPC_LOG"
+mpv_send loadfile 'https://example.test/a"b' >/dev/null
+has "mpv_send escapes JSON strings" "$(cat "$IPC_LOG")" 'a\"b'
+eq "mpv_ipc_cmd fails without a socket" "$( YT_SOCK="$TMP/missing.sock"; mpv_ipc_cmd '{"command": ["pause"]}' >/dev/null 2>&1; echo $? )" "1"
+
+STATUS="$(mpv_get_status)"
+eq "mpv_get_status prints the status object" \
+    "$(printf '%s' "$STATUS" | python3 -c 'import json, sys; d = json.load(sys.stdin); print(" ".join(str(d[k]) for k in ("title", "time_pos", "duration", "paused", "volume", "playlist_count")))')" \
+    "Test Video 42.5 300 False 75 3"
+eq "mpv_get_status fails without a player" "$( YT_SOCK="$TMP/missing.sock"; mpv_get_status >/dev/null 2>&1; echo $? )" "1"
+
+: > "$IPC_LOG"
+eq "yt --status exits 0" "$(bash "$ROOT/bin/yt" --status >/dev/null 2>&1; echo $?)" "0"
+eq "yt --status prints the JSON title" "$(bash "$ROOT/bin/yt" --status | python3 -c 'import json, sys; print(json.load(sys.stdin)["title"])')" "Test Video"
+
+: > "$IPC_LOG"
+eq "yt --toggle-pause exits 0" "$(bash "$ROOT/bin/yt" --toggle-pause >/dev/null 2>&1; echo $?)" "0"
+has "yt --toggle-pause cycles pause" "$(cat "$IPC_LOG")" '["cycle", "pause"]'
+: > "$IPC_LOG"
+bash "$ROOT/bin/yt" --pause >/dev/null 2>&1
+has "yt --pause pauses" "$(cat "$IPC_LOG")" '["set_property", "pause", "yes"]'
+: > "$IPC_LOG"
+bash "$ROOT/bin/yt" --play >/dev/null 2>&1
+has "yt --play resumes" "$(cat "$IPC_LOG")" '["set_property", "pause", "no"]'
+: > "$IPC_LOG"
+bash "$ROOT/bin/yt" --next >/dev/null 2>&1
+has "yt --next advances the queue" "$(cat "$IPC_LOG")" '["playlist-next"]'
+: > "$IPC_LOG"
+bash "$ROOT/bin/yt" --prev >/dev/null 2>&1
+has "yt --prev rewinds the queue" "$(cat "$IPC_LOG")" '["playlist-prev"]'
+: > "$IPC_LOG"
+bash "$ROOT/bin/yt" --seek -10 >/dev/null 2>&1
+has "yt --seek sends a relative seek" "$(cat "$IPC_LOG")" '["seek", "-10"]'
+eq "yt --seek without a value exits 2" "$(bash "$ROOT/bin/yt" --seek >/dev/null 2>&1; echo $?)" "2"
+: > "$IPC_LOG"
+bash "$ROOT/bin/yt" --stop >/dev/null 2>&1
+has "yt --stop stops playback" "$(cat "$IPC_LOG")" '["stop"]'
+
+: > "$IPC_LOG"; : > "$NOTIFY_LOG"
+eq "enqueue_video succeeds against the player" "$(enqueue_video vidAAAAAAA3 'https://www.youtube.com/watch?v=vidAAAAAAA3' 'A three' 'Chan A' '3:00'; echo $?)" "0"
+has "enqueue_video appends to the playlist" "$(cat "$IPC_LOG")" '"append-play"'
+has "enqueue_video notifies the user" "$(cat "$NOTIFY_LOG")" "➕ Encolado: A three"
+eq "enqueue_video fails without a player" "$( YT_SOCK="$TMP/missing.sock"; enqueue_video vidAAAAAAA3 'https://x' 'A three' - - >/dev/null 2>&1; echo $? )" "1"
+
+: > "$IPC_LOG"
+sleep 10 & LIVE_PID=$!
+echo "$LIVE_PID" > "$STATE_DIR/audio.pid"
+play_video window vidAAAAAAA2 'https://www.youtube.com/watch?v=vidAAAAAAA2' 'A two' 'Chan A' '11:00' >/dev/null 2>&1
+eq "play_video leaves the running player alive" "$(kill -0 "$LIVE_PID" 2>/dev/null && echo alive || echo dead)" "alive"
+has "play_video replaces the stream over IPC" "$(cat "$IPC_LOG")" '"replace"'
+kill "$LIVE_PID" 2>/dev/null || true
+
+: > "$IPC_LOG"
+sleep 10 & OLD_PID=$!
+echo "$OLD_PID" > "$STATE_DIR/audio.pid"
+stop_prev_playback
+has "stop_prev_playback quits through IPC" "$(cat "$IPC_LOG")" '["quit"]'
+eq "stop_prev_playback clears the pid file" "$([ -f "$STATE_DIR/audio.pid" ] && echo 1 || echo 0)" "0"
+eq "stop_prev_playback trusts IPC over the process kill" "$(kill -0 "$OLD_PID" 2>/dev/null && echo alive || echo dead)" "alive"
+kill "$OLD_PID" 2>/dev/null || true
+
+printf '' > "$TMP/not-a-socket"
+eq "a plain file is not a running player" "$( YT_SOCK="$TMP/not-a-socket"; mpv_is_running; echo $? )" "1"
+
+stop_ipc_server
+eq "mpv_is_running is false once the player exits" "$(mpv_is_running; echo $?)" "1"
+
+: > "$MPV_LOG"
+play_video window vidAAAAAAA1 'https://www.youtube.com/watch?v=vidAAAAAAA1' 'A one' 'Chan A' '10:00' >/dev/null 2>&1
+for _ in $(seq 1 150); do [ -s "$MPV_LOG" ] && break; sleep 0.02; done
+MPV_ARGS="$(cat "$MPV_LOG")"
+has "mpv launches with the IPC server" "$MPV_ARGS" "--input-ipc-server=$YT_SOCK"
+has "mpv launches idle so the queue survives" "$MPV_ARGS" "--idle=yes"
+rm -f "$STATE_DIR/audio.pid"
+
+( browse foryou ) >/dev/null 2>&1
+IPC_ARGS="$(cat "$FZF_ARGS_OUT")"
+has "fzf: alt-space toggles pause" "$IPC_ARGS" "alt-space:execute-silent("
+has "fzf: alt-space sends toggle-pause" "$IPC_ARGS" "transport toggle-pause"
+has "fzf: alt-q enqueues the selection" "$IPC_ARGS" "alt-q:execute-silent("
+has "fzf: alt-q forwards the row" "$IPC_ARGS" "enqueue {1} {2} {3} {4} {5}"
+has "fzf: alt-n skips forward" "$IPC_ARGS" "alt-n:execute-silent("
+has "fzf: alt-n sends next" "$IPC_ARGS" "transport next"
+has "fzf: alt-p goes back" "$IPC_ARGS" "alt-p:execute-silent("
+has "fzf: alt-p sends prev" "$IPC_ARGS" "transport prev"
+hasnt "fzf: alt-p no longer toggles the preview" "$IPC_ARGS" "alt-p:toggle-preview"
+has "fzf: preview toggle moved to alt-v" "$IPC_ARGS" "alt-v:toggle-preview"
 
 echo
 printf '%d passed, %d failed\n' "$PASS" "$FAIL"

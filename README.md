@@ -39,17 +39,21 @@ yt                 # home view (for you if you are signed in, else history/searc
 yt lofi hip hop    # search
 yt --view music    # foryou | music | subs | later | history | search
 yt --settings      # interactive settings menu (quality, volume, preview, cookies)
+yt --status        # inspect current playback telemetry (JSON)
+yt --toggle-pause  # toggle playback pause/resume via IPC
+yt --next          # skip to next item in playback queue
 ```
 
 | Key | Action | Key | Action |
 |---|---|---|---|
 | `enter` | play (window / audio in music) | `alt-m` / `^x` | mix radio (continuous autoplay) |
-| `^p` | mini picture-in-picture | `^w` | save / unsave |
-| `^f` | fullscreen | `^y` | copy `youtu.be` link |
-| `^a` | audio only | `^d` | download (video/mp3) |
-| `^s` | search YouTube with what you typed | `^o` | open in browser |
-| `alt-1…5` | for you · music · subs · saved · history | `^r` | reload this view |
-| `^/` | toggle preview | | |
+| `alt-space` | pause / resume playback | `alt-q` | enqueue to live playlist |
+| `alt-n` / `alt-p` | next / previous in queue | `^w` | save / unsave |
+| `^p` | mini picture-in-picture | `^y` | copy `youtu.be` link |
+| `^f` | fullscreen | `^d` | download (video/mp3) |
+| `^a` | audio only | `^o` | open in browser |
+| `^s` | search YouTube with what you typed | `^r` | reload this view |
+| `alt-1…5` | for you · music · subs · saved · history | `^/` / `alt-v` | toggle preview |
 
 Signed in? `yt` reads the session from Zen, Firefox, LibreWolf, Brave, Chromium or Chrome.
 Not signed in? Search, history, saved videos and manual audio playback still work.
