@@ -42,6 +42,9 @@ yt --settings      # interactive settings menu (quality, volume, preview, cookie
 yt --status        # inspect current playback telemetry (JSON)
 yt --toggle-pause  # toggle playback pause/resume via IPC
 yt --next          # skip to next item in playback queue
+yt --subscribe UCxxxxxxxxxxxxxxxxxxxxxx   # follow a channel (id, @handle or URL)
+yt --channels      # list followed channels
+yt --queue         # active, completed and failed downloads
 ```
 
 | Key | Action | Key | Action |
@@ -56,7 +59,24 @@ yt --next          # skip to next item in playback queue
 | `alt-1…5` | for you · music · subs · saved · history | `^/` / `alt-v` | toggle preview |
 
 Signed in? `yt` reads the session from Zen, Firefox, LibreWolf, Brave, Chromium or Chrome.
-Not signed in? Search, history, saved videos and manual audio playback still work.
+Not signed in? Search, history, saved videos, guest RSS subscriptions and manual audio playback still work.
+
+### Guest subscriptions (no login)
+
+```sh
+yt --subscribe UCxxxxxxxxxxxxxxxxxxxxxx   # channel id, @handle or any channel URL
+yt --channels                             # list what you follow
+yt --unsubscribe UCxxxxxxxxxxxxxxxxxxxxxx
+yt --view subs                            # merged Atom feeds, newest first
+```
+
+With `YT_COOKIES=off` — or when no browser session is found — the `subs` view reads
+YouTube's Atom feeds directly with `curl`, so it stays fast without `yt-dlp` or python.
+
+### Download queue
+
+`yt --queue` (or `--downloads`) lists active, completed and failed downloads from
+`~/.local/state/yt/downloads/`, with each download's id, title, status and start time.
 
 ## Configuration
 

@@ -2,7 +2,7 @@
 # yt — terminal YouTube client: fzf UI · yt-dlp metadata · mpv playback
 # https://github.com/e12jassir/Youtube-CLI  (MIT)
 
-VERSION="0.1.0"
+VERSION="0.2.0"
 
 die() { printf 'yt: %s\n' "$*" >&2; exit 1; }
 
@@ -56,15 +56,18 @@ init() { # mode: full | light
     COOKIE_NONE="$CACHE_DIR/cookies.none"
     HISTORY_FILE="$STATE_DIR/history.tsv"
     WATCHLATER_FILE="$STATE_DIR/watchlater.tsv"
+    CHANNELS_FILE="$STATE_DIR/channels.tsv"
+    DOWNLOADS_DIR="$STATE_DIR/downloads"
 
     load_config
     set_defaults
     resolve_lang
 
-    mkdir -p "$CACHE_DIR" "$THUMB_DIR" "$STATE_DIR"
+    mkdir -p "$CACHE_DIR" "$THUMB_DIR" "$STATE_DIR" "$DOWNLOADS_DIR"
     chmod 700 "$CACHE_DIR" "$STATE_DIR" 2>/dev/null || true
     [ -f "$HISTORY_FILE" ]    || : > "$HISTORY_FILE"
     [ -f "$WATCHLATER_FILE" ] || : > "$WATCHLATER_FILE"
+    [ -f "$CHANNELS_FILE" ]   || : > "$CHANNELS_FILE"
 
     FMT="$(find_helper yt-fmt)"
     PREVIEW="$(find_helper yt-thumb-preview)"
@@ -312,6 +315,10 @@ usage:
   yt --next | --prev    skip to the next or previous queue item
   yt --seek SECONDS     seek relative (e.g. +10, -10)
   yt --stop             stop playback
+  yt --subscribe REF    follow a channel (UC… id, @handle or URL) via guest RSS
+  yt --unsubscribe REF  stop following a channel
+  yt --channels         list followed channels
+  yt --queue            show active, completed and failed downloads
   yt --clear-cache      drop feed/search caches and thumbnails
   yt --forget-cookies   discard the cached cookie jar
   yt --version | --help
@@ -345,6 +352,10 @@ main() {
         --prev)           cmd_transport prev ;;
         --seek)           shift; cmd_transport seek "${1:-}" ;;
         --stop)           cmd_transport stop ;;
+        --subscribe)      shift; subscribe_channel "${1:-}" ;;
+        --unsubscribe)    shift; unsubscribe_channel "${1:-}" ;;
+        --channels)       list_channels ;;
+        --queue|--downloads) shift; queue_status "$@" ;;
         --clear-cache)    clear_cache ;;
         --forget-cookies) forget_cookies ;;
         --view)           shift; browse "${1:-foryou}" ;;

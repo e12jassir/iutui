@@ -22,7 +22,7 @@ YT_MUSIC_MODE=bg            # bg (background detached + notification) | term (fo
 YT_PLAYBACK=auto            # auto (native direct, pipe fallback on 403) | direct | pipe
 
 # ── login (cookies) ──────────────────────────────────────
-YT_COOKIES=auto             # auto | off (guest: search only)
+YT_COOKIES=auto             # auto | off (guest: search + RSS subscriptions)
 YT_BROWSERS="zen firefox librewolf brave chromium chrome"   # detection order
 # YT_BROWSER=firefox:/path/to/profile    # force one source (any yt-dlp --cookies-from-browser spec)
 # YT_COOKIES_FILE=~/cookies.txt          # or use an exported Netscape cookies file

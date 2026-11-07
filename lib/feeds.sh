@@ -109,7 +109,16 @@ emit_rows() { # view mode query
     case $view in
         foryou)  [ "$YT_INTERLEAVE" = 1 ] && o+=(--interleave)
                  view_raw foryou "$mode" | format_rows "${o[@]}" ;;
-        subs)    view_raw subs "$mode" | format_rows "${o[@]}" ;;
+        subs)
+            if subs_rss_active; then
+                if [ -s "${CHANNELS_FILE:-/nonexistent}" ]; then
+                    subs_raw "$mode" | format_rows "${o[@]}"
+                else
+                    printf 'none\t-\t-\t-\t-\t-\t  \033[90m%s\033[0m\n' "$(t empty_subs_rss)"
+                fi
+            else
+                view_raw subs "$mode" | format_rows "${o[@]}"
+            fi ;;
         music)   view_raw music "$mode" | format_rows --music "${o[@]}" ;;
         later)   format_rows --stored --reverse < "$WATCHLATER_FILE" ;;
         history) format_rows --stored --reverse < "$HISTORY_FILE" ;;
@@ -201,4 +210,191 @@ toggle_later() { # id title channel dur url
             "$(sanitize "${4:--}")" "$(canonical_url "$id" "${5:--}")" "$(date +%s)" >> "$WATCHLATER_FILE"
         notify "$(t n_later_add): $2"
     fi
+}
+
+# ── guest RSS subscriptions (no cookies, no yt-dlp) ─────────────────────────
+
+subs_rss_active() { # guest mode uses Atom feeds instead of the authenticated subscriptions page
+    [ "${YT_COOKIES:-auto}" = off ] && return 0
+    ! cookies_possible
+}
+
+normalize_channel_ref() { # id | @handle | channel URL -> UC... or @handle (empty when unusable)
+    local raw=${1:-}
+    raw="${raw#"${raw%%[![:space:]]*}"}"
+    raw="${raw%"${raw##*[![:space:]]}"}"
+    [ -n "$raw" ] || return 0
+    case $raw in
+        *"/channel/"*)
+            raw="${raw#*/channel/}"; raw="${raw%%[?/#]*}"
+            [[ $raw =~ ^UC[A-Za-z0-9_-]{3,}$ ]] && printf '%s' "$raw" ;;
+        *"/@"*)
+            raw="@${raw#*"/@"}"; raw="${raw%%[?/#]*}"
+            [[ $raw =~ ^@[A-Za-z0-9_.-]{2,}$ ]] && printf '%s' "$raw" ;;
+        *"/user/"*)
+            raw="${raw#*/user/}"; raw="${raw%%[?/#]*}"
+            [[ $raw =~ ^[A-Za-z0-9_.-]{2,}$ ]] && printf '%s' "@$raw" ;;
+        *"/c/"*)
+            raw="${raw#*/c/}"; raw="${raw%%[?/#]*}"
+            [[ $raw =~ ^[A-Za-z0-9_.-]{2,}$ ]] && printf '%s' "@$raw" ;;
+        http://*|https://*) : ;;
+        UC*) [[ $raw =~ ^UC[A-Za-z0-9_-]{3,}$ ]] && printf '%s' "$raw" ;;
+        @*)  [[ $raw =~ ^@[A-Za-z0-9_.-]{2,}$ ]] && printf '%s' "$raw" ;;
+        *)   [[ $raw =~ ^[A-Za-z0-9_.-]{3,}$ ]] && printf '@%s' "$raw" ;;
+    esac
+    return 0
+}
+
+channel_feed_url() { # stored ref -> Atom feed URL
+    case ${1:-} in
+        UC*) printf 'https://www.youtube.com/feeds/videos.xml?channel_id=%s' "$1" ;;
+        @*)  printf 'https://www.youtube.com/feeds/videos.xml?user=%s' "${1#@}" ;;
+        "")  return 0 ;;
+        *)   printf 'https://www.youtube.com/feeds/videos.xml?channel_id=%s' "$1" ;;
+    esac
+}
+
+subscribe_channel() { # id | @handle | URL
+    local raw=${1:-} ref
+    [ -n "$raw" ] || { printf 'yt: --subscribe requires a channel id, @handle or URL\n' >&2; return 2; }
+    ref=$(normalize_channel_ref "$raw")
+    [ -n "$ref" ] || { printf 'yt: invalid channel reference: %s\n' "$raw" >&2; return 2; }
+    [ -f "$CHANNELS_FILE" ] || : > "$CHANNELS_FILE"
+    if awk -F'\t' -v id="$ref" '$1 == id { f = 1 } END { exit !f }' "$CHANNELS_FILE"; then
+        printf 'yt: already subscribed: %s\n' "$ref"
+        return 0
+    fi
+    printf '%s\t%s\n' "$ref" "$(sanitize "$ref")" >> "$CHANNELS_FILE"
+    printf 'yt: subscribed: %s\n' "$ref"
+}
+
+unsubscribe_channel() { # id | @handle | URL
+    local raw=${1:-} ref tmp
+    [ -n "$raw" ] || { printf 'yt: --unsubscribe requires a channel id\n' >&2; return 2; }
+    ref=$(normalize_channel_ref "$raw")
+    [ -n "$ref" ] || ref=$raw
+    tmp="$CHANNELS_FILE.tmp.$$"
+    if [ -s "$CHANNELS_FILE" ] && awk -F'\t' -v id="$ref" '$1 != id' "$CHANNELS_FILE" > "$tmp"; then
+        mv -f "$tmp" "$CHANNELS_FILE"
+        printf 'yt: unsubscribed: %s\n' "$ref"
+    else
+        rm -f "$tmp"
+        printf 'yt: not subscribed: %s\n' "$ref"
+    fi
+    return 0
+}
+
+list_channels() {
+    if [ ! -s "$CHANNELS_FILE" ]; then
+        printf 'no channels subscribed — add one with: yt --subscribe <channel_id>\n'
+        return 0
+    fi
+    awk -F'\t' 'NF { if ($2 == "" || $2 == $1) print $1; else print $1 "  " $2 }' "$CHANNELS_FILE"
+}
+
+parse_atom_feed() { # [xml_string|file] [--with-date] -> RAW_TEMPLATE rows
+    # YouTube Atom entries carry id, title, author, views and published date but
+    # no duration, so duration/live_status stay NA. --with-date appends the ISO
+    # timestamp as an 8th column so callers can merge feeds newest-first.
+    local src="" with_date=0 a
+    for a in "$@"; do
+        case $a in
+            --with-date) with_date=1 ;;
+            *) [ -z "$src" ] && src=$a ;;
+        esac
+    done
+    {
+        if [ -z "$src" ]; then cat
+        elif [ -f "$src" ]; then cat "$src"
+        else printf '%s\n' "$src"
+        fi
+    } | awk '{ gsub(/></, ">\n<"); print }' | awk -v tab="$TAB" -v with_date="$with_date" '
+        function strip(line, name,   s, e) {
+            s = index(line, "<" name ">")
+            if (!s) return ""
+            line = substr(line, s + length(name) + 2)
+            e = index(line, "</" name ">")
+            if (!e) return ""
+            return substr(line, 1, e - 1)
+        }
+        function attr(line, name,   s, q, rest, e) {
+            s = index(line, name "=")
+            if (!s) return ""
+            s += length(name "=")
+            q = substr(line, s, 1)
+            if (q != "\"" && q != "\047") return ""
+            rest = substr(line, s + 1)
+            e = index(rest, q)
+            if (!e) return ""
+            return substr(rest, 1, e - 1)
+        }
+        function unesc(s) {
+            gsub(/&lt;/, "<", s)
+            gsub(/&gt;/, ">", s)
+            gsub(/&quot;/, "\"", s)
+            gsub(/&apos;/, "\047", s)
+            gsub(/&amp;/, "\\&", s)
+            gsub(/\t/, " ", s)
+            return s
+        }
+        BEGIN { in_entry = 0 }
+        /<entry>/ { in_entry = 1; id = ""; title = ""; uploader = ""; views = ""; published = ""; next }
+        in_entry && /<\/entry>/ {
+            if (id != "") {
+                line = id tab title tab uploader tab "NA" tab "https://www.youtube.com/watch?v=" id tab (views == "" ? "NA" : views) tab "NA"
+                if (with_date) line = line tab published
+                print line
+            }
+            in_entry = 0
+            next
+        }
+        in_entry {
+            if (id == "" && index($0, "<yt:videoId>")) id = unesc(strip($0, "yt:videoId"))
+            if (title == "" && index($0, "<title>")) title = unesc(strip($0, "title"))
+            if (uploader == "" && index($0, "<name>")) uploader = unesc(strip($0, "name"))
+            if (views == "" && index($0, "media:statistics")) views = attr($0, "views")
+            if (published == "" && index($0, "<published>")) published = unesc(strip($0, "published"))
+        }
+    ' | awk -F'\t' -v OFS='\t' '{
+        gsub(/[^A-Za-z0-9_-]/, "", $1)
+        if ($1 == "") next
+        if ($3 == "") $3 = "NA"
+        print
+    }'
+}
+
+fetch_rss_subs() { # channels file -> merged RAW rows, newest first
+    local tmp="${YT_RUNDIR:-${TMPDIR:-/tmp}}/rss.$$" id title feed xml
+    [ -s "${CHANNELS_FILE:-/nonexistent}" ] || return 0
+    have curl || return 0
+    : > "$tmp"
+    while IFS="$TAB" read -r id title; do
+        [ -n "$id" ] || continue
+        feed=$(channel_feed_url "$id")
+        [ -n "$feed" ] || continue
+        xml=$(curl -fsSL --max-time 10 "$feed" 2>/dev/null) || continue
+        [ -n "$xml" ] || continue
+        printf '%s' "$xml" | parse_atom_feed --with-date >> "$tmp"
+    done < "$CHANNELS_FILE"
+    if [ -s "$tmp" ]; then
+        LC_ALL=C sort -t "$TAB" -k8,8r "$tmp" | cut -f1-7
+    fi
+    rm -f "$tmp"
+}
+
+subs_raw() { # mode(auto|cached|refresh) -> RAW rows from guest RSS feeds
+    local mode=${1:-auto} file data
+    file="$(view_cache_file subs)"
+    case $mode in
+        cached) [ -s "$file" ] && cat "$file"; return 0 ;;
+        auto)   if is_fresh "$file" "$YT_CACHE_TTL"; then cat "$file"; return 0; fi ;;
+    esac
+    data=$(fetch_rss_subs)
+    if [ -n "$data" ]; then
+        printf '%s\n' "$data" | cache_write "$file"
+        printf '%s\n' "$data"
+    elif [ -s "$file" ]; then
+        cat "$file"
+    fi
+    return 0
 }

@@ -15,6 +15,14 @@ file_mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || ech
 file_age()   { echo $(( $(date +%s) - $(file_mtime "$1") )); }
 is_fresh()   { [ -s "$1" ] && [ "$(file_age "$1")" -lt "$2" ]; }
 
+fmt_epoch() { # epoch -> "YYYY-MM-DD HH:MM" (GNU date, then BSD date, then raw value)
+    local e=${1:-0}
+    case $e in ''|*[!0-9]*) printf '%s' "$e"; return 0 ;; esac
+    date -d "@$e" '+%Y-%m-%d %H:%M' 2>/dev/null \
+        || date -r "$e" '+%Y-%m-%d %H:%M' 2>/dev/null \
+        || printf '%s' "$e"
+}
+
 valid_id() { [[ ${1:-} =~ ^[A-Za-z0-9_-]{5,}$ ]]; }
 
 sanitize() { local s=$1; s=${s//$'\t'/ }; s=${s//$'\n'/ }; s=${s//$'\r'/ }; printf '%s' "$s"; }
@@ -84,6 +92,7 @@ t() {
             header1) echo "⏎ reproducir · alt-m mix · ^p mini · ^f pantalla · ^a audio · ^w guardar · ^y copiar · ^d bajar · ^s buscar · alt-1..5 tabs" ;;
             header2) echo "" ;;
             empty_feed) echo "sin resultados — ¿sesión iniciada en YouTube en tu navegador? prueba: yt --doctor" ;;
+            empty_subs_rss) echo "no hay canales suscritos — agrega uno con: yt --subscribe <channel_id>" ;;
             empty_music) echo "no se encontraron canciones — inicia sesión para ver tus me gusta de YouTube Music" ;;
             empty_later) echo "no hay videos guardados (^w sobre un video para guardarlo)" ;;
             empty_history) echo "el historial está vacío" ;;
@@ -136,6 +145,7 @@ t() {
             header1) echo "⏎ play · alt-m mix · ^p mini · ^f fullscreen · ^a audio · ^w save · ^y copy · ^d download · ^s search · alt-1..5 tabs" ;;
             header2) echo "" ;;
             empty_feed) echo "no results — are you signed in to YouTube in your browser? try: yt --doctor" ;;
+            empty_subs_rss) echo "no channels subscribed — add one with: yt --subscribe <channel_id>" ;;
             empty_music) echo "no tracks found — sign in to see your Liked Music from YouTube Music" ;;
             empty_later) echo "nothing saved yet (^w on a video saves it)" ;;
             empty_history) echo "history is empty" ;;

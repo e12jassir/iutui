@@ -155,7 +155,45 @@ except OSError:
 PY
 printf '#!/usr/bin/env bash\necho "deno 1.0 stub"\n' > "$TMP/bin/deno"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$TMP/bin/ffmpeg"
-printf '#!/usr/bin/env bash\nexit 0\n' > "$TMP/bin/curl"
+cat > "$TMP/bin/curl" <<'STUB'
+#!/usr/bin/env bash
+url=""
+for a in "$@"; do case $a in http*) url=$a ;; esac; done
+case $url in
+  *feeds/videos.xml*channel_id=UCrssChannel1*)
+    cat <<'XML'
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns:yt="http://www.youtube.com/xml/schemas/2015" xmlns:media="http://search.yahoo.com/mrss/">
+  <title>RSS Channel One</title>
+  <entry>
+    <id>yt:video:rssVid00001</id>
+    <yt:videoId>rssVid00001</yt:videoId>
+    <yt:channelId>UCrssChannel1</yt:channelId>
+    <title>First &amp; Best</title>
+    <published>2026-11-01T10:00:00+00:00</published>
+    <author><name>RSS Channel One</name></author>
+    <media:group><media:statistics views="1234"/></media:group>
+  </entry>
+  <entry>
+    <id>yt:video:rssVid00002</id>
+    <yt:videoId>rssVid00002</yt:videoId>
+    <title>Second Video</title>
+    <published>2026-11-02T10:00:00+00:00</published>
+    <media:group><media:statistics views="99"/></media:group>
+  </entry>
+  <entry>
+    <id>yt:video:rssVid00003</id>
+    <yt:videoId>rssVid00003</yt:videoId>
+    <title>Third Video</title>
+    <published>2026-11-03T10:00:00+00:00</published>
+    <media:group><media:statistics views="7"/></media:group>
+  </entry>
+</feed>
+XML
+    ;;
+esac
+exit 0
+STUB
 chmod +x "$TMP/bin/"*
 export PATH="$TMP/bin:$PATH"
 
@@ -555,6 +593,126 @@ has "fzf: alt-p goes back" "$IPC_ARGS" "alt-p:execute-silent("
 has "fzf: alt-p sends prev" "$IPC_ARGS" "transport prev"
 hasnt "fzf: alt-p no longer toggles the preview" "$IPC_ARGS" "alt-p:toggle-preview"
 has "fzf: preview toggle moved to alt-v" "$IPC_ARGS" "alt-v:toggle-preview"
+
+# ── F2-T4: guest RSS subscriptions and observable download queue ────────────
+echo "guest rss subscriptions"
+ATOM="$TMP/atom.xml"
+cat > "$ATOM" <<'XML'
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns:yt="http://www.youtube.com/xml/schemas/2015" xmlns:media="http://search.yahoo.com/mrss/">
+  <title>Sample Channel</title>
+  <entry>
+    <id>yt:video:rssVid00001</id>
+    <yt:videoId>rssVid00001</yt:videoId>
+    <yt:channelId>UCrssChannel1</yt:channelId>
+    <title>First &amp; Best</title>
+    <published>2026-11-01T10:00:00+00:00</published>
+    <author><name>RSS Channel One</name></author>
+    <media:group><media:statistics views="1234"/></media:group>
+  </entry>
+  <entry>
+    <id>yt:video:rssVid00002</id>
+    <yt:videoId>rssVid00002</yt:videoId>
+    <title>Second Video</title>
+    <published>2026-11-02T10:00:00+00:00</published>
+    <media:group><media:statistics views="99"/></media:group>
+  </entry>
+  <entry>
+    <id>yt:video:rssVid00003</id>
+    <yt:videoId>rssVid00003</yt:videoId>
+    <title>Third Video</title>
+    <published>2026-11-03T10:00:00+00:00</published>
+    <media:group><media:statistics views="7"/></media:group>
+  </entry>
+</feed>
+XML
+
+RSS_ROWS="$(parse_atom_feed "$ATOM")"
+eq "atom parser: reads every entry" "$(printf '%s\n' "$RSS_ROWS" | wc -l | tr -d ' ')" "3"
+eq "atom parser: raw template has 7 columns" "$(printf '%s\n' "$RSS_ROWS" | head -n 1 | awk -F'\t' '{print NF}')" "7"
+eq "atom parser: first id" "$(printf '%s\n' "$RSS_ROWS" | sed -n '1p' | cut -f1)" "rssVid00001"
+eq "atom parser: title is unescaped" "$(printf '%s\n' "$RSS_ROWS" | sed -n '1p' | cut -f2)" "First & Best"
+eq "atom parser: uploader name" "$(printf '%s\n' "$RSS_ROWS" | sed -n '1p' | cut -f3)" "RSS Channel One"
+eq "atom parser: missing uploader becomes NA" "$(printf '%s\n' "$RSS_ROWS" | sed -n '2p' | cut -f3)" "NA"
+eq "atom parser: duration is NA in feeds" "$(printf '%s\n' "$RSS_ROWS" | sed -n '1p' | cut -f4)" "NA"
+eq "atom parser: watch url" "$(printf '%s\n' "$RSS_ROWS" | sed -n '1p' | cut -f5)" "https://www.youtube.com/watch?v=rssVid00001"
+eq "atom parser: view count" "$(printf '%s\n' "$RSS_ROWS" | sed -n '1p' | cut -f6)" "1234"
+eq "atom parser: live status is NA" "$(printf '%s\n' "$RSS_ROWS" | sed -n '1p' | cut -f7)" "NA"
+eq "atom parser: accepts an XML string" \
+    "$(parse_atom_feed '<feed><entry><yt:videoId>strVid00001</yt:videoId><title>Inline</title></entry></feed>' | cut -f1)" \
+    "strVid00001"
+
+rm -f "$CHANNELS_FILE"
+eq "--subscribe persists a channel id" \
+    "$(bash "$ROOT/bin/yt" --subscribe UCrssChannel1 >/dev/null; cut -f1 "$CHANNELS_FILE" 2>/dev/null)" "UCrssChannel1"
+has "--subscribe prints a confirmation" "$(bash "$ROOT/bin/yt" --subscribe UCrssChannel2 2>&1)" "UCrssChannel2"
+bash "$ROOT/bin/yt" --subscribe UCrssChannel3 >/dev/null 2>&1
+CHLIST="$(bash "$ROOT/bin/yt" --channels 2>&1)"
+has "--channels lists the first channel" "$CHLIST" "UCrssChannel1"
+has "--channels lists every channel" "$CHLIST" "UCrssChannel3"
+eq "--subscribe is idempotent" "$(grep -c '^UCrssChannel1' "$CHANNELS_FILE")" "1"
+bash "$ROOT/bin/yt" --subscribe 'https://www.youtube.com/channel/UCrssChannel9' >/dev/null 2>&1
+has "--subscribe accepts a channel URL" "$(cat "$CHANNELS_FILE")" "UCrssChannel9"
+eq "--subscribe rejects an invalid reference" "$(bash "$ROOT/bin/yt" --subscribe 'not a channel!' >/dev/null 2>&1; echo $?)" "2"
+bash "$ROOT/bin/yt" --unsubscribe UCrssChannel2 >/dev/null 2>&1
+hasnt "--unsubscribe removes the channel" "$(cat "$CHANNELS_FILE")" "UCrssChannel2"
+has "--unsubscribe keeps the other channels" "$(cat "$CHANNELS_FILE")" "UCrssChannel1"
+eq "--unsubscribe exits 0" "$(bash "$ROOT/bin/yt" --unsubscribe UCrssChannel9 >/dev/null 2>&1; echo $?)" "0"
+
+rm -f "$CACHE_DIR/feed_subs.tsv"
+RSS_VIEW="$(YT_COOKIES=off emit_view subs auto 2>/dev/null)"
+eq "RSS subs: newest entry is first" "$(printf '%s\n' "$RSS_VIEW" | cut -f1 | head -n 1)" "rssVid00003"
+has "RSS subs: titles are rendered" "$RSS_VIEW" "Third Video"
+has "RSS subs: uploader is rendered" "$RSS_VIEW" "RSS Channel One"
+eq "RSS subs: all three entries make it into the view" "$(printf '%s\n' "$RSS_VIEW" | grep -c '^rssVid')" "3"
+
+rm -f "$CHANNELS_FILE" "$CACHE_DIR/feed_subs.tsv"
+RSS_EMPTY="$(YT_COOKIES=off emit_view subs auto 2>/dev/null)"
+has "RSS subs: no channels shows the subscribe hint" "$RSS_EMPTY" "yt --subscribe"
+
+# Preserve: with cookies available the subscriptions view still uses yt-dlp.
+rm -f "$CACHE_DIR/feed_subs.tsv"
+: > "$STUB_LOG"
+SIGNED_SUBS="$(emit_view subs auto 2>/dev/null)"
+has "signed-in subs still uses the authenticated feed" "$(cat "$STUB_LOG")" "youtube.com/feed/subscriptions"
+has "signed-in subs still renders yt-dlp rows" "$SIGNED_SUBS" "vidAAAAAAA1"
+
+HELP="$(bash "$ROOT/bin/yt" --help)"
+has "usage documents --subscribe" "$HELP" "--subscribe"
+has "usage documents --unsubscribe" "$HELP" "--unsubscribe"
+has "usage documents --channels" "$HELP" "--channels"
+has "usage documents --queue" "$HELP" "--queue"
+
+echo "download queue"
+rm -rf "$DOWNLOADS_DIR"
+DL_ID="vidDL000001"
+download_video "$DL_ID" "https://www.youtube.com/watch?v=$DL_ID" "Download Me" >/dev/null 2>&1
+for _ in $(seq 1 300); do
+    DL_STATUS=$(cut -f3 "$DOWNLOADS_DIR/$DL_ID".*.rec 2>/dev/null | head -n 1)
+    [ "$DL_STATUS" = done ] && break
+    sleep 0.02
+done
+eq "download: a tracking record is created" "$(ls "$DOWNLOADS_DIR"/*.rec 2>/dev/null | wc -l | tr -d ' ')" "1"
+eq "download: record keeps the title" "$(cut -f2 "$DOWNLOADS_DIR"/*.rec | head -n 1)" "Download Me"
+eq "download: record reaches done" "$(cut -f3 "$DOWNLOADS_DIR"/*.rec | head -n 1)" "done"
+has "download still invokes yt-dlp for the URL" "$(grep 'vidDL000001' "$STUB_LOG" | tail -n 1)" "youtube.com/watch?v=vidDL000001"
+QOUT="$(queue_status)"
+has "queue: shows a header" "$QOUT" "STATUS"
+has "queue: shows the download id" "$QOUT" "$DL_ID"
+has "queue: shows the status" "$QOUT" "done"
+has "queue: shows the title" "$QOUT" "Download Me"
+eq "--queue exits 0" "$(bash "$ROOT/bin/yt" --queue >/dev/null 2>&1; echo $?)" "0"
+has "--downloads is an alias for --queue" "$(bash "$ROOT/bin/yt" --downloads 2>&1)" "Download Me"
+
+export YT_STUB_FAIL='disk full'
+download_video vidDL000002 "https://www.youtube.com/watch?v=vidDL000002" "Broken" >/dev/null 2>&1
+for _ in $(seq 1 300); do
+    [ "$(cut -f3 "$DOWNLOADS_DIR"/vidDL000002.*.rec 2>/dev/null | head -n 1)" = failed ] && break
+    sleep 0.02
+done
+unset YT_STUB_FAIL
+eq "download: failures are recorded" "$(cut -f3 "$DOWNLOADS_DIR"/vidDL000002.*.rec 2>/dev/null | head -n 1)" "failed"
+has "queue: shows failed downloads" "$(queue_status)" "failed"
 
 echo
 printf '%d passed, %d failed\n' "$PASS" "$FAIL"
