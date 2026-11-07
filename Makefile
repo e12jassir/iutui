@@ -3,7 +3,7 @@ BINDIR ?= $(PREFIX)/bin
 LIBDIR ?= $(PREFIX)/lib/yt
 FILES  := yt yt-fmt yt-thumb-preview
 
-.PHONY: install uninstall test lint
+.PHONY: install uninstall test lint verify
 
 install:
 	@mkdir -p $(BINDIR) $(LIBDIR)
@@ -19,6 +19,9 @@ uninstall:
 test:
 	@bash tests/smoke.sh
 
+verify: lint test
+
 lint:
-	@shellcheck -x bin/yt bin/yt-thumb-preview install.sh tests/smoke.sh
+	@for s in bin/yt bin/yt-thumb-preview install.sh tests/smoke.sh lib/*.sh; do bash -n "$$s" || exit 1; done
+	@if command -v shellcheck >/dev/null 2>&1; then shellcheck -x bin/yt bin/yt-thumb-preview install.sh tests/smoke.sh; fi
 	@python3 -m py_compile bin/yt-fmt

@@ -17,18 +17,28 @@ needs_sync() { # view query
     esac
 }
 
-initial_rows() { # view query: cache only; "syncing" placeholder if a refresh is about to run
-    local view=$1 query=$2 rows
+initial_rows() { # view query: single render from cache; "syncing" placeholder if refresh is pending
+    local view=$1 query=$2 rows tmp
     rows=$(emit_rows "$view" cached "$query")
-    if [ -z "$rows" ] && needs_sync "$view" "$query"; then
-        printf 'none\t-\t-\t-\t-\t-\t  \033[90m%s\033[0m\n' "$(t syncing)"
-    else
-        emit_view "$view" cached "$query"
+    if [ -z "$rows" ]; then
+        if needs_sync "$view" "$query"; then
+            printf 'none\t-\t-\t-\t-\t-\t  \033[90m%s\033[0m\n' "$(t syncing)"
+        else
+            empty_row "$view"
+        fi
+        return 0
+    fi
+    printf '%s\n' "$rows"
+    tmp="$YT_RUNDIR/rows.$$"
+    if printf '%s\n' "$rows" > "$tmp"; then
+        ( prefetch_thumbs "$tmp" ) </dev/null >/dev/null 2>&1 &
+        disown 2>/dev/null || true
     fi
 }
 
 browse() { # view [query]
     local view=$1 query=${2:-}
+    YT_INTERACTIVE=1
     require_deps
     printf '%s\n' "$view" > "$YT_RUNDIR/view"
     [ -n "$query" ] && printf '%s\n' "$query" > "$YT_RUNDIR/query"
@@ -70,10 +80,13 @@ browse() { # view [query]
     fi
 
     local -a extra=()
+    set -f
     # shellcheck disable=SC2206
     extra=($YT_FZF_OPTS)
+    set +f
 
     initial_rows "$view" "$query" | fzf "${F[@]}" \
+        --header="$(t header1)" \
         --border-label=" $(tab_label "$view") " \
         --preview="$prev {1} {3} {4} {5} {6}" \
         --preview-window='right:48%:border-left:wrap' \
@@ -83,92 +96,97 @@ browse() { # view [query]
 }
 
 settings_menu() {
-    local prompt_s="⚙ ajustes › "
+    local l_title l_quality l_music l_format l_volume l_preview l_thumbq l_cookies l_cache l_back prompt_s
+    l_title=$(t settings_title); l_quality=$(t settings_quality); l_music=$(t settings_music)
+    l_format=$(t settings_format); l_volume=$(t settings_volume); l_preview=$(t settings_preview)
+    l_thumbq=$(t settings_thumbq); l_cookies=$(t settings_cookies); l_cache=$(t settings_cache)
+    l_back=$(t settings_back)
+    prompt_s="⚙ $l_title › "
     while :; do
         kitty_clear
         local opt
         opt=$(printf "%s\n" \
-            "󰕾 Calidad de video: ${YT_QUALITY}p" \
-            "󰎆 Modo música: ${YT_MUSIC_MODE} (bg=fondo, term=interactivo)" \
-            "󰝚 Formato descarga: $([ "${YT_DOWNLOAD_AUDIO:-0}" = 1 ] && echo 'Solo audio MP3' || echo 'Video MP4')" \
-            "󰕾 Volumen audio: ${YT_AUDIO_VOLUME}%" \
-            "󰏘 Miniaturas preview: ${YT_PREVIEW}" \
-            "󰏘 Calidad miniaturas: ${YT_THUMB_QUALITY}" \
-            "󰋚 Refrescar cookies ahora" \
-            "󰋚 Limpiar caché y miniaturas" \
-            "󰌑 Volver" | fzf \
+            "󰕾 $l_quality: ${YT_QUALITY}p" \
+            "󰎆 $l_music: ${YT_MUSIC_MODE} ($(t settings_music_hint))" \
+            "󰝚 $l_format: $([ "${YT_DOWNLOAD_AUDIO:-0}" = 1 ] && t settings_fmt_mp3 || t settings_fmt_mp4)" \
+            "󰕾 $l_volume: ${YT_AUDIO_VOLUME}%" \
+            "󰏘 $l_preview: ${YT_PREVIEW}" \
+            "󰏘 $l_thumbq: ${YT_THUMB_QUALITY}" \
+            "󰋚 $l_cookies" \
+            "󰋚 $l_cache" \
+            "󰌑 $l_back" | fzf \
             --color "${YT_FZF_COLORS:-bg:-1,bg+:-1,gutter:-1,border:238,header:241,info:241,prompt:1,pointer:1,marker:2,hl:4,hl+:4,spinner:1,label:238,query:-1,fg:-1,fg+:15}" \
             --pointer="▌" \
             --prompt="$prompt_s" \
             --height=45% \
             --layout=reverse \
             --border=rounded \
-            --border-label=" ajustes " \
+            --border-label=" $l_title " \
             --border-label-pos=2)
         [ $? -ne 0 ] || [ -z "$opt" ] && return 0
 
         case "$opt" in
-            *"Calidad de video"*)
+            *"$l_quality"*)
                 local q
-                q=$(printf "1080\n720\n480\n0 (máxima)\n" | fzf --prompt="Resolución › " --height=30% --layout=reverse --border=rounded)
+                q=$(printf "1080\n720\n480\n%s\n" "$(t settings_quality_max)" | fzf --prompt="$(t settings_quality_prompt)" --height=30% --layout=reverse --border=rounded)
                 if [ -n "$q" ]; then
                     q="${q%% *}"
                     set_config_val YT_QUALITY "$q"
-                    notify "Calidad de video: ${q}p"
+                    notify "$l_quality: ${q}p"
                 fi
                 ;;
-            *"Modo música"*)
+            *"$l_music"*)
                 local m
-                m=$(printf "bg (en segundo plano / desacoplado)\nterm (en terminal interactiva con teclas mpv)\n" | fzf --prompt="Modo música › " --height=25% --layout=reverse --border=rounded)
+                m=$(printf "%s\n%s\n" "$(t settings_music_bg_opt)" "$(t settings_music_term_opt)" | fzf --prompt="$(t settings_music_prompt)" --height=25% --layout=reverse --border=rounded)
                 if [ -n "$m" ]; then
                     m="${m%% *}"
                     set_config_val YT_MUSIC_MODE "$m"
-                    notify "Modo música: $m"
+                    notify "$l_music: $m"
                 fi
                 ;;
-            *"Formato descarga"*)
+            *"$l_format"*)
                 local d
-                d=$(printf "0 (video mp4 completo)\n1 (solo audio mp3)\n" | fzf --prompt="Descarga › " --height=25% --layout=reverse --border=rounded)
+                d=$(printf "%s\n%s\n" "$(t settings_dl_video_opt)" "$(t settings_dl_audio_opt)" | fzf --prompt="$(t settings_download_prompt)" --height=25% --layout=reverse --border=rounded)
                 if [ -n "$d" ]; then
                     d="${d%% *}"
                     set_config_val YT_DOWNLOAD_AUDIO "$d"
-                    notify "Descarga audio: $d"
+                    notify "$l_format: $d"
                 fi
                 ;;
-            *"Volumen audio"*)
+            *"$l_volume"*)
                 local v
-                v=$(printf "50\n75\n100\n120\n" | fzf --prompt="Volumen % › " --height=25% --layout=reverse --border=rounded)
+                v=$(printf "50\n75\n100\n120\n" | fzf --prompt="$(t settings_volume_prompt)" --height=25% --layout=reverse --border=rounded)
                 if [ -n "$v" ]; then
                     set_config_val YT_AUDIO_VOLUME "$v"
-                    notify "Volumen: ${v}%"
+                    notify "$l_volume: ${v}%"
                 fi
                 ;;
-            *"Miniaturas preview"*)
+            *"$l_preview"*)
                 local p
-                p=$(printf "auto\nkitty\nchafa\nnone\n" | fzf --prompt="Preview › " --height=25% --layout=reverse --border=rounded)
+                p=$(printf "auto\nkitty\nchafa\nnone\n" | fzf --prompt="$(t settings_preview_prompt)" --height=25% --layout=reverse --border=rounded)
                 if [ -n "$p" ]; then
                     set_config_val YT_PREVIEW "$p"
-                    notify "Preview: $p"
+                    notify "$l_preview: $p"
                 fi
                 ;;
-            *"Calidad miniaturas"*)
+            *"$l_thumbq"*)
                 local tq
-                tq=$(printf "mq (rápido 16:9)\nhq (alta calidad)\nmax (resolución máxima)\n" | fzf --prompt="Calidad miniaturas › " --height=25% --layout=reverse --border=rounded)
+                tq=$(printf "%s\n%s\n%s\n" "$(t settings_thumb_mq_opt)" "$(t settings_thumb_hq_opt)" "$(t settings_thumb_max_opt)" | fzf --prompt="$(t settings_thumbq_prompt)" --height=25% --layout=reverse --border=rounded)
                 if [ -n "$tq" ]; then
                     tq="${tq%% *}"
                     set_config_val YT_THUMB_QUALITY "$tq"
-                    notify "Calidad miniaturas: $tq"
+                    notify "$l_thumbq: $tq"
                 fi
                 ;;
-            *"Refrescar cookies"*)
-                notify "Refrescando cookies..."
-                refresh_cookie_jar && notify "✅ Cookies sincronizadas" || notify "⚠ No se detectó sesión"
+            *"$l_cookies"*)
+                notify "$(t n_refreshing)"
+                refresh_cookie_jar && notify "$(t n_cookies_synced)" || notify "$(t n_cookies_none)"
                 ;;
-            *"Limpiar caché"*)
+            *"$l_cache"*)
                 clear_cache
-                notify "Caché limpiada"
+                notify "$(t n_cache_cleared)"
                 ;;
-            *"Volver"*)
+            *"$l_back"*)
                 return 0
                 ;;
         esac
@@ -177,11 +195,12 @@ settings_menu() {
 
 build_menu_options() {
     if cookies_possible; then
-        printf "󰐌  para ti\n󰎆  música\n󰑈  suscripciones\n"
+        printf "󰐌  %s\n󰎆  %s\n󰑈  %s\n" "$(t menu_foryou)" "$(t menu_music)" "$(t menu_subs)"
     else
-        printf "󰎆  música\n"
+        printf "󰎆  %s\n" "$(t menu_music)"
     fi
-    printf "󰦑  ver después\n󰋚  historial\n󰒓  ajustes\n󰈆  salir\n"
+    printf "󰦑  %s\n󰋚  %s\n󰒓  %s\n󰈆  %s\n" \
+        "$(t menu_later)" "$(t menu_history)" "$(t menu_settings)" "$(t menu_quit)"
 }
 
 main_menu() {
@@ -190,29 +209,34 @@ main_menu() {
     while :; do
         kitty_clear
         local fzf_out
-        fzf_out=$(build_menu_options | fzf \
-            --color "${YT_FZF_COLORS:-bg:-1,bg+:-1,gutter:-1,border:238,header:241,info:241,prompt:1,pointer:1,marker:2,hl:4,hl+:4,spinner:1,label:238,query:-1,fg:-1,fg+:15}" \
-            --pointer="▌" \
-            --marker="●" \
-            --scrollbar="│" \
-            --disabled \
-            --print-query \
-            --prompt="  › " \
-            --ghost="buscar en youtube..." \
-            --bind="esc:cancel" \
-            --height=38% \
-            --layout=reverse \
-            --border=rounded \
-            --border-label=" yt " \
-            --border-label-pos=2 \
-            --info=hidden)
+        local -a m_opts=(
+            --color "${YT_FZF_COLORS:-bg:-1,bg+:-1,gutter:-1,border:238,header:241,info:241,prompt:1,pointer:1,marker:2,hl:4,hl+:4,spinner:1,label:238,query:-1,fg:-1,fg+:15}"
+            --pointer="▌"
+            --marker="●"
+            --scrollbar="│"
+            --disabled
+            --print-query
+            --prompt="  › "
+            --bind="esc:cancel"
+            --height=38%
+            --layout=reverse
+            --border=rounded
+            --border-label=" yt "
+            --border-label-pos=2
+            --info=hidden
+        )
+        version_ge "$(fzf_version)" 0.58.0 && m_opts+=(--ghost="$(t menu_ghost)")
+        fzf_out=$(build_menu_options | fzf "${m_opts[@]}")
 
         local status=$?
         [ $status -ne 0 ] && return 0
 
-        local query item
+        local query item l_foryou l_music l_subs l_later l_history l_settings l_quit
         query=$(printf "%s\n" "$fzf_out" | sed -n '1p')
         item=$(printf "%s\n" "$fzf_out" | sed -n '2p')
+        l_foryou=$(t menu_foryou); l_music=$(t menu_music); l_subs=$(t menu_subs)
+        l_later=$(t menu_later); l_history=$(t menu_history)
+        l_settings=$(t menu_settings); l_quit=$(t menu_quit)
 
         if [ -n "$query" ]; then
             browse search "$query"
@@ -220,13 +244,13 @@ main_menu() {
         else
             [ -z "$item" ] && return 0
             case "$item" in
-                *"para ti"*)        browse foryou ;;
-                *"música"*)         browse music ;;
-                *"suscripciones"*)  browse subs ;;
-                *"ver después"*)    browse later ;;
-                *"historial"*)      browse history ;;
-                *"ajustes"*)        settings_menu ;;
-                *"salir"*)          return 0 ;;
+                *"$l_foryou"*)    browse foryou ;;
+                *"$l_music"*)     browse music ;;
+                *"$l_subs"*)      browse subs ;;
+                *"$l_later"*)     browse later ;;
+                *"$l_history"*)   browse history ;;
+                *"$l_settings"*)  settings_menu ;;
+                *"$l_quit"*)      return 0 ;;
             esac
             kitty_clear
         fi

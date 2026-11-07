@@ -17,6 +17,10 @@ cat > "$TMP/bin/yt-dlp" <<'STUB'
 #!/usr/bin/env bash
 echo "$*" >> "$STUB_LOG"
 [ "$1" = "--version" ] && { echo "2099.01.01"; exit 0; }
+# --print-url --direct resolution (last positional argument is the video id)
+for a in "$@"; do [ "$a" = "-g" ] && { echo "https://direct.example/${!#}"; exit 0; }; done
+# deterministic failure injection for the classified-error tests
+if [ -n "${YT_STUB_FAIL:-}" ]; then printf 'ERROR: %s\n' "$YT_STUB_FAIL" >&2; exit 1; fi
 cookies_out=""; prev=""
 for a in "$@"; do [ "$prev" = "--cookies" ] && cookies_out=$a; prev=$a; done
 case "$*" in
@@ -44,6 +48,9 @@ printf '%s\n' "$@" > "$FZF_ARGS_OUT"
 cat > "$FZF_STDIN_OUT"
 STUB
 printf '#!/usr/bin/env bash\necho "mpv 0.38 stub"\n' > "$TMP/bin/mpv"
+printf '#!/usr/bin/env bash\necho "deno 1.0 stub"\n' > "$TMP/bin/deno"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$TMP/bin/ffmpeg"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$TMP/bin/curl"
 chmod +x "$TMP/bin/"*
 export PATH="$TMP/bin:$PATH"
 
@@ -190,6 +197,24 @@ test_mix_url() {
 eq "play_mix strips RD prefix for clean playback" "$(test_mix_url RDJI2v5Tzn-g4)" "https://www.youtube.com/watch?v=JI2v5Tzn-g4&list=RDJI2v5Tzn-g4"
 eq "play_mix leaves regular ID untouched" "$(test_mix_url dqOAxZaMHMg)" "https://www.youtube.com/watch?v=dqOAxZaMHMg&list=RDdqOAxZaMHMg"
 
+# Test build_format for quality & audio modes
+eq "build_format audio" "$(build_format audio 1080)" "ba/b"
+eq "build_format 0 (max)" "$(build_format window 0)" "bestvideo+bestaudio/best"
+eq "build_format 720" "$(build_format window 720)" "bestvideo[height<=720]+bestaudio/best"
+
+# Test portable version_ge and glob-safe YT_YTDLP_ARGS
+version_ge 0.58.0 0.44.0 && ok "version_ge 0.58.0 >= 0.44.0" || bad "version_ge 0.58.0 >= 0.44.0"
+version_ge 0.43.9 0.44.0 && bad "version_ge 0.43.9 < 0.44.0" || ok "version_ge 0.43.9 < 0.44.0"
+touch "$TMP/evil.mp4"
+( cd "$TMP" && YT_YTDLP_ARGS="-o *.mp4" && set_defaults && [ "${YTDLP_EXTRA[1]}" = "*.mp4" ] ) \
+    && ok "YT_YTDLP_ARGS does not glob-expand" || bad "YT_YTDLP_ARGS expanded globs"
+
+# Test set_config_val updates without sed -i
+set_config_val YT_QUALITY 720
+eq "set_config_val writes value" "$(grep '^YT_QUALITY=' "$CONFIG_FILE")" 'YT_QUALITY="720"'
+set_config_val YT_QUALITY 1080
+eq "set_config_val updates value in-place" "$(grep -c '^YT_QUALITY=' "$CONFIG_FILE")" "1"
+
 # Test stop_prev_playback PID file management
 sleep 10 &
 DUMMY_PID=$!
@@ -207,15 +232,81 @@ has "preview prints short url" "$PV" "youtu.be/vidAAAAAAA1"
 eq "preview ignores placeholder rows" "$("$ROOT/bin/yt-thumb-preview" none x 2>&1)" ""
 
 echo "cli"
+BEFORE_TMP=$(find "$TMP" -maxdepth 1 -name 'yt.*' | wc -l | tr -d ' ')
 eq "--version" "$(bash "$ROOT/bin/yt" --version)" "yt $VERSION"
+AFTER_TMP=$(find "$TMP" -maxdepth 1 -name 'yt.*' | wc -l | tr -d ' ')
+eq "--version leaks zero temp dirs" "$AFTER_TMP" "$BEFORE_TMP"
 DOC="$(bash "$ROOT/bin/yt" --doctor 2>&1)"; RC=$?
 has "doctor lists fzf" "$DOC" "fzf"
 has "doctor checks the JS runtime" "$DOC" "js runtime"
 eq "doctor passes with all deps present" "$RC" "0"
 has "usage mentions search" "$(bash "$ROOT/bin/yt" --help)" "search YouTube"
 has "usage mentions settings" "$(bash "$ROOT/bin/yt" --help)" "--settings"
-has "menu options include music and settings" "$(build_menu_options)" "música"
+has "usage mentions --log" "$(bash "$ROOT/bin/yt" --help)" "--log"
+has "usage mentions --print-url" "$(bash "$ROOT/bin/yt" --help)" "--print-url"
 hasnt "menu options do not include trending" "$(build_menu_options)" "tendencias"
+
+echo "doctor exit codes"
+eq "doctor is quiet on a clean setup" "$(bash "$ROOT/bin/yt" --doctor >/dev/null 2>&1; echo $?)" "0"
+RC1=$( ( have() { case $1 in deno|node|bun|qjs|quickjs) return 1 ;; esac; command -v "$1" >/dev/null 2>&1; }
+         doctor >/dev/null; echo $? ) )
+eq "doctor returns 1 when only warnings remain" "$RC1" "1"
+RC2=$( ( have() { [ "$1" = fzf ] && return 1; command -v "$1" >/dev/null 2>&1; }
+         doctor >/dev/null; echo $? ) )
+eq "doctor returns 2 when a required dep is missing" "$RC2" "2"
+
+echo "log"
+rm -f "$STATE_DIR/yt.log"
+eq "--log without a log file" "$(bash "$ROOT/bin/yt" --log)" "no log entries yet"
+: > "$STATE_DIR/yt.log"
+eq "--log with an empty log file" "$(bash "$ROOT/bin/yt" --log)" "no log entries yet"
+for i in $(seq 1 60); do printf 'entry %s\n' "$i"; done > "$STATE_DIR/yt.log"
+LOGOUT="$(bash "$ROOT/bin/yt" --log)"
+eq "--log prints the last 50 lines" "$(printf '%s\n' "$LOGOUT" | wc -l | tr -d ' ')" "50"
+eq "--log keeps the newest entry" "$(printf '%s\n' "$LOGOUT" | grep -cx 'entry 60')" "1"
+eq "--log drops the oldest entry" "$(printf '%s\n' "$LOGOUT" | grep -cx 'entry 1')" "0"
+
+echo "print-url"
+eq "--print-url prints the canonical URL" "$(bash "$ROOT/bin/yt" --print-url vidAAAAAAA1)" "https://www.youtube.com/watch?v=vidAAAAAAA1"
+eq "--print-url prints nothing for an invalid id" "$(bash "$ROOT/bin/yt" --print-url 'bad!' 2>/dev/null)" ""
+eq "--print-url exits 2 for an invalid id" "$(bash "$ROOT/bin/yt" --print-url 'bad!' >/dev/null 2>&1; echo $?)" "2"
+eq "--print-url --direct resolves through yt-dlp" "$(bash "$ROOT/bin/yt" --print-url vidAAAAAAA1 --direct)" "https://direct.example/vidAAAAAAA1"
+eq "--print-url --direct accepts the flag before the id" "$(bash "$ROOT/bin/yt" --print-url --direct vidAAAAAAA1)" "https://direct.example/vidAAAAAAA1"
+
+echo "i18n"
+MENU_ES="$(YT_LANG=es build_menu_options)"
+MENU_EN="$(YT_LANG=en build_menu_options)"
+has "menu options localize es (música)" "$MENU_ES" "música"
+has "menu options localize es (ajustes)" "$MENU_ES" "ajustes"
+has "menu options localize en (music)" "$MENU_EN" "music"
+has "menu options localize en (settings)" "$MENU_EN" "settings"
+hasnt "menu options en has no Spanish labels" "$MENU_EN" "música"
+YT_LANG=es settings_menu >/dev/null 2>&1
+SET_ES="$(cat "$FZF_STDIN_OUT")"
+YT_LANG=en settings_menu >/dev/null 2>&1
+SET_EN="$(cat "$FZF_STDIN_OUT")"
+has "settings menu localizes es" "$SET_ES" "Calidad de video"
+has "settings menu localizes en" "$SET_EN" "Video quality"
+hasnt "settings menu en has no Spanish labels" "$SET_EN" "Calidad de video"
+PV_ES="$(FZF_PREVIEW_COLUMNS=50 FZF_PREVIEW_LINES=30 YT_PREVIEW=none NO_COLOR=1 YT_LANG=es "$ROOT/bin/yt-thumb-preview" vidAAAAAAA1 "A one" "Chan A" "10:00" "1.5M" 2>&1)"
+PV_EN="$(FZF_PREVIEW_COLUMNS=50 FZF_PREVIEW_LINES=30 YT_PREVIEW=none NO_COLOR=1 YT_LANG=en "$ROOT/bin/yt-thumb-preview" vidAAAAAAA1 "A one" "Chan A" "10:00" "1.5M" 2>&1)"
+has "preview footer localizes es" "$PV_ES" "enter: reproducir"
+has "preview footer localizes en" "$PV_EN" "enter: play"
+hasnt "preview footer en has no Spanish" "$PV_EN" "reproducir"
+
+echo "error classification"
+eq "classify bot check" "$(classify_err 'ERROR: Sign in to confirm you are not a bot')" "bot_check"
+eq "classify rate limit (429)" "$(classify_err 'ERROR: HTTP Error 429: Too Many Requests')" "rate_limit"
+eq "classify network error" "$(classify_err 'ERROR: Unable to download webpage: Network is unreachable')" "network_err"
+printf 'bot_check\n' > "$YT_RUNDIR/last_err"
+has "empty row shows localized bot message (en)" "$(YT_LANG=en empty_row foryou)" "sign in"
+hasnt "empty row en has no Spanish bot message" "$(YT_LANG=en empty_row foryou)" "iniciar sesión"
+has "empty row shows localized bot message (es)" "$(YT_LANG=es empty_row foryou)" "iniciar sesión"
+rm -f "$YT_RUNDIR/last_err"
+eq "empty row falls back to the view message" "$(YT_LANG=en empty_row later | cut -f1)" "none"
+YT_STUB_FAIL='Sign in to confirm you are not a bot' YT_COOKIES=off search_raw "classify-$RANDOM" auto >/dev/null
+eq "fetch_raw stores the bot_check class" "$(cat "$YT_RUNDIR/last_err" 2>/dev/null)" "bot_check"
+rm -f "$YT_RUNDIR/last_err"
 
 echo
 printf '%d passed, %d failed\n' "$PASS" "$FAIL"

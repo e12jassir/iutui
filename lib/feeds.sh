@@ -4,9 +4,21 @@
 RAW_TEMPLATE="%(id)s${TAB}%(title)s${TAB}%(uploader,channel)s${TAB}%(duration_string)s${TAB}%(url)s${TAB}%(view_count)s${TAB}%(live_status)s"
 
 fetch_raw() { # source count
+    local out errfile err cls
     prepare_cookies
-    ytdlp "${COOKIE_ARGS[@]}" --flat-playlist --no-warnings --ignore-errors \
-        --print "$RAW_TEMPLATE" --playlist-items "1:$2" -- "$1" 2>/dev/null </dev/null
+    errfile="$YT_RUNDIR/fetch_err.$$"
+    out=$(ytdlp "${COOKIE_ARGS[@]}" --flat-playlist --no-warnings --ignore-errors \
+        --print "$RAW_TEMPLATE" --playlist-items "1:$2" -- "$1" 2>"$errfile" </dev/null)
+    err=$(cat "$errfile" 2>/dev/null)
+    rm -f "$errfile"
+    [ -n "${COOKIE_TEMP:-}" ] && { rm -f "$COOKIE_TEMP"; COOKIE_TEMP=""; }
+    if [ -n "$out" ]; then
+        classify_err "" >/dev/null
+    else
+        cls=$(classify_err "$err")
+        log_err "fetch" "no data from $1${cls:+ ($cls)}"
+    fi
+    printf '%s' "$out"
 }
 
 cache_write() { # file ; stdin -> atomic replace (never stores empty data)
@@ -74,14 +86,19 @@ format_rows() {
 }
 
 empty_row() { # view
-    local key
-    case $1 in
-        later)   key=empty_later ;;
-        history) key=empty_history ;;
-        search)  key=empty_search ;;
-        music)   key=empty_music ;;
-        *)       key=empty_feed ;;
-    esac
+    local key err
+    err=$(cat "${YT_RUNDIR:-/nonexistent}/last_err" 2>/dev/null)
+    if [ -n "$err" ]; then
+        key="empty_$err"
+    else
+        case $1 in
+            later)   key=empty_later ;;
+            history) key=empty_history ;;
+            search)  key=empty_search ;;
+            music)   key=empty_music ;;
+            *)       key=empty_feed ;;
+        esac
+    fi
     printf 'none\t-\t-\t-\t-\t-\t  \033[90m%s\033[0m\n' "$(t "$key")"
 }
 
@@ -102,14 +119,24 @@ emit_rows() { # view mode query
 }
 
 prefetch_thumbs() { # rows-file (deleted when done): warm the first N thumbnails in parallel
-    local f=$1 q
+    local f=$1 q id
     if [ "$YT_PREFETCH" -le 0 ] || [ "$YT_PREVIEW" = none ] || ! have curl; then rm -f "$f"; return 0; fi
     case $YT_THUMB_QUALITY in hq) q=hqdefault ;; max) q=maxresdefault ;; *) q=mqdefault ;; esac
-    awk -F'\t' -v n="$YT_PREFETCH" 'NR <= n && $1 ~ /^[A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-]+$/ { print $1 }' "$f" |
+    local -a missing=()
+    while IFS= read -r id; do
+        [ -n "$id" ] || continue
+        if [ -s "$THUMB_DIR/${id}_${q}.jpg" ]; then continue; fi
+        if [ "$q" = "maxresdefault" ] && [ -s "$THUMB_DIR/${id}_hqdefault.jpg" ]; then continue; fi
+        missing+=("$id")
+    done < <(awk -F'\t' -v n="$YT_PREFETCH" 'NR <= n && $1 ~ /^[A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-]+$/ { print $1 }' "$f")
+    rm -f "$f"
+    [ "${#missing[@]}" -gt 0 ] || return 0
+    printf '%s\n' "${missing[@]}" |
         xargs -P 8 -I{} sh -c '
             out="$1/$2_$3.jpg"; [ -s "$out" ] && exit 0
             if curl -sfL --max-time 6 -o "$out.part.$$" "https://i.ytimg.com/vi/$2/$3.jpg" && [ -s "$out.part.$$" ]; then
-                if [ "$3" = "maxresdefault" ] && [ "$(stat -c%s "$out.part.$$" 2>/dev/null || echo 0)" -lt 3000 ]; then
+                sz=$(stat -c%s "$out.part.$$" 2>/dev/null || stat -f%z "$out.part.$$" 2>/dev/null || echo 0)
+                if [ "$3" = "maxresdefault" ] && [ "$sz" -lt 3000 ]; then
                     rm -f "$out.part.$$"
                     curl -sfL --max-time 6 -o "$1/$2_hqdefault.jpg" "https://i.ytimg.com/vi/$2/hqdefault.jpg" 2>/dev/null || true
                 else
@@ -119,7 +146,6 @@ prefetch_thumbs() { # rows-file (deleted when done): warm the first N thumbnails
                 rm -f "$out.part.$$"
                 [ "$3" = "maxresdefault" ] && curl -sfL --max-time 6 -o "$1/$2_hqdefault.jpg" "https://i.ytimg.com/vi/$2/hqdefault.jpg" 2>/dev/null || true
             fi' _ "$THUMB_DIR" {} "$q"
-    rm -f "$f"
 }
 
 emit_view() { # view mode [query]

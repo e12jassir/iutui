@@ -6,7 +6,7 @@ YT_FEED_SIZE=100            # items fetched for "for you" / subscriptions
 YT_SEARCH_SIZE=40           # results per search
 YT_HIDE_SHORTS=1            # 1 = hide Shorts
 YT_INTERLEAVE=1             # 1 = mix channels in "for you" so none floods the list
-YT_HOME=auto                # auto | foryou | subs | later | history | search
+YT_HOME=auto                # auto | foryou | music | subs | later | history | search
 
 # ── speed ────────────────────────────────────────────────
 YT_CACHE_TTL=900            # seconds a feed is considered fresh (stale data still shows instantly)

@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # yt — terminal YouTube client: fzf UI · yt-dlp metadata · mpv playback
-# https://github.com/e12jassir/ytx-cli  (MIT)
+# https://github.com/e12jassir/Youtube-CLI  (MIT)
 
-VERSION="2.1.0"
+VERSION="0.1.0"
+
+die() { printf 'yt: %s\n' "$*" >&2; exit 1; }
 
 if [ "${BASH_VERSINFO[0]:-0}" -lt 4 ]; then
     printf 'yt: bash >= 4 required / se requiere bash >= 4 (macOS: brew install bash)\n' >&2
@@ -58,6 +60,7 @@ init() { # mode: full | light
     resolve_lang
 
     mkdir -p "$CACHE_DIR" "$THUMB_DIR" "$STATE_DIR"
+    chmod 700 "$CACHE_DIR" "$STATE_DIR" 2>/dev/null || true
     [ -f "$HISTORY_FILE" ]    || : > "$HISTORY_FILE"
     [ -f "$WATCHLATER_FILE" ] || : > "$WATCHLATER_FILE"
 
@@ -67,9 +70,10 @@ init() { # mode: full | light
     OWN_RUNDIR=0
     if [ -z "${YT_RUNDIR:-}" ] || [ ! -d "$YT_RUNDIR" ]; then
         YT_RUNDIR="$(mktemp -d "${TMPDIR:-/tmp}/yt.XXXXXX")" || die "cannot create temp dir"
+        chmod 700 "$YT_RUNDIR" 2>/dev/null || true
         OWN_RUNDIR=1
     fi
-    export YT_RUNDIR YT_CACHE_DIR="$CACHE_DIR" YT_PREVIEW YT_THUMB_QUALITY
+    export YT_RUNDIR YT_CACHE_DIR="$CACHE_DIR" YT_PREVIEW YT_THUMB_QUALITY YT_LANG
 
     migrate_watchlater
     [ "${1:-full}" = full ] && housekeeping
@@ -100,8 +104,9 @@ housekeeping() {
 }
 
 cleanup() {
-    [ "${OWN_RUNDIR:-0}" = 1 ] && rm -rf "$YT_RUNDIR"
-    kitty_clear
+    [ -n "${COOKIE_TEMP:-}" ] && rm -f "$COOKIE_TEMP"
+    [ "${OWN_RUNDIR:-0}" = 1 ] && [ -n "${YT_RUNDIR:-}" ] && rm -rf "$YT_RUNDIR"
+    [ "${YT_INTERACTIVE:-0}" = 1 ] && kitty_clear
     return 0
 }
 
@@ -142,7 +147,7 @@ PY
 }
 
 doctor() {
-    local fail=0 v age js="" r
+    local fail=0 warn=0 v age js="" r
     row() { printf '  %s %-13s %s\n' "$1" "$2" "$3"; }
     printf 'yt %s — doctor\n\n' "$VERSION"
     row ✓ bash "${BASH_VERSION%%(*}"
@@ -155,16 +160,17 @@ doctor() {
     if have "$YTDLP"; then
         v=$("$YTDLP" --version 2>/dev/null | head -n 1)
         age=$(ytdlp_age_days "$v")
-        if [ -n "$age" ] && [ "$age" -gt 90 ]; then row '!' yt-dlp "$v ($age days old — update: yt-dlp -U / pipx upgrade yt-dlp)"
+        if [ -n "$age" ] && [ "$age" -gt 90 ]; then row '!' yt-dlp "$v ($age days old — update: yt-dlp -U / pipx upgrade yt-dlp)"; warn=1
         else row ✓ yt-dlp "$v"; fi
     else row ✗ yt-dlp "missing"; fail=1; fi
 
     for r in deno node bun qjs quickjs; do have "$r" && js="$js $r"; done
     if [ -n "$js" ]; then row ✓ "js runtime" "${js# }"
-    else row '!' "js runtime" "none found — YouTube needs one since yt-dlp 2025.11 (install deno: https://deno.com)"; fi
+    else row '!' "js runtime" "none found — YouTube needs one since yt-dlp 2025.11 (install deno: https://deno.com)"; warn=1; fi
 
     have mpv && row ✓ mpv "$(mpv --version 2>/dev/null | head -n 1 | cut -d' ' -f1-2)" || { row ✗ mpv missing; fail=1; }
-    have curl && row ✓ curl "found" || row '!' curl "missing (no thumbnails)"
+    have ffmpeg && row ✓ ffmpeg "found" || { row '!' ffmpeg "missing (needed for HD stream muxing & audio extraction)"; warn=1; }
+    have curl && row ✓ curl "found" || { row '!' curl "missing (no thumbnails)"; warn=1; }
     have "$PYTHON" && row ✓ python3 "$("$PYTHON" -V 2>&1)" || { row ✗ python3 missing; fail=1; }
     [ -n "$FMT" ] && row ✓ yt-fmt "$FMT" || { row ✗ yt-fmt "not found (make install)"; fail=1; }
     [ -n "$PREVIEW" ] && row ✓ preview "$PREVIEW" || { row ✗ preview "not found (make install)"; fail=1; }
@@ -190,7 +196,39 @@ doctor() {
         fi
     fi
     printf '\n  config   %s\n  cache    %s\n  state    %s\n' "$CONFIG_FILE" "$CACHE_DIR" "$STATE_DIR"
-    return $fail
+    [ "$fail" -ne 0 ] && return 2
+    [ "$warn" -ne 0 ] && return 1
+    return 0
+}
+
+show_log() {
+    local file="$STATE_DIR/yt.log"
+    if [ -s "$file" ]; then
+        tail -n 50 "$file"
+    else
+        echo "no log entries yet"
+    fi
+}
+
+print_url() {
+    local id="" direct=0 a
+    for a in "$@"; do
+        case $a in
+            --direct) direct=1 ;;
+            *) [ -z "$id" ] && id=$a ;;
+        esac
+    done
+    if ! valid_id "$id"; then
+        printf 'yt: invalid video id\n' >&2
+        return 2
+    fi
+    if [ "$direct" = 1 ]; then
+        local url
+        url=$(ytdlp -g -- "$id" 2>/dev/null | head -n 1)
+        if [ -n "$url" ]; then printf '%s\n' "$url"; return 0; fi
+    fi
+    printf '%s\n' "$(canonical_url "$id")"
+    return 0
 }
 
 clear_cache() {
@@ -209,17 +247,21 @@ usage:
   yt --view NAME        foryou | music | subs | later | history | search
   yt --settings         interactive settings menu
   yt --doctor           check dependencies, JS runtime and cookie status
+  yt --log              show the last 50 lines of the error log
+  yt --print-url ID     print the canonical URL for a video id
+  yt --print-url ID --direct   resolve the URL through yt-dlp instead
   yt --clear-cache      drop feed/search caches and thumbnails
   yt --forget-cookies   discard the cached cookie jar
   yt --version | --help
 
-keys: enter play · ^p mini · ^f fullscreen · ^a audio · ^w save · ^y copy
-      ^d download · ^o browser · ^s search · ^r reload · alt-1..5 tabs
+keys: enter play · alt-m/^x mix · ^p mini · ^f fullscreen · ^a audio · ^w save
+      ^y copy · ^d download · ^o browser · ^s search · ^r reload · alt-1..5 tabs
 config: ${XDG_CONFIG_HOME:-~/.config}/yt/config  (see config.example)
 EOF
 }
 
 main() {
+    trap cleanup EXIT
     case "${1:-}" in
         __list)    shift; init light; cmd_list "$@"; return 0 ;;
         __do)      shift; init light; do_action "$@"; return 0 ;;
@@ -230,6 +272,8 @@ main() {
         -v|--version)     echo "yt $VERSION" ;;
         --settings)       settings_menu ;;
         --doctor)         doctor ;;
+        --log)            show_log ;;
+        --print-url)      shift; print_url "$@" ;;
         --clear-cache)    clear_cache ;;
         --forget-cookies) forget_cookies ;;
         --view)           shift; browse "${1:-foryou}" ;;

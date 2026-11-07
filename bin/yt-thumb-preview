@@ -17,10 +17,23 @@ icat() {
     fi
 }
 clear_icat() {
-    if is_kitty; then
+    if is_kitty && [ -t 1 ] && [ -c /dev/tty ] && { : >/dev/tty; } 2>/dev/null; then
         icat --clear --silent </dev/tty >/dev/tty 2>/dev/null || true
-        printf '\033_Ga=d,d=a\033\\' >/dev/tty 2>/dev/null || printf '\033_Ga=d,d=a\033\\' 2>/dev/null || true
+        printf '\033_Ga=d,d=a\033\\' >/dev/tty 2>/dev/null || true
     fi
+}
+
+lang="${YT_LANG:-}"
+case "$lang" in
+    es|en) ;;
+    *) case "${LC_ALL:-${LC_MESSAGES:-${LANG:-}}}" in es*) lang=es ;; *) lang=en ;; esac ;;
+esac
+
+t() {
+    case "$lang:$1" in
+        es:preview_keys) printf '%s' 'enter: reproducir  ·  alt-m: mix radio  ·  ctrl-p: mini  ·  ctrl-f: full  ·  ctrl-a: audio  ·  ctrl-y: copiar  ·  ctrl-w: guardar  ·  esc: volver' ;;
+        en:preview_keys) printf '%s' 'enter: play  ·  alt-m: mix radio  ·  ctrl-p: mini  ·  ctrl-f: full  ·  ctrl-a: audio  ·  ctrl-y: copy  ·  ctrl-w: save  ·  esc: back' ;;
+    esac
 }
 
 id="${1:-}"
@@ -68,6 +81,17 @@ fetch() { # quality -> file
         return 1
     fi
 }
+
+if [ "$mode" != "none" ] && [ ! -s "$file" ]; then
+    # Reuse already-cached lower-res fallback before making any network calls (negative cache)
+    if [ "$q" = "maxresdefault" ]; then
+        if [ -s "$thumbs/${id}_hqdefault.jpg" ]; then
+            file="$thumbs/${id}_hqdefault.jpg"
+        elif [ -s "$thumbs/${id}_mqdefault.jpg" ]; then
+            file="$thumbs/${id}_mqdefault.jpg"
+        fi
+    fi
+fi
 
 if [ "$mode" != "none" ] && [ ! -s "$file" ] && command -v curl >/dev/null 2>&1; then
     mkdir -p "$thumbs"
@@ -146,4 +170,4 @@ add_meta "$dur"
 
 printf '  %syoutu.be/%s%s\n\n' "$LINK" "$id" "$RST"
 sep
-printf '\033[90m  enter: reproducir  ·  ctrl-m: mix radio  ·  ctrl-p: mini  ·  ctrl-f: full  ·  ctrl-a: audio  ·  ctrl-y: copiar  ·  ctrl-w: guardar  ·  esc: volver\033[0m\n'
+printf '\033[90m  %s\033[0m\n' "$(t preview_keys)"

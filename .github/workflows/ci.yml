@@ -1,10 +1,20 @@
 name: ci
 on: [push, pull_request]
 jobs:
-  test:
-    runs-on: ubuntu-latest
+  verify:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y shellcheck python3
-      - run: make lint
-      - run: make test
+      - name: install shellcheck (linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y shellcheck python3
+      - name: install bash and shellcheck (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install bash shellcheck
+          echo "$(brew --prefix)/bin" >> "$GITHUB_PATH"
+      - run: make verify

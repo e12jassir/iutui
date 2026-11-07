@@ -12,13 +12,13 @@ with mpv — without leaving the keyboard.
 - **Stale-while-revalidate.** Your feed appears instantly from cache while a refresh runs behind it.
 - **Cookies read once**, not on every call (6 h by default). Only Google/YouTube cookies are kept, with `600` permissions.
 - **Thumbnails pre-fetched in parallel**, light 16:9 images (~10 KB).
-- **Direct playback.** mpv drives yt-dlp, so playback starts sooner and seeking works; it falls back to the old pipe on errors.
+- **Authenticated stream pipeline.** Streams through `yt-dlp` into `mpv` with your session cookies so HD playback starts reliably without CDN 403 blocks.
 - **Nothing blocks the UI.** Play, save, copy and download run detached; the list stays open.
 
 ## Install
 
 ```sh
-git clone https://github.com/e12jassir/ytx-cli && cd ytx-cli
+git clone https://github.com/e12jassir/Youtube-CLI && cd Youtube-CLI
 ./install.sh        # or: make install      (PREFIX=~/.local by default)
 yt --doctor         # verifies everything below
 ```
@@ -26,10 +26,10 @@ yt --doctor         # verifies everything below
 | Needs | Notes |
 |---|---|
 | bash ≥ 4 | macOS: `brew install bash` |
-| fzf ≥ 0.44 | |
+| fzf ≥ 0.44 | `≥ 0.58` enables ghost text hints |
 | yt-dlp (recent) | keep it updated: `yt-dlp -U` |
 | **a JavaScript runtime** | since yt-dlp 2025.11 YouTube needs Deno (recommended), Node, Bun or QuickJS |
-| mpv, curl, python3 | |
+| mpv, ffmpeg, curl, python3 | |
 | optional | kitty/Ghostty or `chafa` (thumbnails), `wl-copy`/`xclip`/`pbcopy`, `notify-send` |
 
 ## Use
@@ -43,7 +43,7 @@ yt --settings      # interactive settings menu (quality, volume, preview, cookie
 
 | Key | Action | Key | Action |
 |---|---|---|---|
-| `enter` | play (window / audio in music) | `^m` | mix radio (continuous autoplay) |
+| `enter` | play (window / audio in music) | `alt-m` / `^x` | mix radio (continuous autoplay) |
 | `^p` | mini picture-in-picture | `^w` | save / unsave |
 | `^f` | fullscreen | `^y` | copy `youtu.be` link |
 | `^a` | audio only | `^d` | download (video/mp3) |

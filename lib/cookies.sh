@@ -86,8 +86,11 @@ refresh_cookie_jar() {
 }
 
 COOKIE_ARGS=()
+COOKIE_TEMP=""
 prepare_cookies() { # sets COOKIE_ARGS=(--cookies <private copy>) or ()
     COOKIE_ARGS=()
+    [ -n "${COOKIE_TEMP:-}" ] && rm -f "$COOKIE_TEMP"
+    COOKIE_TEMP=""
     [ "$YT_COOKIES" = off ] && return 0
     local src=""
     if [ -n "$YT_COOKIES_FILE" ]; then
@@ -105,7 +108,12 @@ prepare_cookies() { # sets COOKIE_ARGS=(--cookies <private copy>) or ()
     [ -n "$src" ] || return 0
     local copy
     copy="$(mktemp "$CACHE_DIR/ck.XXXXXX")" || return 0
-    cp "$src" "$copy" 2>/dev/null && COOKIE_ARGS=(--cookies "$copy") || rm -f "$copy"
+    if ( umask 077; filter_cookies < "$src" > "$copy" ) 2>/dev/null && [ -s "$copy" ]; then
+        COOKIE_TEMP="$copy"
+        COOKIE_ARGS=(--cookies "$copy")
+    else
+        rm -f "$copy"
+    fi
     return 0
 }
 

@@ -58,18 +58,25 @@ set_defaults() {
     as_enum YT_DOWNLOAD_AUDIO 0 0 1
     YTDLP="$YT_YTDLP"
     PYTHON="$YT_PYTHON"
+    set -f
     # shellcheck disable=SC2206
     YTDLP_EXTRA=($YT_YTDLP_ARGS)
+    set +f
 }
 
 set_config_val() {
-    local key="$1" val="$2" file="$CONFIG_FILE"
+    local key="$1" val="$2" file="$CONFIG_FILE" tmp
     mkdir -p "$(dirname "$file")"
-    [ -f "$file" ] || touch "$file"
-    if grep -qE "^[[:space:]]*${key}=" "$file"; then
-        sed -i -E "s|^[[:space:]]*(${key}=).*|\1\"${val}\"|" "$file"
-    else
-        printf '%s="%s"\n' "$key" "$val" >> "$file"
-    fi
+    [ -f "$file" ] || : > "$file"
+    tmp="$file.tmp.$$"
+    awk -v k="$key" -v v="$val" '
+        BEGIN { done = 0 }
+        $0 ~ "^[[:space:]]*" k "=" {
+            if (!done) { print k "=\"" v "\""; done = 1 }
+            next
+        }
+        { print }
+        END { if (!done) print k "=\"" v "\"" }
+    ' "$file" > "$tmp" && mv -f "$tmp" "$file" || rm -f "$tmp"
     printf -v "$key" '%s' "$val"
 }

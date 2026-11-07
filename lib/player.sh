@@ -6,10 +6,22 @@ stop_prev_playback() {
     if [ -f "$pid_file" ]; then
         local old_pid
         old_pid=$(cat "$pid_file" 2>/dev/null || true)
-        if [ -n "$old_pid" ] && kill -0 "$old_pid" 2>/dev/null; then
-            kill "$old_pid" 2>/dev/null || true
+        if [ -n "$old_pid" ]; then
+            kill -TERM -- -"$old_pid" 2>/dev/null || kill -TERM "$old_pid" 2>/dev/null || true
+            pkill -P "$old_pid" 2>/dev/null || true
         fi
         rm -f "$pid_file"
+    fi
+}
+
+build_format() { # mode [quality]
+    local mode=${1:-window} q=${2:-${YT_QUALITY:-1080}}
+    if [ "$mode" = "audio" ]; then
+        printf 'ba/b'
+    elif [ "$q" = 0 ] || [ -z "$q" ]; then
+        printf 'bestvideo+bestaudio/best'
+    else
+        printf 'bestvideo[height<=%s]+bestaudio/best' "$q"
     fi
 }
 
@@ -36,13 +48,7 @@ play_video() { # mode id url title channel dur
     url=$(canonical_url "$id" "$3")
     record_history "$id" "$title" "${5:--}" "${6:--}" "$url"
 
-    if [ "$mode" = "audio" ]; then
-        vfmt="ba/b"
-    elif [ "$YT_QUALITY" = 0 ]; then
-        vfmt="bestvideo[height<=1080]+bestaudio/best"
-    else
-        vfmt="bestvideo[height<=$YT_QUALITY]+bestaudio/best"
-    fi
+    vfmt=$(build_format "$mode" "$YT_QUALITY")
 
     local -a mo=(
         --hwdec=auto-safe
@@ -80,31 +86,21 @@ play_video() { # mode id url title channel dur
 
     stop_prev_playback
 
+    prepare_cookies fast
+    local ck_tmp="${COOKIE_TEMP:-}"
+    COOKIE_TEMP=""
+
+    set -m
     (
-        # Fast path: extract direct HD video + audio streams via yt-dlp
-        local raw_urls
-        raw_urls=$(ytdlp --no-playlist -g --no-warnings -f "$vfmt" -- "$url" 2>/dev/null || true)
-        local v_stream a_stream
-        v_stream=$(printf '%s\n' "$raw_urls" | sed -n '1p')
-        a_stream=$(printf '%s\n' "$raw_urls" | sed -n '2p')
-
-        if [ -n "$v_stream" ]; then
-            if [ -n "$a_stream" ]; then
-                exec mpv "${mo[@]}" "$v_stream" --audio-file="$a_stream"
-            else
-                exec mpv "${mo[@]}" "$v_stream"
-            fi
-        fi
-
-        # Fallback path if direct stream extraction fails
-        prepare_cookies fast
+        trap '[ -n "$ck_tmp" ] && rm -f "$ck_tmp"' EXIT
         if [ "$mode" = "audio" ]; then
-            ytdlp "${COOKIE_ARGS[@]}" -f "ba/b" -o - -- "$url" 2>/dev/null | exec mpv "${mo[@]}" -
+            ytdlp "${COOKIE_ARGS[@]}" -f "$vfmt" -o - -- "$url" 2>/dev/null | mpv "${mo[@]}" -
         else
-            ytdlp "${COOKIE_ARGS[@]}" -f "bestvideo[height<=$YT_QUALITY]+bestaudio/best" --remux-video mkv -o - -- "$url" 2>/dev/null | exec mpv "${mo[@]}" -
+            ytdlp "${COOKIE_ARGS[@]}" -f "$vfmt" --remux-video mkv -o - -- "$url" 2>/dev/null | mpv "${mo[@]}" -
         fi
     ) </dev/null >/dev/null 2>&1 &
     local new_pid=$!
+    set +m
     echo "$new_pid" > "$STATE_DIR/audio.pid"
     disown "$new_pid" 2>/dev/null || true
 }
@@ -138,6 +134,8 @@ play_mix() { # id title channel
     )
 
     prepare_cookies fast
+    local ck_tmp="${COOKIE_TEMP:-}"
+    COOKIE_TEMP=""
     if [ "${#COOKIE_ARGS[@]}" -ge 2 ] && [ "${COOKIE_ARGS[0]}" = "--cookies" ]; then
         mo+=(--ytdl-raw-options-append="cookies=${COOKIE_ARGS[1]}")
     fi
@@ -146,13 +144,17 @@ play_mix() { # id title channel
 
     if [ "$YT_MUSIC_MODE" = "term" ]; then
         mpv "${mo[@]}" "$mix_url"
+        [ -n "$ck_tmp" ] && rm -f "$ck_tmp"
         return 0
     fi
 
+    set -m
     (
-        exec mpv "${mo[@]}" --no-terminal "$mix_url"
+        trap '[ -n "$ck_tmp" ] && rm -f "$ck_tmp"' EXIT
+        mpv "${mo[@]}" --no-terminal "$mix_url"
     ) </dev/null >/dev/null 2>&1 &
     local new_pid=$!
+    set +m
     echo "$new_pid" > "$STATE_DIR/audio.pid"
     disown "$new_pid" 2>/dev/null || true
 }

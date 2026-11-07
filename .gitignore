@@ -6,6 +6,14 @@ thumbs/
 .local/
 __pycache__/
 
+# Internal planning & agent artifacts (repo-hygiene)
+.atl/
+docs/audit/
+docs/ROADMAP.md
+PLAN*.md
+PROPUESTAS*.md
+repomix*
+
 # OS & Editor
 .DS_Store
 *.swp
