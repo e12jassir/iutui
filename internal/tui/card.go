@@ -2,36 +2,43 @@ package tui
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/e12jassir/ytx-cli/internal/data"
 	"github.com/e12jassir/ytx-cli/internal/model"
 )
 
 const (
 	CardInnerWidth  = 34
 	CardTotalWidth  = 36 // Inner + borders
-	CardThumbHeight = 6
-	CardTotalHeight = 13
+	CardThumbHeight = 5
+	CardTotalHeight = 12
 )
 
 var (
-	// Base borders & colors
-	colorBorderNormal   = lipgloss.Color("#2C2E3B")
-	colorBorderSelected = lipgloss.Color("#FF3333") // YouTube red accent
-	colorDim            = lipgloss.Color("#71768E")
-	colorAccent         = lipgloss.Color("#00E5FF") // Electric cyan
+	// Theme Colors (Modern Spotatui Dark Palette)
+	colorBgCard         = lipgloss.Color("#161822")
+	colorBgThumb        = lipgloss.Color("#0E1017")
+	colorBorderNormal   = lipgloss.Color("#262938")
+	colorBorderSelected = lipgloss.Color("#FF2A55") // Vibrant YouTube Accent
+	colorDim            = lipgloss.Color("#6C728A")
+	colorAccent         = lipgloss.Color("#00E5FF") // Electric Cyan
 	colorLiveBadge      = lipgloss.Color("#FF1744")
-	colorDurationBadge  = lipgloss.Color("#1E212D")
+	colorDurationBadge  = lipgloss.Color("#1F2330")
 
 	cardStyleNormal = lipgloss.NewStyle().
 			Width(CardInnerWidth).
+			Background(colorBgCard).
 			BorderStyle(lipgloss.RoundedBorder()).
 			BorderForeground(colorBorderNormal).
 			Padding(0, 1)
 
 	cardStyleSelected = lipgloss.NewStyle().
 				Width(CardInnerWidth).
+				Background(lipgloss.Color("#1D202F")).
 				BorderStyle(lipgloss.ThickBorder()).
 				BorderForeground(colorBorderSelected).
 				Padding(0, 1)
@@ -40,8 +47,15 @@ var (
 				Width(CardInnerWidth - 2).
 				Height(CardThumbHeight).
 				Align(lipgloss.Center, lipgloss.Center).
-				Background(lipgloss.Color("#14161F")).
+				Background(colorBgThumb).
 				Foreground(colorDim)
+
+	thumbCachedStyle = lipgloss.NewStyle().
+				Width(CardInnerWidth - 2).
+				Height(CardThumbHeight).
+				Align(lipgloss.Center, lipgloss.Center).
+				Background(lipgloss.Color("#111528")).
+				Foreground(lipgloss.Color("#5B6998"))
 
 	liveBadgeStyle = lipgloss.NewStyle().
 			Bold(true).
@@ -50,13 +64,14 @@ var (
 			Padding(0, 1)
 
 	durationBadgeStyle = lipgloss.NewStyle().
+				Bold(true).
 				Background(colorDurationBadge).
-				Foreground(lipgloss.Color("#D1D5DB")).
+				Foreground(lipgloss.Color("#CBD5E1")).
 				Padding(0, 1)
 
 	titleStyleNormal = lipgloss.NewStyle().
 				Bold(true).
-				Foreground(lipgloss.Color("#E5E7EB"))
+				Foreground(lipgloss.Color("#E2E8F0"))
 
 	titleStyleSelected = lipgloss.NewStyle().
 				Bold(true).
@@ -69,22 +84,42 @@ var (
 			Foreground(colorDim)
 )
 
+// HasCachedThumbnail checks if a thumbnail is already on disk.
+func HasCachedThumbnail(id string) bool {
+	cacheDir, _ := data.DefaultPaths()
+	thumbsDir := filepath.Join(cacheDir, "thumbs")
+	for _, q := range []string{"mqdefault", "hqdefault", "maxresdefault"} {
+		f := filepath.Join(thumbsDir, fmt.Sprintf("%s_%s.jpg", id, q))
+		if info, err := os.Stat(f); err == nil && info.Size() > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // RenderCard renders a single video card with a strict 3-tier layout:
 // Tier 1: Thumbnail box (placeholder or Kitty graphics canvas)
 // Tier 2: Badge bar (Live status or Duration)
 // Tier 3: Metadata (Title, Channel, Views & Date)
 func RenderCard(v model.Video, isSelected bool) string {
-	// Tier 1: Thumbnail viewport placeholder
-	thumbContent := fmt.Sprintf("▶ [%s]\n16:9 Thumbnail", v.ID)
-	thumbView := thumbPlaceholderStyle.Render(thumbContent)
+	// Tier 1: Thumbnail viewport
+	var thumbView string
+	if HasCachedThumbnail(v.ID) {
+		thumbView = thumbCachedStyle.Render(fmt.Sprintf("⚡ [THUMB CACHED]\n▶ %s", v.ID))
+	} else {
+		thumbView = thumbPlaceholderStyle.Render(fmt.Sprintf("▶ [%s]\n16:9 Miniatura", v.ID))
+	}
 
 	// Tier 2: Dedicated Badge Row
 	var badgeView string
 	if v.IsLive {
 		badgeView = liveBadgeStyle.Render("🔴 EN VIVO")
+	} else if v.Duration != "" {
+		badgeView = durationBadgeStyle.Render(v.Duration)
 	} else {
-		badgeView = durationBadgeStyle.Render(v.Badge())
+		badgeView = durationBadgeStyle.Render("--:--")
 	}
+
 	badgeRow := lipgloss.NewStyle().
 		Width(CardInnerWidth - 2).
 		Align(lipgloss.Right).
@@ -101,7 +136,10 @@ func RenderCard(v model.Video, isSelected bool) string {
 	channelView := channelStyle.Render(truncate(v.Channel, CardInnerWidth-2))
 
 	// Views and date line
-	metaText := strings.TrimSpace(fmt.Sprintf("%s • %s", v.Views, v.Published))
+	metaText := strings.TrimSpace(v.Views)
+	if metaText == "" {
+		metaText = "YouTube"
+	}
 	metaView := metaStyle.Render(truncate(metaText, CardInnerWidth-2))
 
 	// Assemble card body
@@ -140,14 +178,13 @@ func wrapOrTruncate(s string, maxWidth, maxLines int) []string {
 
 	for _, w := range words {
 		if len(lines) == maxLines-1 {
-			// On the final allowed line, fit as many words as possible then append ellipsis
 			test := currentLine
 			if test != "" {
 				test += " "
 			}
 			test += w
 			if len(test) > maxWidth {
-				if len(test) > maxWidth-3 && len(currentLine) > 0 {
+				if len(currentLine) > 0 {
 					currentLine += "..."
 				} else {
 					currentLine = truncate(test, maxWidth)
@@ -175,7 +212,6 @@ func wrapOrTruncate(s string, maxWidth, maxLines int) []string {
 		lines = append(lines, currentLine)
 	}
 
-	// Pad with empty lines if fewer than maxLines for consistent card height
 	for len(lines) < maxLines {
 		lines = append(lines, "")
 	}
