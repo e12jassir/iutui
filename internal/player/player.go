@@ -51,6 +51,18 @@ func FindSocket() string {
 		}
 	}
 
+	uid := os.Getuid()
+	if xdg := os.Getenv("XDG_RUNTIME_DIR"); xdg != "" {
+		s := filepath.Join(xdg, fmt.Sprintf("yt-%d", uid), "mpv.sock")
+		if _, err := os.Stat(s); err == nil {
+			return s
+		}
+	}
+	s := fmt.Sprintf("/tmp/yt-%d/mpv.sock", uid)
+	if _, err := os.Stat(s); err == nil {
+		return s
+	}
+
 	// Search in /tmp/yt.*/mpv.sock
 	matches, _ := filepath.Glob("/tmp/yt.*/mpv.sock")
 	if len(matches) > 0 {

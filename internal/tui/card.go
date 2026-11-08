@@ -18,7 +18,7 @@ const (
 var (
 	// Transparent / Terminal Native Theme
 	colorBorderNormal   = lipgloss.Color("#2E3346")
-	colorBorderSelected = lipgloss.Color("#FF2A55") // Accent border
+	colorBorderSelected = lipgloss.Color("#BD93F9") // Spotatui Vibrant Purple
 	colorDim            = lipgloss.Color("#6B7280")
 	colorAccent         = lipgloss.Color("#38BDF8") // Subtle sky cyan
 	colorLiveBadge      = lipgloss.Color("#EF4444")
@@ -31,8 +31,9 @@ var (
 
 	cardStyleSelected = lipgloss.NewStyle().
 				Width(CardInnerWidth).
-				BorderStyle(lipgloss.ThickBorder()).
+				BorderStyle(lipgloss.RoundedBorder()).
 				BorderForeground(colorBorderSelected).
+				Bold(true).
 				Padding(0, 0)
 
 	liveBadgeStyle = lipgloss.NewStyle().

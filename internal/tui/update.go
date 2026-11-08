@@ -31,7 +31,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case SearchResultMsg:
 		m.SearchPending = false
 		if msg.Err == nil && len(msg.Videos) > 0 {
-			m.Table = NewTableState(msg.Videos)
+			m.Grid = NewGridState(msg.Videos)
 			m.StatusMessage = fmt.Sprintf("Resultados para '%s' (%d videos)", msg.Query, len(msg.Videos))
 		} else if msg.Err != nil {
 			m.StatusMessage = fmt.Sprintf("Error buscando '%s': %v", msg.Query, msg.Err)
@@ -95,8 +95,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.updateSearch(msg)
 	case FocusSidebar:
 		return m.updateSidebar(msg)
-	case FocusTable:
-		return m.updateTable(msg)
+	case FocusGrid:
+		return m.updateGrid(msg)
 	case FocusPlayer:
 		return m.updatePlayer(msg)
 	}
@@ -110,8 +110,8 @@ func (m *Model) cycleFocus(forward bool) {
 		case FocusSearch:
 			m.Focus = FocusSidebar
 		case FocusSidebar:
-			m.Focus = FocusTable
-		case FocusTable:
+			m.Focus = FocusGrid
+		case FocusGrid:
 			m.Focus = FocusPlayer
 		case FocusPlayer:
 			m.Focus = FocusSearch
@@ -121,8 +121,8 @@ func (m *Model) cycleFocus(forward bool) {
 		case FocusSearch:
 			m.Focus = FocusPlayer
 		case FocusPlayer:
-			m.Focus = FocusTable
-		case FocusTable:
+			m.Focus = FocusGrid
+		case FocusGrid:
 			m.Focus = FocusSidebar
 		case FocusSidebar:
 			m.Focus = FocusSearch
@@ -134,12 +134,12 @@ func (m *Model) cycleFocus(forward bool) {
 func (m Model) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
-		m.Focus = FocusTable
+		m.Focus = FocusGrid
 		m.Searching = false
 		return m, nil
 
 	case "enter":
-		m.Focus = FocusTable
+		m.Focus = FocusGrid
 		m.Searching = false
 		if m.SearchQuery != "" {
 			m.SearchPending = true
@@ -207,7 +207,7 @@ func (m Model) updateSidebar(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case "enter", "l", "right":
-		m.Focus = FocusTable
+		m.Focus = FocusGrid
 
 	case "q":
 		return m, tea.Quit
@@ -216,32 +216,31 @@ func (m Model) updateSidebar(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// updateTable navigates the tracks table and triggers playback.
-func (m Model) updateTable(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	visHeight := m.Height - 3 - 5 - 2
-	if visHeight < 5 {
-		visHeight = 5
-	}
+// updateGrid navigates the YouTube cards grid with thumbnails.
+func (m Model) updateGrid(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	cols := CalcCols(m.gridWidth())
 
 	switch msg.String() {
-	case "j", "down":
-		m.Table.MoveDown(visHeight)
+	case "h", "left":
+		_, col := m.Grid.CurrentCoords(cols)
+		if col == 0 && msg.String() == "h" {
+			m.Focus = FocusSidebar
+			return m, nil
+		}
+		m.Grid.MoveLeft()
+
+	case "l", "right":
+		m.Grid.MoveRight()
 
 	case "k", "up":
-		m.Table.MoveUp(visHeight)
+		m.Grid.MoveUp(cols)
 
-	case "g", "home":
-		m.Table.SelectDirect(0, visHeight)
-
-	case "G", "end":
-		m.Table.SelectDirect(len(m.Table.Videos)-1, visHeight)
-
-	case "h", "left":
-		m.Focus = FocusSidebar
+	case "j", "down":
+		m.Grid.MoveDown(cols)
 
 	case "enter":
-		if v, ok := m.Table.SelectedVideo(); ok {
-			mode := "auto"
+		if v, ok := m.Grid.SelectedVideo(); ok {
+			mode := "window"
 			if m.ActiveTab == model.TabMusic {
 				mode = "audio"
 			}
@@ -249,7 +248,7 @@ func (m Model) updateTable(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if err != nil {
 				m.StatusMessage = fmt.Sprintf("Error iniciando reproductor: %v", err)
 			} else {
-				m.StatusMessage = fmt.Sprintf("▶ Lanzando mpv: %s", v.Title)
+				m.StatusMessage = fmt.Sprintf("▶ Lanzando mpv en ventana: %s", v.Title)
 			}
 		}
 
@@ -307,17 +306,14 @@ func (m Model) updatePlayer(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// handleMouse implements complete 2D mouse hit-testing for Spotatui panels and buttons.
+// handleMouse implements complete 2D mouse hit-testing for Spotatui panels, cards, and buttons.
 func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
-	visHeight := m.Height - 3 - 5 - 2
-	if visHeight < 5 {
-		visHeight = 5
-	}
+	cols := CalcCols(m.gridWidth())
 
 	// 1. Mouse wheel scrolling
 	if msg.Button == tea.MouseButtonWheelUp {
 		if msg.X >= SidebarWidth {
-			m.Table.MoveUp(visHeight)
+			m.Grid.MoveUp(cols)
 		} else {
 			if m.ActiveTab > 0 {
 				m.ActiveTab--
@@ -329,7 +325,7 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 
 	if msg.Button == tea.MouseButtonWheelDown {
 		if msg.X >= SidebarWidth {
-			m.Table.MoveDown(visHeight)
+			m.Grid.MoveDown(cols)
 		} else {
 			tabs := DefaultLibraryTabs()
 			if int(m.ActiveTab) < len(tabs)-1 {
@@ -385,23 +381,28 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 					}
 				}
 			} else {
-				// Tracks Table clicked
-				m.Focus = FocusTable
-				// Header is line 0 of table body (Y = 4). First track starts at Y = 5.
-				clickedRow := (msg.Y - 5) + m.Table.ScrollOffset
-				if clickedRow >= 0 && clickedRow < len(m.Table.Videos) {
-					if m.Table.SelectedIdx == clickedRow {
-						// Double-click / re-click on selected track: PLAY!
-						if v, ok := m.Table.SelectedVideo(); ok {
-							mode := "auto"
+				// YouTube Cards Grid clicked
+				m.Focus = FocusGrid
+				relX := msg.X - SidebarWidth - 1
+				relY := msg.Y - 3
+
+				cardCol := relX / (CardTotalWidth + 2)
+				cardRow := (relY / (CardTotalHeight + 1)) + m.Grid.ScrollRow
+
+				if cardCol >= 0 && cardCol < cols && cardRow >= 0 {
+					clickedIdx := cardRow*cols + cardCol
+					if clickedIdx >= 0 && clickedIdx < len(m.Grid.Videos) {
+						if m.Grid.SelectedIdx == clickedIdx {
+							// Double-click / re-click on selected video card: PLAY IN WINDOW!
+							mode := "window"
 							if m.ActiveTab == model.TabMusic {
 								mode = "audio"
 							}
-							_ = player.PlayVideo(v, mode)
-							m.StatusMessage = fmt.Sprintf("▶ Reproduciendo: %s", v.Title)
+							_ = player.PlayVideo(m.Grid.Videos[clickedIdx], mode)
+							m.StatusMessage = fmt.Sprintf("▶ Lanzando mpv en ventana: %s", m.Grid.Videos[clickedIdx].Title)
+						} else {
+							m.Grid.SelectedIdx = clickedIdx
 						}
-					} else {
-						m.Table.SelectDirect(clickedRow, visHeight)
 					}
 				}
 			}
@@ -411,9 +412,8 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		// Bottom Playing Bar (Y >= m.Height - 5)
 		if msg.Y >= middleBottom {
 			m.Focus = FocusPlayer
-			// Line 3 of player box (Y = m.Height - 2) has clickable control buttons
 			if msg.Y == m.Height-2 {
-				// Check X coordinate zones:
+				// Check X coordinate zones for buttons:
 				// [Prev]   [Play/Pause]   [Next]   [Seek -10]   [Seek +10]   [Vol-]   [Vol+]
 				if msg.X >= 2 && msg.X <= 9 {
 					_ = player.Prev()
@@ -449,6 +449,14 @@ func (m *Model) switchTab(tab model.Tab) {
 			m.Feeds[tab] = vids
 		}
 	}
-	m.Table = NewTableState(videos)
+	m.Grid = NewGridState(videos)
 	m.StatusMessage = fmt.Sprintf("Vista: %s (%d videos)", tab.String(), len(videos))
+}
+
+func (m Model) gridWidth() int {
+	w := m.Width - SidebarWidth - 2
+	if w < CardTotalWidth {
+		return CardTotalWidth
+	}
+	return w
 }

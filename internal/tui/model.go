@@ -14,7 +14,7 @@ type FocusArea int
 const (
 	FocusSearch FocusArea = iota
 	FocusSidebar
-	FocusTable
+	FocusGrid
 	FocusPlayer
 )
 
@@ -36,7 +36,7 @@ type Model struct {
 	SelectedPlaylistIdx int
 	Playlists           []string
 
-	Table         TableState
+	Grid          GridState
 	Feeds         map[model.Tab][]model.Video
 	Width         int
 	Height        int
@@ -51,7 +51,7 @@ type Model struct {
 	ShowSettings bool
 }
 
-// InitialModel constructs the default Spotatui-style state with initial feeds.
+// InitialModel constructs the default state with YouTube card grid and Spotatui framing.
 func InitialModel(initialFeeds map[model.Tab][]model.Video) Model {
 	homeVideos := initialFeeds[model.TabHome]
 	defaultPlaylists := []string{
@@ -63,13 +63,13 @@ func InitialModel(initialFeeds map[model.Tab][]model.Video) Model {
 
 	return Model{
 		ActiveTab:           model.TabHome,
-		Focus:               FocusTable,
+		Focus:               FocusGrid,
 		InPlaylists:         false,
 		SelectedPlaylistIdx: 0,
 		Playlists:           defaultPlaylists,
-		Table:               NewTableState(homeVideos),
+		Grid:                NewGridState(homeVideos),
 		Feeds:               initialFeeds,
-		StatusMessage:       "Spotatui TUI lista · Clic con mouse o Tab para cambiar foco · Enter para reproducir",
+		StatusMessage:       "Spotatui YouTube TUI lista · Clic en tarjetas o Enter para reproducir video",
 	}
 }
 

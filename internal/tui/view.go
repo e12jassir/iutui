@@ -2,14 +2,13 @@ package tui
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/e12jassir/ytx-cli/internal/player"
 	"github.com/mattn/go-runewidth"
 )
 
-// View renders the complete Spotatui-style interface with purple panel focus.
+// View renders the complete Spotatui-style interface with real ANSI YouTube thumbnail cards.
 func (m Model) View() string {
 	if !m.Ready || m.Width < 40 || m.Height < 15 {
 		return "\n  ⚡ Cargando ytx-cli Spotatui TUI..."
@@ -40,7 +39,7 @@ func (m Model) View() string {
 
 	topBar := lipgloss.JoinHorizontal(lipgloss.Top, searchBox, helpBox, settingsBox)
 
-	// 2. Middle Section: [Sidebar (Library + Playlists)] + [Tracks Table]
+	// 2. Middle Section: [Sidebar (Library + Playlists)] + [YouTube Cards Grid with Thumbnails]
 	playerHeight := 5
 	middleHeight := m.Height - 3 - playerHeight
 	if middleHeight < 8 {
@@ -48,9 +47,9 @@ func (m Model) View() string {
 	}
 
 	sidebarWidth := SidebarWidth
-	tableWidth := m.Width - sidebarWidth
-	if tableWidth < 25 {
-		tableWidth = 25
+	gridWidth := m.Width - sidebarWidth - 2
+	if gridWidth < CardTotalWidth {
+		gridWidth = CardTotalWidth
 	}
 
 	sidebarView := RenderSidebarSpotatui(
@@ -63,32 +62,9 @@ func (m Model) View() string {
 		m.SelectedPlaylistIdx,
 	)
 
-	// Determine table title
-	var tableTitle string
-	if m.SearchPending {
-		tableTitle = fmt.Sprintf("Searching: %s… ⏳", m.SearchQuery)
-	} else if m.SearchQuery != "" {
-		tableTitle = fmt.Sprintf("Search: %s (%d tracks)", m.SearchQuery, len(m.Table.Videos))
-	} else {
-		tableTitle = fmt.Sprintf("%s (%d tracks)", m.ActiveTab.String(), len(m.Table.Videos))
-	}
+	gridView := RenderGrid(&m.Grid, gridWidth, middleHeight, m.Focus == FocusGrid)
 
-	nowPlayingID := ""
-	// Match title to identify current playing track in table
-	if m.PlayerStatus.IsRunning && m.PlayerStatus.Title != "" {
-		for _, v := range m.Table.Videos {
-			if strings.Contains(strings.ToLower(m.PlayerStatus.Title), strings.ToLower(v.Title)) ||
-				strings.Contains(strings.ToLower(v.Title), strings.ToLower(m.PlayerStatus.Title)) {
-				nowPlayingID = v.ID
-				break
-			}
-		}
-	}
-
-	tableLines := RenderTableContent(&m.Table, tableWidth-2, middleHeight-2, m.Focus == FocusTable, nowPlayingID)
-	tableBox := RenderPanel(tableTitle, tableLines, tableWidth, middleHeight, m.Focus == FocusTable)
-
-	middleSection := lipgloss.JoinHorizontal(lipgloss.Top, sidebarView, tableBox)
+	middleSection := lipgloss.JoinHorizontal(lipgloss.Top, sidebarView, " ", gridView)
 
 	// 3. Bottom Playing Bar
 	var statusText string
@@ -112,7 +88,7 @@ func (m Model) View() string {
 	var titleLine string
 	if m.PlayerStatus.Title != "" {
 		t := runewidth.Truncate(m.PlayerStatus.Title, m.Width-6, "…")
-		titleLine = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFFFFF")).Bold(true).Render("  " + t)
+		titleLine = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFFFFF")).Bold(true).Render("  ▶ " + t)
 	} else {
 		titleLine = lipgloss.NewStyle().Foreground(colorTextMuted).Render("  (Ninguna reproducción activa)")
 	}
@@ -146,7 +122,7 @@ func (m Model) View() string {
 	playerLines := []string{titleLine, progressLine, controlsLine}
 	playerBox := RenderPanel(playingTitle, playerLines, m.Width, playerHeight, m.Focus == FocusPlayer)
 
-	// Overlay Help or Settings if active
+	// Overlay Help modal if active
 	if m.ShowHelp {
 		return m.renderHelpModal()
 	}
@@ -158,10 +134,10 @@ func (m Model) renderHelpModal() string {
 	helpText := []string{
 		"  ⌨ ATAJOS DE TECLADO:",
 		"  -------------------------------------------------------------",
-		"  Tab / Shift+Tab   Cambiar de panel (Search / Sidebar / Table)",
+		"  Tab / Shift+Tab   Cambiar de panel (Search / Sidebar / Grid)",
 		"  /                 Enfocar buscador directamente",
-		"  h / j / k / l     Navegación estilo Vim",
-		"  Enter             Reproducir pista seleccionada",
+		"  h / j / k / l     Navegar tarjetas en la cuadrícula (estilo Vim)",
+		"  Enter             Reproducir video en ventana mpv",
 		"  Espacio           Pausar / Reanudar (mpv IPC)",
 		"  [ / ]             Retroceder / Avanzar 10 segundos",
 		"  + / -             Subir / Bajar volumen",
@@ -173,9 +149,9 @@ func (m Model) renderHelpModal() string {
 		"  -------------------------------------------------------------",
 		"  • Clic en buscador: enfoca la barra para escribir",
 		"  • Clic en Library/Playlists: cambia de vista",
-		"  • Clic en una pista: la selecciona (cuadro morado)",
-		"  • Doble clic en pista: la reproduce inmediatamente",
-		"  • Rueda del ratón: scroll fluido en listas",
+		"  • Clic en una tarjeta de video: la selecciona (borde morado)",
+		"  • Doble clic en tarjeta: reproduce el video en ventana mpv",
+		"  • Rueda del ratón: scroll fluido en la cuadrícula",
 		"  • Clic en botones inferiores: control de reproducción directo",
 	}
 

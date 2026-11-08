@@ -74,9 +74,15 @@ init() { # mode: full | light
 
     OWN_RUNDIR=0
     if [ -z "${YT_RUNDIR:-}" ] || [ ! -d "$YT_RUNDIR" ]; then
-        YT_RUNDIR="$(mktemp -d "${TMPDIR:-/tmp}/yt.XXXXXX")" || die "cannot create temp dir"
-        chmod 700 "$YT_RUNDIR" 2>/dev/null || true
-        OWN_RUNDIR=1
+        local user_rundir="${XDG_RUNTIME_DIR:-/tmp}/yt-$UID"
+        if mkdir -p "$user_rundir" 2>/dev/null && chmod 700 "$user_rundir" 2>/dev/null; then
+            YT_RUNDIR="$user_rundir"
+            OWN_RUNDIR=0
+        else
+            YT_RUNDIR="$(mktemp -d "${TMPDIR:-/tmp}/yt.XXXXXX")" || die "cannot create temp dir"
+            chmod 700 "$YT_RUNDIR" 2>/dev/null || true
+            OWN_RUNDIR=1
+        fi
     fi
     export YT_RUNDIR YT_CACHE_DIR="$CACHE_DIR" YT_PREVIEW YT_THUMB_QUALITY YT_LANG
 
