@@ -81,13 +81,14 @@ play_video() { # mode id url title channel dur
         --cache-pause=no
         --demuxer-readahead-secs=2
         --ytdl-format="$vfmt"
+        --ytdl-raw-options-append="extractor-args=youtube:player_client=android,web"
     )
     if [ "${#COOKIE_ARGS[@]}" -ge 2 ] && [ "${COOKIE_ARGS[0]}" = "--cookies" ]; then
         mo+=(--ytdl-raw-options-append="cookies=${COOKIE_ARGS[1]}")
     fi
     case $mode in
-        pip)   mo+=(--no-terminal --no-fs --ontop --title="Picture-in-Picture" --geometry=30%x30%-20-20 --autofit=28%) ;;
-        fs)    mo+=(--no-terminal --fs --title="$title") ;;
+        pip)   mo+=(--no-terminal --no-fs --ontop --title="Picture-in-Picture" --geometry=30%x30%-20-20 --autofit=28% --force-window=immediate) ;;
+        fs)    mo+=(--no-terminal --fs --title="$title" --force-window=immediate) ;;
         audio)
             local thumb_file="$THUMB_DIR/${id}_mqdefault.jpg"
             [ -s "$thumb_file" ] || thumb_file="$THUMB_DIR/${id}_maxresdefault.jpg"
@@ -102,7 +103,7 @@ play_video() { # mode id url title channel dur
                 mo+=(--no-terminal)
             fi
             ;;
-        *)     mo+=(--no-terminal --no-fs --autofit=65%x65% --title="$title") ;;
+        *)     mo+=(--no-terminal --no-fs --autofit=65%x65% --title="$title" --force-window=immediate) ;;
     esac
 
     local thumb_file="$THUMB_DIR/${id}_mqdefault.jpg"

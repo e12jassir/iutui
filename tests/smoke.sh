@@ -7,9 +7,9 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
 export HOME="$TMP/home" XDG_CACHE_HOME="$TMP/home/.cache" XDG_STATE_HOME="$TMP/home/.local/state"
-export XDG_CONFIG_HOME="$TMP/home/.config" TMPDIR="$TMP"
+export XDG_CONFIG_HOME="$TMP/home/.config" XDG_RUNTIME_DIR="$TMP/runtime" TMPDIR="$TMP"
 export STUB_LOG="$TMP/ytdlp.log" FZF_ARGS_OUT="$TMP/fzf.args" FZF_STDIN_OUT="$TMP/fzf.stdin"
-mkdir -p "$HOME" "$TMP/bin"
+mkdir -p "$HOME" "$TMP/bin" "$TMP/runtime"
 : > "$STUB_LOG"
 
 # ── stubs ────────────────────────────────────────────────────────────────────

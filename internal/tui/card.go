@@ -86,13 +86,14 @@ func RenderCard(v model.Video, isSelected bool) string {
 		Render(badgeStr)
 
 	// 3. Title (strictly exactly 2 lines)
+	cleanTitle := strings.ReplaceAll(strings.ReplaceAll(v.Title, "\n", " "), "\r", " ")
 	titlePrefix := ""
 	availTitleWidth := CardInnerWidth
 	if isSelected {
 		titlePrefix = "▶ "
 		availTitleWidth = CardInnerWidth - 2
 	}
-	tLine1, tLine2 := splitTitleStrict(v.Title, availTitleWidth)
+	tLine1, tLine2 := splitTitleStrict(cleanTitle, availTitleWidth)
 	if isSelected {
 		tLine1 = titlePrefix + tLine1
 	}
@@ -106,7 +107,7 @@ func RenderCard(v model.Video, isSelected bool) string {
 	tView2 := titleSt.Render(runewidth.FillRight(tLine2, CardInnerWidth))
 
 	// 4. Channel (strictly exactly 1 line)
-	chText := v.Channel
+	chText := strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(v.Channel, "\n", " "), "\r", " "))
 	if chText == "" || chText == "NA" {
 		chText = "YouTube"
 	}
@@ -114,7 +115,7 @@ func RenderCard(v model.Video, isSelected bool) string {
 	chView := channelNameStyle.Render(runewidth.FillRight(chText, CardInnerWidth))
 
 	// 5. Views & metadata (strictly exactly 1 line)
-	vText := strings.TrimSpace(v.Views)
+	vText := strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(v.Views, "\n", " "), "\r", " "))
 	if vText == "" || vText == "NA" {
 		vText = "YouTube"
 	}
