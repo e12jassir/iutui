@@ -100,6 +100,24 @@ func TogglePause() error {
 	return err
 }
 
+// Next skips to next track in queue.
+func Next() error {
+	_, err := SendCommand("playlist-next")
+	return err
+}
+
+// Prev rewinds to previous track in queue.
+func Prev() error {
+	_, err := SendCommand("playlist-prev")
+	return err
+}
+
+// AddVolume changes playback volume by delta (e.g. +5, -5).
+func AddVolume(delta float64) error {
+	_, err := SendCommand("add", "volume", delta)
+	return err
+}
+
 // Seek seeks relative seconds in mpv.
 func Seek(seconds int) error {
 	_, err := SendCommand("seek", fmt.Sprintf("%d", seconds))
@@ -147,6 +165,11 @@ func GetStatus() (Status, error) {
 	if paused, err := getProp("pause"); err == nil && paused != nil {
 		if b, ok := paused.(bool); ok {
 			st.Paused = b
+		}
+	}
+	if vol, err := getProp("volume"); err == nil && vol != nil {
+		if f, ok := vol.(float64); ok {
+			st.Volume = f
 		}
 	}
 

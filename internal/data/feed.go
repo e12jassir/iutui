@@ -10,6 +10,58 @@ import (
 	"github.com/e12jassir/ytx-cli/internal/model"
 )
 
+// SearchYouTube performs an online or cached search via bin/yt __list search.
+func SearchYouTube(query string) ([]model.Video, error) {
+	if strings.TrimSpace(query) == "" {
+		return nil, nil
+	}
+
+	ytBin := "./bin/yt"
+	if _, err := os.Stat(ytBin); os.IsNotExist(err) {
+		ytBin = "yt"
+	}
+
+	cmd := exec.Command(ytBin, "__list", "search", query)
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, err
+	}
+
+	var videos []model.Video
+	lines := strings.Split(string(out), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		parts := strings.Split(line, "\t")
+		if len(parts) >= 4 {
+			id := parts[0]
+			if len(id) < 5 || strings.Contains(id, " ") {
+				continue
+			}
+			title := parts[2]
+			channel := parts[3]
+			dur := ""
+			views := ""
+			if len(parts) >= 5 {
+				dur = parts[4]
+			}
+			if len(parts) >= 6 {
+				views = parts[5]
+			}
+			videos = append(videos, model.Video{
+				ID:       id,
+				Title:    title,
+				Channel:  channel,
+				Duration: dur,
+				Views:    views,
+			})
+		}
+	}
+	return videos, nil
+}
+
 // DefaultPaths returns cache and state directories.
 func DefaultPaths() (cacheDir, stateDir string) {
 	xdgCache := os.Getenv("XDG_CACHE_HOME")

@@ -2,89 +2,101 @@ package tui
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/e12jassir/ytx-cli/internal/model"
 )
 
 const (
-	SidebarWidth = 22
+	SidebarWidth = 26
 )
 
-var (
-	sidebarStyle = lipgloss.NewStyle().
-			Width(SidebarWidth).
-			BorderStyle(lipgloss.NormalBorder()).
-			BorderRight(true).
-			BorderForeground(lipgloss.Color("#2E3346")).
-			Padding(1, 1)
+// SidebarItem represents either a Library tab or a Playlist row.
+type SidebarItem struct {
+	Title string
+	Tab   model.Tab
+	IsTab bool
+}
 
-	logoStyle = lipgloss.NewStyle().
-			Bold(true).
-			Foreground(lipgloss.Color("#FF2A55"))
-
-	tabActiveStyle = lipgloss.NewStyle().
-			Bold(true).
-			Foreground(lipgloss.Color("#FF2A55"))
-
-	tabNormalStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#9CA3AF"))
-
-	tabFocusedUnselectedStyle = lipgloss.NewStyle().
-					Foreground(lipgloss.Color("#38BDF8"))
-
-	helpStyle = lipgloss.NewStyle().
-			Foreground(colorDim).
-			PaddingTop(2)
-)
-
-// RenderSidebar renders the left navigation panel with tabs and hotkey hints.
-func RenderSidebar(activeTab model.Tab, hasFocus bool, height int) string {
-	logo := logoStyle.Render("▶ YTX-CLI") + "\n" + lipgloss.NewStyle().Foreground(colorDim).Render("YouTube Terminal")
-
-	tabs := []model.Tab{
+// DefaultLibraryTabs returns the fixed tabs in the Library panel.
+func DefaultLibraryTabs() []model.Tab {
+	return []model.Tab{
 		model.TabHome,
 		model.TabMusic,
 		model.TabSubscriptions,
-		model.TabDownloads,
 		model.TabHistory,
+		model.TabDownloads,
 	}
+}
 
-	var renderedTabs []string
-	for _, t := range tabs {
-		label := fmt.Sprintf("%s %s", t.Icon(), t.String())
-		if t == activeTab {
-			renderedTabs = append(renderedTabs, tabActiveStyle.Render("▶ "+label))
-		} else if hasFocus {
-			renderedTabs = append(renderedTabs, tabFocusedUnselectedStyle.Render("  "+label))
-		} else {
-			renderedTabs = append(renderedTabs, tabNormalStyle.Render("  "+label))
+// RenderSidebarSpotatui renders the two stacked Spotatui boxes: ╭Library───╮ and ╭Playlists───╮
+func RenderSidebarSpotatui(activeTab model.Tab, focused bool, inPlaylists bool, width, totalHeight int, playlists []string, selectedPlaylistIdx int) string {
+	if width < 15 {
+		width = 15
+	}
+	tabs := DefaultLibraryTabs()
+
+	// 1. Library Box
+	libHeight := len(tabs) + 2 // 5 items + top/bottom borders = 7
+	if libHeight > totalHeight-4 {
+		libHeight = totalHeight - 4
+		if libHeight < 4 {
+			libHeight = 4
 		}
 	}
 
-	tabSection := strings.Join(renderedTabs, "\n\n")
+	libLines := make([]string, 0, len(tabs))
+	for _, t := range tabs {
+		isSelected := (t == activeTab)
+		prefix := "  "
+		if isSelected {
+			prefix = "▶ "
+		}
 
-	helpContent := lipgloss.JoinVertical(
-		lipgloss.Left,
-		helpStyle.Render("Atajos:"),
-		lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render("Tab    Paneles"),
-		lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render("h/j/k/l Mover"),
-		lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render("Enter  Play"),
-		lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render("Espacio Pausa"),
-		lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render("/      Buscar"),
-		lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render("r      Recargar"),
-		lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render("q      Salir"),
-	)
+		var line string
+		label := fmt.Sprintf("%s%s", prefix, t.String())
+		if isSelected && focused && !inPlaylists {
+			line = lipgloss.NewStyle().Foreground(colorFocusedPurple).Bold(true).Render(label)
+		} else if isSelected {
+			line = lipgloss.NewStyle().Foreground(colorTextNormal).Bold(true).Render(label)
+		} else {
+			line = lipgloss.NewStyle().Foreground(colorTextMuted).Render(label)
+		}
+		libLines = append(libLines, line)
+	}
 
-	body := lipgloss.JoinVertical(
-		lipgloss.Left,
-		logo,
-		"\n",
-		tabSection,
-		"\n",
-		helpContent,
-	)
+	libPanelFocused := focused && !inPlaylists
+	libBox := RenderPanel("Library", libLines, width, libHeight, libPanelFocused)
 
-	return sidebarStyle.Height(height - 2).Render(body)
+	// 2. Playlists / Canales Box
+	playlistsHeight := totalHeight - libHeight
+	if playlistsHeight < 3 {
+		playlistsHeight = 3
+	}
+
+	pLines := make([]string, 0, playlistsHeight)
+	pLines = append(pLines, lipgloss.NewStyle().Foreground(colorDimTitle).Render("  + Add Playlist"))
+
+	if len(playlists) == 0 {
+		pLines = append(pLines, lipgloss.NewStyle().Foreground(colorTextMuted).Render("  (Sin canales)"))
+	} else {
+		for i, p := range playlists {
+			prefix := "  "
+			isSelected := (i == selectedPlaylistIdx)
+			if isSelected && inPlaylists {
+				prefix = "▶ "
+			}
+			label := fmt.Sprintf("%s%s", prefix, p)
+			if isSelected && focused && inPlaylists {
+				pLines = append(pLines, lipgloss.NewStyle().Foreground(colorFocusedPurple).Bold(true).Render(label))
+			} else {
+				pLines = append(pLines, lipgloss.NewStyle().Foreground(colorTextMuted).Render(label))
+			}
+		}
+	}
+
+	playlistsPanelFocused := focused && inPlaylists
+	playlistsBox := RenderPanel("Playlists", pLines, width, playlistsHeight, playlistsPanelFocused)
+
+	return lipgloss.JoinVertical(lipgloss.Left, libBox, playlistsBox)
 }

@@ -358,11 +358,21 @@ main() {
         --queue|--downloads) shift; queue_status "$@" ;;
         --clear-cache)    clear_cache ;;
         --forget-cookies) forget_cookies ;;
+        -q|--quick)       shift; if [ $# -gt 0 ]; then browse search "$*"; else main_menu; fi ;;
         --view)           shift; browse "${1:-foryou}" ;;
         -s|--search)      shift; browse search "$*" ;;
         --)               shift; browse search "$*" ;;
         -*)               usage >&2; return 2 ;;
-        "")               main_menu ;;
+        "")
+            if [ -t 1 ] && [ "${YT_UI:-spotatui}" != "fzf" ]; then
+                local tui_bin="$DIR/yt-tui"
+                [ -x "$tui_bin" ] || tui_bin="$(command -v yt-tui 2>/dev/null || true)"
+                if [ -x "$tui_bin" ]; then
+                    exec "$tui_bin"
+                fi
+            fi
+            main_menu
+            ;;
         *)                browse search "$*" ;;
     esac
 }

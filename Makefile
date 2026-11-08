@@ -1,7 +1,7 @@
 PREFIX ?= $(HOME)/.local
 BINDIR ?= $(PREFIX)/bin
 LIBDIR ?= $(PREFIX)/lib/yt
-FILES  := yt yt-fmt yt-thumb-preview
+FILES  := yt yt-fmt yt-thumb-preview yt-tui
 
 .PHONY: install uninstall test test-bash test-go build clean lint verify
 
@@ -11,7 +11,7 @@ build:
 clean:
 	@rm -f bin/yt-tui
 
-install:
+install: build
 	@mkdir -p $(BINDIR) $(LIBDIR)
 	@for f in $(FILES); do install -m 755 bin/$$f $(BINDIR)/$$f; done
 	@install -m 644 lib/*.sh $(LIBDIR)/
