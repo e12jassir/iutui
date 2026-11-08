@@ -6,106 +6,130 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/e12jassir/ytx-cli/internal/model"
+	"github.com/mattn/go-runewidth"
 )
 
 const (
 	CardInnerWidth  = 32
-	CardTotalWidth  = 34 // Inner + borders
-	CardThumbHeight = 6
-	CardTotalHeight = 12
+	CardTotalWidth  = 34 // Inner + 2 border columns
+	CardThumbHeight = 7
+	CardTotalHeight = 14 // 7 (thumb) + 1 (badge) + 2 (title) + 1 (channel) + 1 (views) + 2 (borders)
 )
 
 var (
-	// Transparent / Terminal Native Theme
-	colorBorderNormal   = lipgloss.Color("#2E3346")
-	colorBorderSelected = lipgloss.Color("#BD93F9") // Spotatui Vibrant Purple
-	colorDim            = lipgloss.Color("#6B7280")
-	colorAccent         = lipgloss.Color("#38BDF8") // Subtle sky cyan
-	colorLiveBadge      = lipgloss.Color("#EF4444")
+	// YouTube Dark Theme
+	colorCardBorderNormal   = lipgloss.Color("#2E3346")
+	colorCardBorderSelected = lipgloss.Color("#BD93F9") // Vibrant Spotatui Purple Accent
+	colorCardDimText        = lipgloss.Color("#9CA3AF")
+	colorCardChannelText    = lipgloss.Color("#38BDF8") // YouTube Sky Cyan
+	colorCardBadge          = lipgloss.Color("#E5E7EB")
+	colorCardLive           = lipgloss.Color("#EF4444")
 
 	cardStyleNormal = lipgloss.NewStyle().
 			Width(CardInnerWidth).
 			BorderStyle(lipgloss.RoundedBorder()).
-			BorderForeground(colorBorderNormal).
+			BorderForeground(colorCardBorderNormal).
 			Padding(0, 0)
 
 	cardStyleSelected = lipgloss.NewStyle().
 				Width(CardInnerWidth).
 				BorderStyle(lipgloss.RoundedBorder()).
-				BorderForeground(colorBorderSelected).
+				BorderForeground(colorCardBorderSelected).
 				Bold(true).
 				Padding(0, 0)
 
-	liveBadgeStyle = lipgloss.NewStyle().
+	badgeLiveStyle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(colorLiveBadge)
+			Foreground(colorCardLive)
 
-	durationBadgeStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#9CA3AF"))
+	badgeDurStyle = lipgloss.NewStyle().
+			Foreground(colorCardBadge)
 
-	titleStyleNormal = lipgloss.NewStyle().
+	titleNormalStyle = lipgloss.NewStyle().
 				Bold(true).
 				Foreground(lipgloss.Color("#E5E7EB"))
 
-	titleStyleSelected = lipgloss.NewStyle().
+	titleSelectedStyle = lipgloss.NewStyle().
 				Bold(true).
 				Foreground(lipgloss.Color("#FFFFFF"))
 
-	channelStyle = lipgloss.NewStyle().
-			Foreground(colorAccent)
+	channelNameStyle = lipgloss.NewStyle().
+				Foreground(colorCardChannelText)
 
-	metaStyle = lipgloss.NewStyle().
-			Foreground(colorDim)
+	viewsMetaStyle = lipgloss.NewStyle().
+			Foreground(colorCardDimText)
 )
 
-// RenderCard renders a single video card with zero background paints:
-// Tier 1: Real Thumbnail (ANSI halfblocks rendered via chafa)
-// Tier 2: Badge bar (Duration / Live)
-// Tier 3: Metadata (Title, Channel, Views)
+// RenderCard renders a YouTube Web 3-tier card with strict mathematical height invariance:
+// Tier 1: Real Thumbnail (ANSI halfblocks rendered via chafa --stretch) - exactly 7 lines
+// Tier 2: Dedicated Badge Row - exactly 1 line
+// Tier 3: Metadata:
+//   - Title (strictly exactly 2 lines)
+//   - Channel (strictly exactly 1 line)
+//   - Views / Date (strictly exactly 1 line)
 func RenderCard(v model.Video, isSelected bool) string {
-	// Tier 1: Real Thumbnail
+	// 1. Thumbnail (strictly CardThumbHeight lines)
 	thumbView := RenderThumbnailANSI(v.ID, CardInnerWidth, CardThumbHeight)
 
-	// Tier 2: Dedicated Badge Row
-	var badgeView string
+	// 2. Badge bar (strictly 1 line)
+	var badgeStr string
 	if v.IsLive {
-		badgeView = liveBadgeStyle.Render("● EN VIVO")
+		badgeStr = badgeLiveStyle.Render("● EN VIVO")
 	} else if v.Duration != "" {
-		badgeView = durationBadgeStyle.Render(fmt.Sprintf("[%s]", v.Duration))
+		badgeStr = badgeDurStyle.Render(fmt.Sprintf("[%s]", v.Duration))
 	} else {
-		badgeView = durationBadgeStyle.Render("[--:--]")
+		badgeStr = badgeDurStyle.Render("[--:--]")
 	}
-
 	badgeRow := lipgloss.NewStyle().
 		Width(CardInnerWidth).
 		Align(lipgloss.Right).
-		Render(badgeView)
+		Render(badgeStr)
 
-	// Tier 3: Title (up to 2 lines, truncated)
-	titleText := v.Title
+	// 3. Title (strictly exactly 2 lines)
+	titlePrefix := ""
+	availTitleWidth := CardInnerWidth
 	if isSelected {
-		titleText = "▶ " + titleText
+		titlePrefix = "▶ "
+		availTitleWidth = CardInnerWidth - 2
 	}
-	titleView := renderTruncatedTitle(titleText, CardInnerWidth, 2, isSelected)
-
-	// Channel line
-	channelView := channelStyle.Render(truncate(v.Channel, CardInnerWidth))
-
-	// Views and date line
-	metaText := strings.TrimSpace(v.Views)
-	if metaText == "" {
-		metaText = "YouTube"
+	tLine1, tLine2 := splitTitleStrict(v.Title, availTitleWidth)
+	if isSelected {
+		tLine1 = titlePrefix + tLine1
 	}
-	metaView := metaStyle.Render(truncate(metaText, CardInnerWidth))
 
-	// Assemble card body
+	titleSt := titleNormalStyle
+	if isSelected {
+		titleSt = titleSelectedStyle
+	}
+
+	tView1 := titleSt.Render(runewidth.FillRight(tLine1, CardInnerWidth))
+	tView2 := titleSt.Render(runewidth.FillRight(tLine2, CardInnerWidth))
+
+	// 4. Channel (strictly exactly 1 line)
+	chText := v.Channel
+	if chText == "" || chText == "NA" {
+		chText = "YouTube"
+	}
+	chText = runewidth.Truncate(chText, CardInnerWidth, "…")
+	chView := channelNameStyle.Render(runewidth.FillRight(chText, CardInnerWidth))
+
+	// 5. Views & metadata (strictly exactly 1 line)
+	vText := strings.TrimSpace(v.Views)
+	if vText == "" || vText == "NA" {
+		vText = "YouTube"
+	}
+	vText = runewidth.Truncate(vText, CardInnerWidth, "…")
+	vView := viewsMetaStyle.Render(runewidth.FillRight(vText, CardInnerWidth))
+
+	// Assemble card body (7 + 1 + 1 + 1 + 1 + 1 = 12 inner lines)
 	body := lipgloss.JoinVertical(
 		lipgloss.Left,
 		thumbView,
 		badgeRow,
-		titleView,
-		channelView,
-		metaView,
+		tView1,
+		tView2,
+		chView,
+		vView,
 	)
 
 	if isSelected {
@@ -114,73 +138,41 @@ func RenderCard(v model.Video, isSelected bool) string {
 	return cardStyleNormal.Render(body)
 }
 
-func renderTruncatedTitle(s string, maxWidth, maxLines int, isSelected bool) string {
-	lines := wrapOrTruncate(s, maxWidth, maxLines)
-	st := titleStyleNormal
-	if isSelected {
-		st = titleStyleSelected
-	}
-	return st.Render(strings.Join(lines, "\n"))
-}
-
-func wrapOrTruncate(s string, maxWidth, maxLines int) []string {
-	words := strings.Fields(s)
-	if len(words) == 0 {
-		return []string{""}
+// splitTitleStrict splits a title into exactly two lines of max width maxWidth.
+func splitTitleStrict(title string, maxWidth int) (string, string) {
+	if maxWidth < 10 {
+		maxWidth = 10
 	}
 
-	var lines []string
-	currentLine := ""
+	title = strings.TrimSpace(title)
+	if runewidth.StringWidth(title) <= maxWidth {
+		return title, ""
+	}
+
+	words := strings.Fields(title)
+	var line1 strings.Builder
+	idx := 0
 
 	for _, w := range words {
-		if len(lines) == maxLines-1 {
-			test := currentLine
-			if test != "" {
-				test += " "
-			}
-			test += w
-			if len(test) > maxWidth {
-				if len(currentLine) > 0 {
-					currentLine += "..."
-				} else {
-					currentLine = truncate(test, maxWidth)
-				}
-				break
-			}
-			currentLine = test
-			continue
+		test := w
+		if line1.Len() > 0 {
+			test = " " + w
 		}
-
-		if len(currentLine)+len(w)+1 > maxWidth {
-			if currentLine != "" {
-				lines = append(lines, currentLine)
-			}
-			currentLine = w
-		} else {
-			if currentLine != "" {
-				currentLine += " "
-			}
-			currentLine += w
+		if runewidth.StringWidth(line1.String()+test) > maxWidth {
+			break
 		}
+		line1.WriteString(test)
+		idx++
 	}
 
-	if currentLine != "" && len(lines) < maxLines {
-		lines = append(lines, currentLine)
+	// If single very long word
+	if line1.Len() == 0 && len(words) > 0 {
+		line1.WriteString(runewidth.Truncate(words[0], maxWidth, ""))
+		idx = 1
 	}
 
-	for len(lines) < maxLines {
-		lines = append(lines, "")
-	}
+	remaining := strings.Join(words[idx:], " ")
+	line2 := runewidth.Truncate(remaining, maxWidth, "…")
 
-	return lines
-}
-
-func truncate(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	if maxLen <= 3 {
-		return s[:maxLen]
-	}
-	return s[:maxLen-3] + "..."
+	return line1.String(), line2
 }

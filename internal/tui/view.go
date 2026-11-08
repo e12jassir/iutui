@@ -8,15 +8,15 @@ import (
 	"github.com/mattn/go-runewidth"
 )
 
-// View renders the complete Spotatui-style interface with real ANSI YouTube thumbnail cards.
+// View renders YouTube Web's terminal interface with real ANSI thumbnail cards and sleek drawers.
 func (m Model) View() string {
 	if !m.Ready || m.Width < 40 || m.Height < 15 {
-		return "\n  ⚡ Cargando ytx-cli Spotatui TUI..."
+		return "\n  ⚡ Cargando YouTube Terminal (yt)..."
 	}
 
-	// 1. Top Bar: [Search] [Help] [Settings]
-	helpWidth := 14
-	settingsWidth := 18
+	// 1. Top Bar: [Buscar en YouTube] [Ayuda] [Ajustes]
+	helpWidth := 12
+	settingsWidth := 14
 	searchWidth := m.Width - helpWidth - settingsWidth
 	if searchWidth < 20 {
 		searchWidth = 20
@@ -28,18 +28,18 @@ func (m Model) View() string {
 		if m.Focus == FocusSearch {
 			cursor = "█"
 		}
-		searchContent = m.SearchQuery + cursor
+		searchContent = "🔍 " + m.SearchQuery + cursor
 	} else {
-		searchContent = lipgloss.NewStyle().Foreground(colorTextMuted).Render("Type to search YouTube (or press /)...")
+		searchContent = lipgloss.NewStyle().Foreground(colorTextMuted).Render("🔍 Buscar en YouTube (o presiona /)...")
 	}
 
-	searchBox := RenderPanel("Search", []string{searchContent}, searchWidth, 3, m.Focus == FocusSearch)
-	helpBox := RenderPanel("Help", []string{"Type ?"}, helpWidth, 3, m.ShowHelp)
-	settingsBox := RenderPanel("Settings", []string{"Type Alt+,"}, settingsWidth, 3, m.ShowSettings)
+	searchBox := RenderPanel("Buscar", []string{searchContent}, searchWidth, 3, m.Focus == FocusSearch)
+	helpBox := RenderPanel("Ayuda", []string{"Type ?"}, helpWidth, 3, m.ShowHelp)
+	settingsBox := RenderPanel("Ajustes", []string{"[q] Salir"}, settingsWidth, 3, m.ShowSettings)
 
 	topBar := lipgloss.JoinHorizontal(lipgloss.Top, searchBox, helpBox, settingsBox)
 
-	// 2. Middle Section: [Sidebar (Library + Playlists)] + [YouTube Cards Grid with Thumbnails]
+	// 2. Middle Section: [Sidebar (YouTube Drawer)] + [YouTube Video Grid with Thumbnails]
 	playerHeight := 5
 	middleHeight := m.Height - 3 - playerHeight
 	if middleHeight < 8 {
@@ -52,7 +52,7 @@ func (m Model) View() string {
 		gridWidth = CardTotalWidth
 	}
 
-	sidebarView := RenderSidebarSpotatui(
+	sidebarView := RenderSidebarYouTube(
 		m.ActiveTab,
 		m.Focus == FocusSidebar,
 		m.InPlaylists,
@@ -66,23 +66,23 @@ func (m Model) View() string {
 
 	middleSection := lipgloss.JoinHorizontal(lipgloss.Top, sidebarView, " ", gridView)
 
-	// 3. Bottom Playing Bar
+	// 3. Bottom Player Bar (YouTube Miniplayer)
 	var statusText string
 	if m.PlayerStatus.IsRunning {
 		if m.PlayerStatus.Paused {
-			statusText = "Paused"
+			statusText = "Pausado"
 		} else {
-			statusText = "Playing"
+			statusText = "Reproduciendo"
 		}
 	} else {
-		statusText = "Idle"
+		statusText = "Inactivo"
 	}
 
 	vol := int(m.PlayerStatus.Volume)
 	if vol == 0 && m.PlayerStatus.IsRunning {
 		vol = 100
 	}
-	playingTitle := fmt.Sprintf("Playing (Soloist-PC | mpv IPC | Status: %s | Volume: %d%%)", statusText, vol)
+	playingTitle := fmt.Sprintf("Reproductor (mpv IPC • %s • Vol: %d%%)", statusText, vol)
 
 	// Line 1: Track Title
 	var titleLine string
@@ -109,14 +109,15 @@ func (m Model) View() string {
 
 	// Line 3: Interactive controls (clickable)
 	btnStyle := lipgloss.NewStyle().Foreground(colorCyan).Bold(true)
-	controlsLine := fmt.Sprintf("  %s   %s   %s   %s   %s   %s   %s",
-		btnStyle.Render("[Prev]"),
-		btnStyle.Render("[Play/Pause]"),
-		btnStyle.Render("[Next]"),
-		btnStyle.Render("[Seek -10]"),
-		btnStyle.Render("[Seek +10]"),
-		btnStyle.Render("[Vol-]"),
-		btnStyle.Render("[Vol+]"),
+	controlsLine := fmt.Sprintf("  %s   %s   %s   %s   %s   %s   %s   %s",
+		btnStyle.Render("[⏮ Anterior]"),
+		btnStyle.Render("[⏯ Pausa]"),
+		btnStyle.Render("[⏭ Siguiente]"),
+		btnStyle.Render("[⏪ -10s]"),
+		btnStyle.Render("[⏩ +10s]"),
+		btnStyle.Render("[󰕾 Vol-]"),
+		btnStyle.Render("[󰕾 Vol+]"),
+		btnStyle.Render("[🗔 Ventana]"),
 	)
 
 	playerLines := []string{titleLine, progressLine, controlsLine}
@@ -134,11 +135,12 @@ func (m Model) renderHelpModal() string {
 	helpText := []string{
 		"  ⌨ ATAJOS DE TECLADO:",
 		"  -------------------------------------------------------------",
-		"  Tab / Shift+Tab   Cambiar de panel (Search / Sidebar / Grid)",
-		"  /                 Enfocar buscador directamente",
-		"  h / j / k / l     Navegar tarjetas en la cuadrícula (estilo Vim)",
+		"  Tab / Shift+Tab   Cambiar de panel (Buscador / Guía / Cuadrícula)",
+		"  /                 Enfocar buscador de YouTube directamente",
+		"  h / j / k / l     Navegar tarjetas de video (estilo Vim)",
 		"  Enter             Reproducir video en ventana mpv",
-		"  Espacio           Pausar / Reanudar (mpv IPC)",
+		"  v                 Alternar / Levantar ventana de video mpv",
+		"  Espacio           Pausar / Reanudar reproducción",
 		"  [ / ]             Retroceder / Avanzar 10 segundos",
 		"  + / -             Subir / Bajar volumen",
 		"  n / p             Siguiente / Anterior en cola",
@@ -147,14 +149,14 @@ func (m Model) renderHelpModal() string {
 		"",
 		"  🖱 CONTROLES DE MOUSE:",
 		"  -------------------------------------------------------------",
-		"  • Clic en buscador: enfoca la barra para escribir",
-		"  • Clic en Library/Playlists: cambia de vista",
-		"  • Clic en una tarjeta de video: la selecciona (borde morado)",
+		"  • Clic en buscador: activa el cursor para escribir",
+		"  • Clic en panel izquierdo: cambia de sección de YouTube",
+		"  • Clic en una tarjeta: la selecciona (borde morado #BD93F9)",
 		"  • Doble clic en tarjeta: reproduce el video en ventana mpv",
-		"  • Rueda del ratón: scroll fluido en la cuadrícula",
+		"  • Rueda del ratón: scroll fluido en la cuadrícula de videos",
 		"  • Clic en botones inferiores: control de reproducción directo",
 	}
 
-	box := RenderPanel("Ayuda & Atajos de Spotatui", helpText, m.Width-8, len(helpText)+2, true)
+	box := RenderPanel("Ayuda & Atajos de YouTube Terminal", helpText, m.Width-8, len(helpText)+2, true)
 	return lipgloss.Place(m.Width, m.Height, lipgloss.Center, lipgloss.Center, box)
 }

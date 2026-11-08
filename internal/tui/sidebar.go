@@ -2,23 +2,18 @@ package tui
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/e12jassir/ytx-cli/internal/model"
+	"github.com/mattn/go-runewidth"
 )
 
 const (
 	SidebarWidth = 26
 )
 
-// SidebarItem represents either a Library tab or a Playlist row.
-type SidebarItem struct {
-	Title string
-	Tab   model.Tab
-	IsTab bool
-}
-
-// DefaultLibraryTabs returns the fixed tabs in the Library panel.
+// DefaultLibraryTabs returns the fixed tabs in the YouTube navigation drawer.
 func DefaultLibraryTabs() []model.Tab {
 	return []model.Tab{
 		model.TabHome,
@@ -29,74 +24,95 @@ func DefaultLibraryTabs() []model.Tab {
 	}
 }
 
-// RenderSidebarSpotatui renders the two stacked Spotatui boxes: ╭Library───╮ and ╭Playlists───╮
-func RenderSidebarSpotatui(activeTab model.Tab, focused bool, inPlaylists bool, width, totalHeight int, playlists []string, selectedPlaylistIdx int) string {
+// RenderSidebarYouTube renders YouTube Web's unified navigation drawer in a single solid panel.
+func RenderSidebarYouTube(activeTab model.Tab, focused bool, inPlaylists bool, width, totalHeight int, playlists []string, selectedPlaylistIdx int) string {
 	if width < 15 {
 		width = 15
 	}
-	tabs := DefaultLibraryTabs()
+	innerWidth := width - 2
+	maxTextWidth := innerWidth - 2
 
-	// 1. Library Box
-	libHeight := len(tabs) + 2 // 5 items + top/bottom borders = 7
-	if libHeight > totalHeight-4 {
-		libHeight = totalHeight - 4
-		if libHeight < 4 {
-			libHeight = 4
-		}
-	}
+	var lines []string
 
-	libLines := make([]string, 0, len(tabs))
-	for _, t := range tabs {
-		isSelected := (t == activeTab)
-		prefix := "  "
+	sectionHeaderStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Bold(true)
+	dividerStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#2E3346"))
+	dividerLine := dividerStyle.Render(strings.Repeat("─", innerWidth))
+
+	// Section 1: PRINCIPAL
+	lines = append(lines, sectionHeaderStyle.Render(" PRINCIPAL"))
+	mainTabs := []model.Tab{model.TabHome, model.TabMusic, model.TabSubscriptions}
+	for _, t := range mainTabs {
+		isSelected := (t == activeTab && !inPlaylists)
+		prefix := " "
 		if isSelected {
 			prefix = "▶ "
 		}
+		label := prefix + t.String()
+		label = runewidth.Truncate(label, maxTextWidth, "…")
 
-		var line string
-		label := fmt.Sprintf("%s%s", prefix, t.String())
-		if isSelected && focused && !inPlaylists {
-			line = lipgloss.NewStyle().Foreground(colorFocusedPurple).Bold(true).Render(label)
+		var rendered string
+		if isSelected && focused {
+			rendered = lipgloss.NewStyle().Foreground(colorFocusedPurple).Bold(true).Render(label)
 		} else if isSelected {
-			line = lipgloss.NewStyle().Foreground(colorTextNormal).Bold(true).Render(label)
+			rendered = lipgloss.NewStyle().Foreground(colorTextNormal).Bold(true).Render(label)
 		} else {
-			line = lipgloss.NewStyle().Foreground(colorTextMuted).Render(label)
+			rendered = lipgloss.NewStyle().Foreground(colorTextMuted).Render(label)
 		}
-		libLines = append(libLines, line)
+		lines = append(lines, " "+rendered)
 	}
 
-	libPanelFocused := focused && !inPlaylists
-	libBox := RenderPanel("Library", libLines, width, libHeight, libPanelFocused)
+	lines = append(lines, dividerLine)
 
-	// 2. Playlists / Canales Box
-	playlistsHeight := totalHeight - libHeight
-	if playlistsHeight < 3 {
-		playlistsHeight = 3
-	}
-
-	pLines := make([]string, 0, playlistsHeight)
-	pLines = append(pLines, lipgloss.NewStyle().Foreground(colorDimTitle).Render("  + Add Playlist"))
-
-	if len(playlists) == 0 {
-		pLines = append(pLines, lipgloss.NewStyle().Foreground(colorTextMuted).Render("  (Sin canales)"))
-	} else {
-		for i, p := range playlists {
-			prefix := "  "
-			isSelected := (i == selectedPlaylistIdx)
-			if isSelected && inPlaylists {
-				prefix = "▶ "
-			}
-			label := fmt.Sprintf("%s%s", prefix, p)
-			if isSelected && focused && inPlaylists {
-				pLines = append(pLines, lipgloss.NewStyle().Foreground(colorFocusedPurple).Bold(true).Render(label))
-			} else {
-				pLines = append(pLines, lipgloss.NewStyle().Foreground(colorTextMuted).Render(label))
-			}
+	// Section 2: TÚ / BIBLIOTECA
+	lines = append(lines, sectionHeaderStyle.Render(" BIBLIOTECA"))
+	biblioTabs := []model.Tab{model.TabHistory, model.TabDownloads}
+	for _, t := range biblioTabs {
+		isSelected := (t == activeTab && !inPlaylists)
+		prefix := " "
+		if isSelected {
+			prefix = "▶ "
 		}
+		label := prefix + t.String()
+		label = runewidth.Truncate(label, maxTextWidth, "…")
+
+		var rendered string
+		if isSelected && focused {
+			rendered = lipgloss.NewStyle().Foreground(colorFocusedPurple).Bold(true).Render(label)
+		} else if isSelected {
+			rendered = lipgloss.NewStyle().Foreground(colorTextNormal).Bold(true).Render(label)
+		} else {
+			rendered = lipgloss.NewStyle().Foreground(colorTextMuted).Render(label)
+		}
+		lines = append(lines, " "+rendered)
 	}
 
-	playlistsPanelFocused := focused && inPlaylists
-	playlistsBox := RenderPanel("Playlists", pLines, width, playlistsHeight, playlistsPanelFocused)
+	lines = append(lines, dividerLine)
 
-	return lipgloss.JoinVertical(lipgloss.Left, libBox, playlistsBox)
+	// Section 3: LISTAS & CANALES
+	lines = append(lines, sectionHeaderStyle.Render(" CANALES & LISTAS"))
+	lines = append(lines, lipgloss.NewStyle().Foreground(colorDimTitle).Render("  + Add Playlist"))
+
+	for i, p := range playlists {
+		prefix := " "
+		isSelected := (i == selectedPlaylistIdx && inPlaylists)
+		if isSelected {
+			prefix = "▶ "
+		}
+		label := fmt.Sprintf("%s%s", prefix, p)
+		label = runewidth.Truncate(label, maxTextWidth, "…")
+
+		var rendered string
+		if isSelected && focused {
+			rendered = lipgloss.NewStyle().Foreground(colorFocusedPurple).Bold(true).Render(label)
+		} else {
+			rendered = lipgloss.NewStyle().Foreground(colorTextMuted).Render(label)
+		}
+		lines = append(lines, " "+rendered)
+	}
+
+	return RenderPanel("YouTube", lines, width, totalHeight, focused && (mIsSidebar(focused)))
+}
+
+func mIsSidebar(focused bool) bool {
+	return focused
 }

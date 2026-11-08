@@ -107,7 +107,7 @@ func RenderGrid(g *GridState, availableWidth, availableHeight int, hasFocus bool
 			Width(availableWidth).
 			Height(availableHeight).
 			Align(lipgloss.Center, lipgloss.Center).
-			Foreground(colorDim).
+			Foreground(colorCardDimText).
 			Render("No se encontraron videos en esta vista.")
 	}
 
@@ -152,6 +152,9 @@ func RenderGrid(g *GridState, availableWidth, availableHeight int, hasFocus bool
 			idx := r*cols + c
 			if idx < len(g.Videos) {
 				isSelected := hasFocus && (idx == g.SelectedIdx)
+				if len(rowCards) > 0 {
+					rowCards = append(rowCards, "  ") // Horizontal card gap
+				}
 				rowCards = append(rowCards, RenderCard(g.Videos[idx], isSelected))
 			}
 		}

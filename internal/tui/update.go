@@ -252,6 +252,12 @@ func (m Model) updateGrid(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+	case "v":
+		if v, ok := m.Grid.SelectedVideo(); ok {
+			_ = player.PlayVideo(v, "window")
+			m.StatusMessage = fmt.Sprintf("▶ Forzando ventana de video: %s", v.Title)
+		}
+
 	case "space":
 		_ = player.TogglePause()
 
@@ -286,6 +292,12 @@ func (m Model) updateGrid(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // updatePlayer controls playback from the bottom bar focus.
 func (m Model) updatePlayer(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
+	case "v":
+		if v, ok := m.Grid.SelectedVideo(); ok {
+			_ = player.PlayVideo(v, "window")
+			m.StatusMessage = fmt.Sprintf("▶ Forzando ventana de video: %s", v.Title)
+		}
+
 	case "space":
 		_ = player.TogglePause()
 	case "[", "h", "left":
@@ -359,25 +371,31 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		middleBottom := m.Height - 5
 		if msg.Y >= 3 && msg.Y < middleBottom {
 			if msg.X < SidebarWidth {
-				// Left Sidebar clicked
+				// Left Sidebar (YouTube Drawer) clicked
 				m.Focus = FocusSidebar
-				tabs := DefaultLibraryTabs()
-				libHeight := len(tabs) + 2
-
-				// Click inside Library box
-				if msg.Y >= 4 && msg.Y < 4+len(tabs) {
-					clickedTabIdx := msg.Y - 4
-					if clickedTabIdx >= 0 && clickedTabIdx < len(tabs) {
-						m.InPlaylists = false
-						m.ActiveTab = tabs[clickedTabIdx]
-						m.switchTab(m.ActiveTab)
-					}
-				} else if msg.Y >= 3+libHeight+1 {
-					// Click inside Playlists box
-					clickedPIdx := msg.Y - (3 + libHeight + 1)
-					if clickedPIdx >= 0 && clickedPIdx < len(m.Playlists) {
-						m.InPlaylists = true
-						m.SelectedPlaylistIdx = clickedPIdx
+				switch msg.Y {
+				case 4:
+					m.InPlaylists = false
+					m.switchTab(model.TabHome)
+				case 5:
+					m.InPlaylists = false
+					m.switchTab(model.TabMusic)
+				case 6:
+					m.InPlaylists = false
+					m.switchTab(model.TabSubscriptions)
+				case 9:
+					m.InPlaylists = false
+					m.switchTab(model.TabHistory)
+				case 10:
+					m.InPlaylists = false
+					m.switchTab(model.TabDownloads)
+				default:
+					if msg.Y >= 13 {
+						clickedPIdx := msg.Y - 13
+						if clickedPIdx >= 0 && clickedPIdx < len(m.Playlists) {
+							m.InPlaylists = true
+							m.SelectedPlaylistIdx = clickedPIdx
+						}
 					}
 				}
 			} else {
@@ -429,6 +447,11 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 					_ = player.AddVolume(-5)
 				} else if msg.X >= 75 && msg.X <= 84 {
 					_ = player.AddVolume(5)
+				} else if msg.X >= 86 && msg.X <= 99 {
+					if v, ok := m.Grid.SelectedVideo(); ok {
+						_ = player.PlayVideo(v, "window")
+						m.StatusMessage = fmt.Sprintf("▶ Abriendo ventana mpv: %s", v.Title)
+					}
 				}
 			}
 			return m, nil

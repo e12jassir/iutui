@@ -112,23 +112,23 @@ func TestModelViewSpotatuiLayout(t *testing.T) {
 	view := m.View()
 
 	// Should contain top boxes
-	if !strings.Contains(view, "Search") || !strings.Contains(view, "Help") || !strings.Contains(view, "Settings") {
-		t.Errorf("expected Search, Help, and Settings in top bar, got:\n%s", view)
+	if !strings.Contains(view, "Buscar") || !strings.Contains(view, "Ayuda") || !strings.Contains(view, "Ajustes") {
+		t.Errorf("expected Buscar, Ayuda, and Ajustes in top bar, got:\n%s", view)
 	}
 
-	// Should contain Library and Playlists
-	if !strings.Contains(view, "Library") || !strings.Contains(view, "Playlists") {
-		t.Errorf("expected Library and Playlists in sidebar, got:\n%s", view)
+	// Should contain YouTube drawer
+	if !strings.Contains(view, "YouTube") || !strings.Contains(view, "PRINCIPAL") {
+		t.Errorf("expected YouTube drawer in sidebar, got:\n%s", view)
 	}
 
-	// Should contain tracks
+	// Should contain video titles
 	if !strings.Contains(view, "Jeremías 17:5") || !strings.Contains(view, "Rata Blanca") {
-		t.Errorf("expected track titles in table, got:\n%s", view)
+		t.Errorf("expected video titles in cards, got:\n%s", view)
 	}
 
 	// Should contain playing footer
-	if !strings.Contains(view, "Playing") || !strings.Contains(view, "[Play/Pause]") {
+	if !strings.Contains(view, "Reproductor") || !strings.Contains(view, "[⏯ Pausa]") {
 		t.Errorf("expected playing footer, got:\n%s", view)
 	}
-	t.Logf("\nRendered Spotatui View:\n%s\n", view)
+	t.Logf("\nRendered YouTube Web Terminal View:\n%s\n", view)
 }
