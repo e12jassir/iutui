@@ -16,7 +16,7 @@ import (
 	"sync"
 
 	"github.com/charmbracelet/lipgloss"
-	"github.com/e12jassir/ytx-cli/internal/data"
+	"github.com/e12jassir/ytx/internal/data"
 )
 
 var (

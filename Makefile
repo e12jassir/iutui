@@ -1,15 +1,15 @@
 PREFIX ?= $(HOME)/.local
 BINDIR ?= $(PREFIX)/bin
 LIBDIR ?= $(PREFIX)/lib/yt
-FILES  := yt yt-fmt yt-thumb-preview yt-tui
+FILES  := yt yt-fmt yt-thumb-preview ytx
 
 .PHONY: install uninstall test test-bash test-go build clean lint verify
 
 build:
-	@go build -o bin/yt-tui ./cmd/yt-tui
+	@go build -o bin/ytx ./cmd/ytx
 
 clean:
-	@rm -f bin/yt-tui
+	@rm -f bin/ytx
 
 install: build
 	@mkdir -p $(BINDIR) $(LIBDIR)

@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/e12jassir/ytx-cli/internal/model"
+	"github.com/e12jassir/ytx/internal/model"
 )
 
 func TestRenderPanelBordersAndTitle(t *testing.T) {

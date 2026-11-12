@@ -4,8 +4,8 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/e12jassir/ytx-cli/internal/model"
-	"github.com/e12jassir/ytx-cli/internal/player"
+	"github.com/e12jassir/ytx/internal/model"
+	"github.com/e12jassir/ytx/internal/player"
 )
 
 // FocusArea denotes which subview currently receives keyboard input.
@@ -28,7 +28,7 @@ type SearchResultMsg struct {
 // TickMsg fires periodically to poll mpv playback status.
 type TickMsg time.Time
 
-// Model represents the main Bubble Tea application state for ytx-cli.
+// Model represents the main Bubble Tea application state for ytx.
 type Model struct {
 	ActiveTab           model.Tab
 	Focus               FocusArea

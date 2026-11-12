@@ -4,7 +4,7 @@ import (
 	"fmt"
 
 	"github.com/charmbracelet/lipgloss"
-	"github.com/e12jassir/ytx-cli/internal/model"
+	"github.com/e12jassir/ytx/internal/model"
 	"github.com/mattn/go-runewidth"
 )
 

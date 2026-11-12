@@ -2,19 +2,22 @@ name: ci
 on: [push, pull_request]
 jobs:
   verify:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
+    # Future targets: macos-latest, windows-latest (via internal/platform build tags)
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
       - name: install shellcheck (linux)
-        if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y shellcheck python3
-      - name: install bash and shellcheck (macOS)
-        if: runner.os == 'macOS'
+      - name: verify go.mod tidy
         run: |
-          brew install bash shellcheck
-          echo "$(brew --prefix)/bin" >> "$GITHUB_PATH"
+          go mod tidy
+          git diff --exit-code go.mod go.sum
       - run: make verify
+      - name: go vet and race tests
+        run: |
+          go vet ./...
+          go test -race ./internal/player/... ./internal/tui/... ./internal/data/... ./internal/model/...

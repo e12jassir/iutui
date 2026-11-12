@@ -7,9 +7,9 @@ import (
 	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/e12jassir/ytx-cli/internal/data"
-	"github.com/e12jassir/ytx-cli/internal/model"
-	"github.com/e12jassir/ytx-cli/internal/player"
+	"github.com/e12jassir/ytx/internal/data"
+	"github.com/e12jassir/ytx/internal/model"
+	"github.com/e12jassir/ytx/internal/player"
 )
 
 // FeedLoadedMsg arrives when an asynchronous feed load completes.

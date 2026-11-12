@@ -5,7 +5,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
-	"github.com/e12jassir/ytx-cli/internal/player"
+	"github.com/e12jassir/ytx/internal/player"
 	"github.com/mattn/go-runewidth"
 )
 

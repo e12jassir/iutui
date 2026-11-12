@@ -5,9 +5,9 @@ import (
 	"os"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/e12jassir/ytx-cli/internal/data"
-	"github.com/e12jassir/ytx-cli/internal/model"
-	"github.com/e12jassir/ytx-cli/internal/tui"
+	"github.com/e12jassir/ytx/internal/data"
+	"github.com/e12jassir/ytx/internal/model"
+	"github.com/e12jassir/ytx/internal/tui"
 )
 
 func main() {
@@ -24,7 +24,7 @@ func main() {
 	)
 
 	if _, err := p.Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error ejecutando ytx-cli TUI: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error ejecutando ytx TUI: %v\n", err)
 		os.Exit(1)
 	}
 }

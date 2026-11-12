@@ -15,6 +15,7 @@ PROPUESTAS*.md
 repomix*
 
 # Build artifacts
+bin/ytx
 bin/yt-tui
 
 # OS & Editor

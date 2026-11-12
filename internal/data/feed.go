@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/e12jassir/ytx-cli/internal/model"
+	"github.com/e12jassir/ytx/internal/model"
 )
 
 func resolveYtBin() string {

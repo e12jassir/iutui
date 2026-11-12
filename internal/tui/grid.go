@@ -5,7 +5,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
-	"github.com/e12jassir/ytx-cli/internal/model"
+	"github.com/e12jassir/ytx/internal/model"
 )
 
 // GridState tracks layout and viewport parameters anchored to SelectedIdx.
