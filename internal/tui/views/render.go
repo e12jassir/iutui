@@ -24,8 +24,8 @@ const (
 	cardWidth       = 30
 	cardGap         = 2
 	homeThumbH      = 7
-	searchThumbW    = 26
-	searchThumbH    = 6
+	searchThumbW    = 34
+	searchThumbH    = 7
 )
 
 // Render produces the full terminal UI frame for the given application state,
@@ -116,13 +116,16 @@ func renderHeader(s *app.State, th theme.Theme, width int) string {
 		syncBadge = lipgloss.NewStyle().Background(theme.Surf).Foreground(theme.Blue).Bold(true).Padding(0, 1).Render("⟳")
 	}
 	helpBtn := lipgloss.NewStyle().Background(theme.Surf).Foreground(theme.Muted).Padding(0, 1).Render("?")
+	userBadge := lipgloss.NewStyle().Background(lipgloss.Color("#7b3fe4")).Foreground(theme.White).Bold(true).Padding(0, 1).Render("E")
 
 	leftBlock := logo + navStr
-	rightBlock := syncBadge + " " + helpBtn + " "
+	rightBlock := syncBadge + " " + helpBtn + " " + userBadge + " "
 
 	leftW := lipgloss.Width(leftBlock)
 	rightW := lipgloss.Width(rightBlock)
-	searchW := min(64, max(18, width-leftW-rightW-6))
+	searchBtn := lipgloss.NewStyle().Background(theme.SurfHi).Foreground(theme.Text).Padding(0, 1).Render("Buscar")
+	searchBtnW := lipgloss.Width(searchBtn)
+	searchW := min(54, max(14, width-leftW-rightW-searchBtnW-6))
 
 	var searchText string
 	if s.Focus == app.FocusSearch {
@@ -138,7 +141,7 @@ func renderHeader(s *app.State, th theme.Theme, width int) string {
 	if s.Focus == app.FocusSearch {
 		searchStyle = th.SearchBoxFocused
 	}
-	searchBar := searchStyle.Width(searchW).Render(searchText)
+	searchBar := searchStyle.Width(searchW).Render(searchText) + searchBtn
 
 	padW := max(1, (width-leftW-lipgloss.Width(searchBar)-rightW)/2)
 	rightPad := max(1, width-leftW-padW-lipgloss.Width(searchBar)-rightW)
@@ -198,7 +201,24 @@ func renderSidebarFull(s *app.State, th theme.Theme, width, height int) string {
 		}
 	}
 
-	return fitBlock(strings.Join(lines, "\n"), width, height)
+	return padBlock(strings.Join(lines, "\n"), width, height)
+}
+
+func monoTabIcon(t model.Tab) string {
+	switch t {
+	case model.TabHome:
+		return "⌂"
+	case model.TabMusic:
+		return "♫"
+	case model.TabSubscriptions:
+		return "▤"
+	case model.TabHistory:
+		return "↺"
+	case model.TabDownloads:
+		return "↓"
+	default:
+		return "•"
+	}
 }
 
 func renderSidebarTabLine(t model.Tab, active, focused bool, th theme.Theme, width int) string {
@@ -206,7 +226,7 @@ func renderSidebarTabLine(t model.Tab, active, focused bool, th theme.Theme, wid
 	if active {
 		prefix = "▶ "
 	}
-	label := truncatePlain(prefix+t.Icon()+" "+t.String(), max(1, width-2))
+	label := truncatePlain(prefix+monoTabIcon(t)+"  "+t.String(), max(1, width-2))
 	style := th.SidebarItem
 	if active {
 		style = th.SidebarItemActive
@@ -219,16 +239,19 @@ func renderSidebarTabLine(t model.Tab, active, focused bool, th theme.Theme, wid
 
 func renderMiniGuide(s *app.State, th theme.Theme, width, height int) string {
 	tabs := []model.Tab{model.TabHome, model.TabMusic, model.TabSubscriptions, model.TabHistory, model.TabDownloads}
-	lines := make([]string, 0, len(tabs)*2)
+	lines := make([]string, 0, len(tabs)*3)
 	for _, t := range tabs {
-		label := truncatePlain(t.Icon()+" "+shortTabLabel(t), max(1, width-2))
-		style := th.SidebarItem
+		icon := monoTabIcon(t)
+		lbl := shortTabLabel(t)
+		icStyle := lipgloss.NewStyle().Foreground(theme.Muted).Width(width).Align(lipgloss.Center)
+		lbStyle := lipgloss.NewStyle().Foreground(theme.Dim).Width(width).Align(lipgloss.Center)
 		if t == s.ActiveTab && s.View == app.ViewHome {
-			style = th.SidebarItemActive
+			icStyle = icStyle.Foreground(theme.White).Background(theme.Surf).Bold(true)
+			lbStyle = lbStyle.Foreground(theme.White).Background(theme.Surf).Bold(true)
 		}
-		lines = append(lines, style.Width(width).Render(label))
+		lines = append(lines, icStyle.Render(icon), lbStyle.Render(lbl), "")
 	}
-	return fitBlock(strings.Join(lines, "\n"), width, height)
+	return padBlock(strings.Join(lines, "\n"), width, height)
 }
 
 func renderVerticalSep(height int) string {
@@ -249,7 +272,7 @@ func renderMain(s *app.State, th theme.Theme, tr thumbs.Renderer, width, height 
 	} else {
 		body = renderHomeGrid(s, th, tr, width, bodyH)
 	}
-	return fitBlock(chips+"\n"+body, width, height)
+	return padBlock(chips+"\n"+body, width, height)
 }
 
 func renderHomeGrid(s *app.State, th theme.Theme, tr thumbs.Renderer, width, height int) string {
@@ -443,7 +466,7 @@ func renderSearchList(s *app.State, th theme.Theme, tr thumbs.Renderer, width, h
 
 func renderSearchRow(v model.Video, selected, saved, playing bool, th theme.Theme, tr thumbs.Renderer, rowW int) string {
 	innerW := max(10, rowW-4)
-	tw := min(searchThumbW, max(8, innerW/3))
+	tw := min(searchThumbW, max(12, innerW/3))
 	thumbStr := tr.Render(v.ID, tw, searchThumbH)
 
 	infoW := max(8, innerW-tw-2)
@@ -451,9 +474,11 @@ func renderSearchRow(v model.Video, selected, saved, playing bool, th theme.Them
 	if selected {
 		titleStyle = titleStyle.Foreground(theme.White)
 	}
-	title := titleStyle.Render(truncatePlain(v.Title, infoW))
-	channel := lipgloss.NewStyle().Foreground(theme.Muted).Render(truncatePlain(v.Channel, infoW))
+	titleLines := wrapTwoLines(v.Title, infoW)
+	t1 := titleStyle.Render(titleLines[0])
+	t2 := titleStyle.Render(titleLines[1])
 	views := lipgloss.NewStyle().Foreground(theme.Dim).Render(truncatePlain(formatViewsLine(v), infoW))
+	chLine := channelAvatar(v.Channel) + " " + lipgloss.NewStyle().Foreground(theme.Muted).Render(truncatePlain(v.Channel, max(4, infoW-3)))
 
 	var badges []string
 	if v.IsLive {
@@ -473,7 +498,7 @@ func renderSearchRow(v model.Video, selected, saved, playing bool, th theme.Them
 	}
 	badgeLine := truncateStyledLine(strings.Join(badges, " "), infoW)
 
-	rightCol := strings.Join([]string{title, channel, views, badgeLine}, "\n")
+	rightCol := strings.Join([]string{t1, t2, views, chLine, badgeLine}, "\n")
 	joined := lipgloss.JoinHorizontal(lipgloss.Top, thumbStr, "  ", rightCol)
 
 	style := th.Card
@@ -743,4 +768,17 @@ func findChannelForTitle(s *app.State, title string) string {
 		}
 	}
 	return ""
+}
+
+func padBlock(s string, width, height int) string {
+	clamped := fitBlock(s, width, height)
+	if height <= 0 {
+		return clamped
+	}
+	lines := strings.Split(clamped, "\n")
+	blank := strings.Repeat(" ", max(0, width))
+	for len(lines) < height {
+		lines = append(lines, blank)
+	}
+	return strings.Join(lines[:height], "\n")
 }
