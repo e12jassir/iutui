@@ -214,6 +214,22 @@ func (s *State) handleKey(msg tea.KeyMsg) (*State, tea.Cmd) {
 	case "k", "up":
 		s.SetSelection(s.activeIdx() - 1)
 		return s, nil
+	case "l", "right":
+		s.SetSelection(s.activeIdx() + 1)
+		return s, nil
+	case "h", "left":
+		s.SetSelection(s.activeIdx() - 1)
+		return s, nil
+	case "1":
+		return s.SwitchTab(model.TabHome)
+	case "2":
+		return s.SwitchTab(model.TabMusic)
+	case "3":
+		return s.SwitchTab(model.TabSubscriptions)
+	case "4":
+		return s.SwitchTab(model.TabDownloads)
+	case "5":
+		return s.SwitchTab(model.TabHistory)
 	case "[":
 		return s.CycleChip(-1), nil
 	case "]":
