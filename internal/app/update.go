@@ -159,26 +159,6 @@ func (s *State) Update(msg tea.Msg) (*State, tea.Cmd) {
 	return s, nil
 }
 
-func (s *State) handleMouse(msg tea.MouseMsg) (*State, tea.Cmd) {
-	switch msg.Button {
-	case tea.MouseButtonWheelDown:
-		step := 1
-		if s.View == ViewHome {
-			step = s.GridCols()
-		}
-		s.SetSelection(s.activeIdx() + step)
-		return s, nil
-	case tea.MouseButtonWheelUp:
-		step := 1
-		if s.View == ViewHome {
-			step = s.GridCols()
-		}
-		s.SetSelection(s.activeIdx() - step)
-		return s, nil
-	}
-	return s, nil
-}
-
 // GridCols returns the current number of grid columns for the terminal width.
 func (s *State) GridCols() int {
 	mainW := s.Width

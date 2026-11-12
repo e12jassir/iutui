@@ -165,3 +165,152 @@ func TestStateToastExpirationRespectsID(t *testing.T) {
 		t.Fatalf("expected toast cleared, got %q", s.Toast)
 	}
 }
+
+func TestMouseInteractions(t *testing.T) {
+	t.Run("click search bar focuses search", func(t *testing.T) {
+		s, _, _, _ := newTestState()
+		s.Width, s.Height = 120, 36
+		_, _, barStart := s.headerSearchBounds()
+		s, _ = s.Update(tea.MouseMsg{
+			X:      barStart + 2,
+			Y:      0,
+			Button: tea.MouseButtonLeft,
+			Action: tea.MouseActionPress,
+		})
+		if s.Focus != FocusSearch {
+			t.Fatalf("expected FocusSearch, got %v", s.Focus)
+		}
+	})
+
+	t.Run("click Buscar button submits search", func(t *testing.T) {
+		s, _, _, _ := newTestState()
+		s.Width, s.Height = 120, 36
+		s.Focus = FocusSearch
+		s.SearchDraft = "golang"
+		btnStart, _, _ := s.headerSearchBounds()
+		var cmd tea.Cmd
+		s, cmd = s.Update(tea.MouseMsg{
+			X:      btnStart + 1,
+			Y:      0,
+			Button: tea.MouseButtonLeft,
+			Action: tea.MouseActionPress,
+		})
+		if s.View != ViewSearch {
+			t.Fatalf("expected ViewSearch, got %v", s.View)
+		}
+		if s.SearchQuery != "golang" {
+			t.Fatalf("expected SearchQuery %q, got %q", "golang", s.SearchQuery)
+		}
+		if cmd == nil {
+			t.Fatal("expected non-nil search cmd")
+		}
+	})
+
+	t.Run("click chip switches active chip filter", func(t *testing.T) {
+		s, _, _, _ := newTestState()
+		s.Width, s.Height = 120, 36
+		// mainX = 9 (miniGuideW=8 + 1); first chip "Todo" width=6, second chip "Música" starts at 9+1+6+1=17
+		s, _ = s.Update(tea.MouseMsg{
+			X:      18,
+			Y:      2,
+			Button: tea.MouseButtonLeft,
+			Action: tea.MouseActionPress,
+		})
+		if s.HomeChip != 1 {
+			t.Fatalf("expected HomeChip 1, got %d", s.HomeChip)
+		}
+	})
+
+	t.Run("click card selects then second click plays", func(t *testing.T) {
+		s, cat, eng, _ := newTestState()
+		defer s.Close()
+		s.Width, s.Height = 120, 36
+		s, _ = s.Update(FeedLoadedMsg{Tab: model.TabHome, Videos: cat.Feeds[model.TabHome]})
+		// mainX = 9; col 1 starts at 9 + 32 = 41, row 0 starts at y = 3
+		s, _ = s.Update(tea.MouseMsg{
+			X:      45,
+			Y:      5,
+			Button: tea.MouseButtonLeft,
+			Action: tea.MouseActionPress,
+		})
+		if s.SelectedIdx != 1 {
+			t.Fatalf("expected SelectedIdx 1, got %d", s.SelectedIdx)
+		}
+		if len(eng.Calls()) != 0 {
+			t.Fatalf("expected no play on first click, got %v", eng.Calls())
+		}
+
+		var cmd tea.Cmd
+		s, cmd = s.Update(tea.MouseMsg{
+			X:      45,
+			Y:      5,
+			Button: tea.MouseButtonLeft,
+			Action: tea.MouseActionPress,
+		})
+		if cmd == nil {
+			t.Fatal("expected play cmd on second click")
+		}
+		if batch, ok := cmd().(tea.BatchMsg); ok {
+			for _, c := range batch {
+				if c != nil {
+					c()
+				}
+			}
+		}
+		if len(eng.Calls()) == 0 {
+			t.Fatal("expected engine Play call on second click")
+		}
+	})
+
+	t.Run("click help button toggles and next click dismisses", func(t *testing.T) {
+		s, _, _, _ := newTestState()
+		s.Width, s.Height = 120, 36
+		s, _ = s.Update(tea.MouseMsg{
+			X:      s.Width - 5,
+			Y:      0,
+			Button: tea.MouseButtonLeft,
+			Action: tea.MouseActionPress,
+		})
+		if !s.ShowHelp {
+			t.Fatal("expected ShowHelp true")
+		}
+		s, _ = s.Update(tea.MouseMsg{
+			X:      10,
+			Y:      10,
+			Button: tea.MouseButtonLeft,
+			Action: tea.MouseActionPress,
+		})
+		if s.ShowHelp {
+			t.Fatal("expected ShowHelp false after dismiss click")
+		}
+	})
+
+	t.Run("click sidebar or mini-guide switches tab", func(t *testing.T) {
+		cases := []struct {
+			name   string
+			width  int
+			height int
+			x      int
+			y      int
+			want   model.Tab
+		}{
+			{name: "mini-guide music", width: 120, height: 36, x: 3, y: 5, want: model.TabMusic},
+			{name: "full sidebar subscriptions", width: 156, height: 45, x: 5, y: 5, want: model.TabSubscriptions},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				s, _, _, _ := newTestState()
+				s.Width, s.Height = tc.width, tc.height
+				s, _ = s.Update(tea.MouseMsg{
+					X:      tc.x,
+					Y:      tc.y,
+					Button: tea.MouseButtonLeft,
+					Action: tea.MouseActionPress,
+				})
+				if s.ActiveTab != tc.want {
+					t.Fatalf("expected ActiveTab %v, got %v", tc.want, s.ActiveTab)
+				}
+			})
+		}
+	})
+}
