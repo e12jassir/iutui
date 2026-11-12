@@ -149,11 +149,49 @@ func (s *State) Update(msg tea.Msg) (*State, tea.Cmd) {
 		}
 		return s, nil
 
+	case tea.MouseMsg:
+		return s.handleMouse(msg)
+
 	case tea.KeyMsg:
 		return s.handleKey(msg)
 	}
 
 	return s, nil
+}
+
+func (s *State) handleMouse(msg tea.MouseMsg) (*State, tea.Cmd) {
+	switch msg.Button {
+	case tea.MouseButtonWheelDown:
+		step := 1
+		if s.View == ViewHome {
+			step = s.GridCols()
+		}
+		s.SetSelection(s.activeIdx() + step)
+		return s, nil
+	case tea.MouseButtonWheelUp:
+		step := 1
+		if s.View == ViewHome {
+			step = s.GridCols()
+		}
+		s.SetSelection(s.activeIdx() - step)
+		return s, nil
+	}
+	return s, nil
+}
+
+// GridCols returns the current number of grid columns for the terminal width.
+func (s *State) GridCols() int {
+	mainW := s.Width
+	if s.Width >= 140 && s.View == ViewHome {
+		mainW -= 23
+	} else if s.Width >= 100 {
+		mainW -= 9
+	}
+	cols := (mainW + 2) / 32
+	if cols < 1 {
+		return 1
+	}
+	return cols
 }
 
 func (s *State) handleKey(msg tea.KeyMsg) (*State, tea.Cmd) {
@@ -209,10 +247,18 @@ func (s *State) handleKey(msg tea.KeyMsg) (*State, tea.Cmd) {
 		}
 		return s, nil
 	case "j", "down":
-		s.SetSelection(s.activeIdx() + 1)
+		step := 1
+		if s.View == ViewHome {
+			step = s.GridCols()
+		}
+		s.SetSelection(s.activeIdx() + step)
 		return s, nil
 	case "k", "up":
-		s.SetSelection(s.activeIdx() - 1)
+		step := 1
+		if s.View == ViewHome {
+			step = s.GridCols()
+		}
+		s.SetSelection(s.activeIdx() - step)
 		return s, nil
 	case "l", "right":
 		s.SetSelection(s.activeIdx() + 1)

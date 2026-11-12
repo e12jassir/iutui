@@ -75,8 +75,8 @@ func TestDefaultTheme(t *testing.T) {
 	}
 
 	t.Run("DistinctStateColors", func(t *testing.T) {
-		if th.SearchBox.GetBorderTopForeground() == th.SearchBoxFocused.GetBorderTopForeground() {
-			t.Errorf("SearchBox and SearchBoxFocused should have distinct border colors")
+		if th.SearchBox.GetBackground() == th.SearchBoxFocused.GetBackground() {
+			t.Errorf("SearchBox and SearchBoxFocused should have distinct background colors")
 		}
 		if th.Chip.GetBackground() == th.ChipActive.GetBackground() {
 			t.Errorf("Chip and ChipActive should have distinct background colors")

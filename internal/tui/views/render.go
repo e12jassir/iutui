@@ -19,13 +19,13 @@ const (
 	minHeight       = 24
 	fullSidebarMinW = 140
 	miniGuideMinW   = 100
-	fullSidebarW    = 24
+	fullSidebarW    = 22
 	miniGuideW      = 8
 	cardWidth       = 30
 	cardGap         = 2
-	homeThumbH      = 5
-	searchThumbW    = 22
-	searchThumbH    = 4
+	homeThumbH      = 7
+	searchThumbW    = 26
+	searchThumbH    = 6
 )
 
 // Render produces the full terminal UI frame for the given application state,
@@ -42,11 +42,10 @@ func Render(s *app.State, th theme.Theme, tr thumbs.Renderer) string {
 	}
 
 	header := renderHeader(s, th, s.Width)
-	chips := renderChips(s, th, s.Width)
 	playerBar := renderPlayerBar(s, th, s.Width)
 	statusBar := renderStatusBar(s, th, s.Width)
 
-	middleH := s.Height - 7 // header(3) + chips(1) + player(2) + status(1)
+	middleH := s.Height - 5 // header(2) + player(2) + status(1)
 	if middleH < 1 {
 		middleH = 1
 	}
@@ -55,22 +54,20 @@ func Render(s *app.State, th theme.Theme, tr thumbs.Renderer) string {
 	switch {
 	case s.Width >= fullSidebarMinW && s.View == app.ViewHome:
 		side := renderSidebarFull(s, th, fullSidebarW, middleH)
-		sep := renderVerticalSep(middleH)
 		mainW := s.Width - fullSidebarW - 1
 		main := renderMain(s, th, tr, mainW, middleH)
-		middle = lipgloss.JoinHorizontal(lipgloss.Top, side, sep, main)
+		middle = lipgloss.JoinHorizontal(lipgloss.Top, side, " ", main)
 	case s.Width >= miniGuideMinW:
 		side := renderMiniGuide(s, th, miniGuideW, middleH)
-		sep := renderVerticalSep(middleH)
 		mainW := s.Width - miniGuideW - 1
 		main := renderMain(s, th, tr, mainW, middleH)
-		middle = lipgloss.JoinHorizontal(lipgloss.Top, side, sep, main)
+		middle = lipgloss.JoinHorizontal(lipgloss.Top, side, " ", main)
 	default:
 		// Width < 100: no sidebar (compact tabs/nav rendered in header).
 		middle = renderMain(s, th, tr, s.Width, middleH)
 	}
 
-	frame := lipgloss.JoinVertical(lipgloss.Left, header, chips, middle, playerBar, statusBar)
+	frame := lipgloss.JoinVertical(lipgloss.Left, header, middle, playerBar, statusBar)
 	if s.ShowHelp {
 		frame = renderHelpOverlay(frame, s.Width, s.Height, th)
 	}
@@ -97,7 +94,7 @@ func renderTooSmall(w, h int, th theme.Theme) string {
 }
 
 func renderHeader(s *app.State, th theme.Theme, width int) string {
-	logo := th.HeaderLogo.Render("▶ yt")
+	logo := " " + th.HeaderLogo.Render("▶") + " " + lipgloss.NewStyle().Foreground(theme.White).Bold(true).Render("ytx")
 
 	var navStr string
 	if width < miniGuideMinW {
@@ -111,52 +108,43 @@ func renderHeader(s *app.State, th theme.Theme, width int) string {
 				parts = append(parts, lipgloss.NewStyle().Foreground(theme.Muted).Render(label))
 			}
 		}
-		navStr = " " + strings.Join(parts, " ")
+		navStr = "  " + strings.Join(parts, " ")
 	}
 
-	syncBadge := ""
+	syncBadge := lipgloss.NewStyle().Background(theme.Surf).Foreground(theme.Text).Padding(0, 1).Render("⟳")
 	if s.Syncing || s.SearchPending {
-		syncBadge = lipgloss.NewStyle().Foreground(theme.Yellow).Bold(true).Render(" ⟳")
-	} else {
-		syncBadge = lipgloss.NewStyle().Foreground(theme.Dim).Render(" ⟳")
+		syncBadge = lipgloss.NewStyle().Background(theme.Surf).Foreground(theme.Blue).Bold(true).Padding(0, 1).Render("⟳")
 	}
+	helpBtn := lipgloss.NewStyle().Background(theme.Surf).Foreground(theme.Muted).Padding(0, 1).Render("?")
 
-	helpBtn := th.StatusBadge.Render("[?] Ayuda")
-
-	leftBlock := lipgloss.JoinHorizontal(lipgloss.Center, logo, navStr)
-	rightBlock := lipgloss.JoinHorizontal(lipgloss.Center, syncBadge, " ", helpBtn)
+	leftBlock := logo + navStr
+	rightBlock := syncBadge + " " + helpBtn + " "
 
 	leftW := lipgloss.Width(leftBlock)
 	rightW := lipgloss.Width(rightBlock)
-	searchOuterW := width - leftW - rightW - 2
-	if searchOuterW < 16 {
-		searchOuterW = 16
-	}
+	searchW := min(64, max(18, width-leftW-rightW-6))
 
 	var searchText string
 	if s.Focus == app.FocusSearch {
-		searchText = "/ " + s.SearchDraft + "█"
+		searchText = "⌕ " + s.SearchDraft + "█"
 	} else if s.SearchQuery != "" {
-		searchText = "/ " + s.SearchQuery
+		searchText = "⌕ " + s.SearchQuery
 	} else {
-		searchText = "/ Buscar en YouTube..."
+		searchText = "⌕ Buscar en YouTube   /"
 	}
-	innerSearchW := max(1, searchOuterW-4)
-	searchText = truncatePlain(searchText, innerSearchW)
+	searchText = truncatePlain(searchText, max(4, searchW-2))
 
 	searchStyle := th.SearchBox
 	if s.Focus == app.FocusSearch {
 		searchStyle = th.SearchBoxFocused
-	} else if s.SearchQuery == "" {
-		searchText = lipgloss.NewStyle().Foreground(theme.Dim).Render(searchText)
 	}
-	searchBox := searchStyle.Width(searchOuterW - 2).Render(searchText)
+	searchBar := searchStyle.Width(searchW).Render(searchText)
 
-	leftAligned := lipgloss.PlaceVertical(3, lipgloss.Center, leftBlock)
-	rightAligned := lipgloss.PlaceVertical(3, lipgloss.Center, rightBlock)
-
-	row := lipgloss.JoinHorizontal(lipgloss.Top, leftAligned, " ", searchBox, " ", rightAligned)
-	return fitBlock(row, width, 3)
+	padW := max(1, (width-leftW-lipgloss.Width(searchBar)-rightW)/2)
+	rightPad := max(1, width-leftW-padW-lipgloss.Width(searchBar)-rightW)
+	topLine := leftBlock + strings.Repeat(" ", padW) + searchBar + strings.Repeat(" ", rightPad) + rightBlock
+	ruleLine := lipgloss.NewStyle().Foreground(theme.Rule).Render(strings.Repeat("─", width))
+	return fitBlock(topLine+"\n"+ruleLine, width, 2)
 }
 
 func renderChips(s *app.State, th theme.Theme, width int) string {
@@ -204,8 +192,9 @@ func renderSidebarFull(s *app.State, th theme.Theme, width, height int) string {
 			if len(lines) >= height {
 				break
 			}
-			label := truncatePlain("• "+sub, width-2)
-			lines = append(lines, th.SidebarItem.Width(width).Render(label))
+			av := channelAvatar(sub)
+			name := truncatePlain(sub, max(1, width-5))
+			lines = append(lines, " "+av+" "+lipgloss.NewStyle().Foreground(theme.Text).Render(name))
 		}
 	}
 
@@ -252,10 +241,15 @@ func renderVerticalSep(height int) string {
 }
 
 func renderMain(s *app.State, th theme.Theme, tr thumbs.Renderer, width, height int) string {
+	chips := renderChips(s, th, width)
+	bodyH := max(1, height-1)
+	var body string
 	if s.View == app.ViewSearch {
-		return renderSearchList(s, th, tr, width, height)
+		body = renderSearchList(s, th, tr, width, bodyH)
+	} else {
+		body = renderHomeGrid(s, th, tr, width, bodyH)
 	}
-	return renderHomeGrid(s, th, tr, width, height)
+	return fitBlock(chips+"\n"+body, width, height)
 }
 
 func renderHomeGrid(s *app.State, th theme.Theme, tr thumbs.Renderer, width, height int) string {
@@ -312,6 +306,7 @@ func renderHomeGrid(s *app.State, th theme.Theme, tr thumbs.Renderer, width, hei
 				break
 			}
 			v := items[idx]
+			tr.Prefetch(v.ID)
 			selected := idx == s.SelectedIdx
 			saved := s.SavedIDs[v.ID]
 			playing := isVideoPlaying(s, v)
@@ -354,18 +349,19 @@ func renderCard(v model.Video, selected, saved, playing bool, th theme.Theme, tr
 	}
 	metaRow := truncateStyledLine(strings.Join(badgeParts, " "), innerW)
 
-	// 3. 2-line title.
-	titleLines := wrapTwoLines(v.Title, innerW)
+	// 3. Avatar + 2-line title + channel + views (YouTube Web card layout).
+	titleLines := wrapTwoLines(v.Title, max(4, innerW-3))
 	titleStyle := lipgloss.NewStyle().Foreground(theme.Text).Bold(true)
 	if selected {
 		titleStyle = titleStyle.Foreground(theme.White)
 	}
-	t1 := titleStyle.Render(titleLines[0])
-	t2 := titleStyle.Render(titleLines[1])
+	av := channelAvatar(v.Channel)
+	t1 := av + " " + titleStyle.Render(titleLines[0])
+	t2 := "   " + titleStyle.Render(titleLines[1])
 
 	// 4. Channel & views.
-	ch := lipgloss.NewStyle().Foreground(theme.Muted).Render(truncatePlain(v.Channel, innerW))
-	vw := lipgloss.NewStyle().Foreground(theme.Dim).Render(truncatePlain(formatViewsLine(v), innerW))
+	ch := "   " + lipgloss.NewStyle().Foreground(theme.Muted).Render(truncatePlain(v.Channel, max(4, innerW-3)))
+	vw := "   " + lipgloss.NewStyle().Foreground(theme.Dim).Render(truncatePlain(formatViewsLine(v), max(4, innerW-3)))
 
 	body := strings.Join([]string{thumbStr, metaRow, t1, t2, ch, vw}, "\n")
 	style := th.Card
@@ -373,6 +369,29 @@ func renderCard(v model.Video, selected, saved, playing bool, th theme.Theme, tr
 		style = th.CardSelected
 	}
 	return style.Width(max(1, cardW-2)).Render(body)
+}
+
+var avatarColors = []lipgloss.Color{
+	lipgloss.Color("#c0392b"),
+	lipgloss.Color("#2980b9"),
+	lipgloss.Color("#27ae60"),
+	lipgloss.Color("#8e44ad"),
+	lipgloss.Color("#d35400"),
+	lipgloss.Color("#16a085"),
+}
+
+func channelAvatar(name string) string {
+	r := []rune(strings.TrimSpace(name))
+	ch := "?"
+	var sum int
+	if len(r) > 0 {
+		ch = strings.ToUpper(string(r[0]))
+		for _, c := range r {
+			sum += int(c)
+		}
+	}
+	bg := avatarColors[sum%len(avatarColors)]
+	return lipgloss.NewStyle().Background(bg).Foreground(theme.White).Bold(true).Render(ch + " ")
 }
 
 func renderSearchList(s *app.State, th theme.Theme, tr thumbs.Renderer, width, height int) string {
@@ -414,6 +433,7 @@ func renderSearchList(s *app.State, th theme.Theme, tr thumbs.Renderer, width, h
 	usedH := 0
 	for i := startIdx; i < len(items) && usedH < height; i++ {
 		v := items[i]
+		tr.Prefetch(v.ID)
 		row := renderSearchRow(v, i == s.ResultIdx, s.SavedIDs[v.ID], isVideoPlaying(s, v), th, tr, width)
 		rows = append(rows, row)
 		usedH += lipgloss.Height(row)

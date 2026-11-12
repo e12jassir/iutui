@@ -49,15 +49,11 @@ func DefaultTheme() Theme {
 			Bold(true).
 			Padding(0, 1),
 		SearchBox: lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(Border).
-			Background(Panel).
-			Foreground(Text).
+			Background(Surf).
+			Foreground(Muted).
 			Padding(0, 1),
 		SearchBoxFocused: lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(Blue).
-			Background(Panel).
+			Background(SurfHi).
 			Foreground(White).
 			Padding(0, 1),
 		Chip: lipgloss.NewStyle().
@@ -70,15 +66,14 @@ func DefaultTheme() Theme {
 			Bold(true).
 			Padding(0, 1),
 		Card: lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(Rule).
-			Background(Panel).
+			Border(lipgloss.HiddenBorder()).
+			Background(Bg).
 			Foreground(Text).
 			Padding(0, 1),
 		CardSelected: lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(Blue).
-			Background(Surf).
+			Border(lipgloss.NormalBorder()).
+			BorderForeground(Text).
+			Background(Bg).
 			Foreground(White).
 			Padding(0, 1),
 		BadgeLive: lipgloss.NewStyle().
@@ -102,7 +97,7 @@ func DefaultTheme() Theme {
 			Padding(0, 1),
 		SidebarItem: lipgloss.NewStyle().
 			Foreground(Muted).
-			Background(Panel).
+			Background(Bg).
 			Padding(0, 1),
 		SidebarItemActive: lipgloss.NewStyle().
 			Foreground(White).
