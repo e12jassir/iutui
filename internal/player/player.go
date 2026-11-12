@@ -31,16 +31,29 @@ func PlayVideo(v model.Video, mode string) error {
 	}
 	url := fmt.Sprintf("https://www.youtube.com/watch?v=%s", v.ID)
 
-	ytBin := "./bin/yt"
-	if _, err := os.Stat(ytBin); os.IsNotExist(err) {
-		ytBin = "yt"
-	}
+	ytBin := resolveYtBin()
 
 	cmd := exec.Command(ytBin, "__do", "play", mode, v.ID, url, v.Title, v.Channel, v.Duration)
 	cmd.Stdin = nil
 	cmd.Stdout = nil
 	cmd.Stderr = nil
 	return cmd.Start()
+}
+
+func resolveYtBin() string {
+	if exe, err := os.Executable(); err == nil {
+		sibling := filepath.Join(filepath.Dir(exe), "yt")
+		if info, err := os.Stat(sibling); err == nil && !info.IsDir() {
+			return sibling
+		}
+	}
+	if info, err := os.Stat("./bin/yt"); err == nil && !info.IsDir() {
+		return "./bin/yt"
+	}
+	if p, err := exec.LookPath("yt"); err == nil {
+		return p
+	}
+	return "yt"
 }
 
 // FindSocket locates the active mpv.sock.
@@ -159,7 +172,20 @@ func GetStatus() (Status, error) {
 		return d.Data, nil
 	}
 
-	st := Status{IsRunning: true}
+	st := Status{IsRunning: false}
+
+	// Verify mpv actually responds to an IPC property query before marking IsRunning = true
+	paused, err := getProp("pause")
+	if err != nil {
+		// Stale socket left over by a dead mpv process; remove it so FindSocket stays clean
+		_ = os.Remove(sockPath)
+		return Status{IsRunning: false}, nil
+	}
+
+	st.IsRunning = true
+	if b, ok := paused.(bool); ok {
+		st.Paused = b
+	}
 
 	if title, err := getProp("media-title"); err == nil && title != nil {
 		st.Title = fmt.Sprintf("%v", title)
@@ -172,11 +198,6 @@ func GetStatus() (Status, error) {
 	if dur, err := getProp("duration"); err == nil && dur != nil {
 		if f, ok := dur.(float64); ok {
 			st.Duration = f
-		}
-	}
-	if paused, err := getProp("pause"); err == nil && paused != nil {
-		if b, ok := paused.(bool); ok {
-			st.Paused = b
 		}
 	}
 	if vol, err := getProp("volume"); err == nil && vol != nil {

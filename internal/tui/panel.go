@@ -80,7 +80,7 @@ func RenderPanel(title string, content []string, width, height int, focused bool
 		middle.WriteString(borderStyle.Render("│"))
 
 		if cWidth > innerWidth {
-			middle.WriteString(runewidth.Truncate(rowContent, innerWidth, ""))
+			middle.WriteString(truncateANSI(rowContent, innerWidth))
 		} else {
 			middle.WriteString(rowContent)
 			padding := innerWidth - cWidth
@@ -101,6 +101,41 @@ func RenderPanel(title string, content []string, width, height int, focused bool
 	lines = append(lines, bottomLine.String())
 
 	return strings.Join(lines, "\n")
+}
+
+// truncateANSI truncates an ANSI-colored string to maxWidth visible columns while preserving SGR sequences and resetting at the end.
+func truncateANSI(s string, maxWidth int) string {
+	if maxWidth <= 0 {
+		return ""
+	}
+	var b strings.Builder
+	inEscape := false
+	used := 0
+	for _, r := range s {
+		if r == '\x1b' {
+			inEscape = true
+			b.WriteRune(r)
+			continue
+		}
+		if inEscape {
+			b.WriteRune(r)
+			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || r == 'm' {
+				inEscape = false
+			}
+			continue
+		}
+		rw := runewidth.RuneWidth(r)
+		if used+rw > maxWidth {
+			break
+		}
+		b.WriteRune(r)
+		used += rw
+	}
+	b.WriteString("\x1b[0m")
+	if used < maxWidth {
+		b.WriteString(strings.Repeat(" ", maxWidth-used))
+	}
+	return b.String()
 }
 
 // stripANSI removes ANSI escape codes to accurately measure visible string width.

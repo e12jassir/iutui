@@ -61,12 +61,11 @@ var (
 )
 
 // RenderCard renders a YouTube Web 3-tier card with strict mathematical height invariance:
-// Tier 1: Real Thumbnail (ANSI halfblocks rendered via chafa --stretch) - exactly 7 lines
+// Tier 1: Real Thumbnail (Truecolor subpixel quadrants) - exactly 8 lines
 // Tier 2: Dedicated Badge Row - exactly 1 line
 // Tier 3: Metadata:
 //   - Title (strictly exactly 2 lines)
-//   - Channel (strictly exactly 1 line)
-//   - Views / Date (strictly exactly 1 line)
+//   - Channel + Views (strictly 2 lines)
 func RenderCard(v model.Video, isSelected bool) string {
 	// 1. Thumbnail (strictly CardThumbHeight lines)
 	thumbView := RenderThumbnailANSI(v.ID, CardInnerWidth, CardThumbHeight)
@@ -74,11 +73,11 @@ func RenderCard(v model.Video, isSelected bool) string {
 	// 2. Badge bar (strictly 1 line)
 	var badgeStr string
 	if v.IsLive {
-		badgeStr = badgeLiveStyle.Render("● EN VIVO")
+		badgeStr = badgeLiveStyle.Render(" ● EN VIVO ")
 	} else if v.Duration != "" {
-		badgeStr = badgeDurStyle.Render(fmt.Sprintf("[%s]", v.Duration))
+		badgeStr = badgeDurStyle.Render(fmt.Sprintf(" ⏱ %s ", v.Duration))
 	} else {
-		badgeStr = badgeDurStyle.Render("[--:--]")
+		badgeStr = badgeDurStyle.Render(" ⏱ --:-- ")
 	}
 	badgeRow := lipgloss.NewStyle().
 		Width(CardInnerWidth).
@@ -87,15 +86,16 @@ func RenderCard(v model.Video, isSelected bool) string {
 
 	// 3. Title (strictly exactly 2 lines)
 	cleanTitle := strings.ReplaceAll(strings.ReplaceAll(v.Title, "\n", " "), "\r", " ")
-	titlePrefix := ""
-	availTitleWidth := CardInnerWidth
+	titlePrefix := " "
+	availTitleWidth := CardInnerWidth - 2
 	if isSelected {
 		titlePrefix = "▶ "
-		availTitleWidth = CardInnerWidth - 2
+		availTitleWidth = CardInnerWidth - 3
 	}
 	tLine1, tLine2 := splitTitleStrict(cleanTitle, availTitleWidth)
-	if isSelected {
-		tLine1 = titlePrefix + tLine1
+	tLine1 = titlePrefix + tLine1
+	if tLine2 != "" {
+		tLine2 = " " + tLine2
 	}
 
 	titleSt := titleNormalStyle
@@ -111,18 +111,20 @@ func RenderCard(v model.Video, isSelected bool) string {
 	if chText == "" || chText == "NA" {
 		chText = "YouTube"
 	}
-	chText = runewidth.Truncate(chText, CardInnerWidth, "…")
+	chText = " 📺 " + chText
+	chText = runewidth.Truncate(chText, CardInnerWidth-1, "…")
 	chView := channelNameStyle.Render(runewidth.FillRight(chText, CardInnerWidth))
 
 	// 5. Views & metadata (strictly exactly 1 line)
 	vText := strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(v.Views, "\n", " "), "\r", " "))
 	if vText == "" || vText == "NA" {
-		vText = "YouTube"
+		vText = "YouTube Video"
 	}
-	vText = runewidth.Truncate(vText, CardInnerWidth, "…")
+	vText = " • " + vText
+	vText = runewidth.Truncate(vText, CardInnerWidth-1, "…")
 	vView := viewsMetaStyle.Render(runewidth.FillRight(vText, CardInnerWidth))
 
-	// Assemble card body (7 + 1 + 1 + 1 + 1 + 1 = 12 inner lines)
+	// Assemble card body (8 + 1 + 1 + 1 + 1 + 1 = 13 inner lines + 2 border lines = 15 total lines)
 	body := lipgloss.JoinVertical(
 		lipgloss.Left,
 		thumbView,

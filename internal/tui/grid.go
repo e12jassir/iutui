@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
@@ -27,10 +28,11 @@ func NewGridState(videos []model.Video) GridState {
 
 // CalcCols computes how many cards fit horizontally in the available grid width.
 func CalcCols(availableWidth int) int {
-	if availableWidth < CardTotalWidth {
+	innerW := availableWidth - 2
+	if innerW < CardTotalWidth {
 		return 1
 	}
-	cols := availableWidth / (CardTotalWidth + 2) // includes horizontal gap
+	cols := (innerW + 2) / (CardTotalWidth + 2) // includes horizontal gap
 	if cols < 1 {
 		return 1
 	}
@@ -102,13 +104,16 @@ func (g GridState) SelectedVideo() (model.Video, bool) {
 
 // RenderGrid renders the 2D grid with responsive columns and viewport scrolling.
 func RenderGrid(g *GridState, availableWidth, availableHeight int, hasFocus bool) string {
+	return RenderGridPanel(g, "Videos", availableWidth, availableHeight, hasFocus)
+}
+
+// RenderGridPanel renders the 2D video card grid framed inside a Spotatui panel with scroll metrics.
+func RenderGridPanel(g *GridState, headerTitle string, availableWidth, availableHeight int, hasFocus bool) string {
 	if len(g.Videos) == 0 {
-		return lipgloss.NewStyle().
-			Width(availableWidth).
-			Height(availableHeight).
-			Align(lipgloss.Center, lipgloss.Center).
+		emptyMsg := lipgloss.NewStyle().
 			Foreground(colorCardDimText).
-			Render("No se encontraron videos en esta vista.")
+			Render("  No se encontraron videos en esta vista. Presiona '/' para buscar o 'r' para recargar.")
+		return RenderPanel(headerTitle, []string{"", emptyMsg}, availableWidth, availableHeight, hasFocus)
 	}
 
 	cols := CalcCols(availableWidth)
@@ -123,9 +128,14 @@ func RenderGrid(g *GridState, availableWidth, availableHeight int, hasFocus bool
 		g.SelectedIdx = 0
 	}
 
-	// Approximate rows visible given available height
+	innerHeight := availableHeight - 2
+	if innerHeight < CardTotalHeight {
+		innerHeight = CardTotalHeight
+	}
+
+	// Approximate rows visible given available inner height
 	rowRenderHeight := CardTotalHeight + 1
-	visibleRows := availableHeight / rowRenderHeight
+	visibleRows := (innerHeight + 1) / rowRenderHeight
 	if visibleRows < 1 {
 		visibleRows = 1
 	}
@@ -151,9 +161,11 @@ func RenderGrid(g *GridState, availableWidth, availableHeight int, hasFocus bool
 		for c := 0; c < cols; c++ {
 			idx := r*cols + c
 			if idx < len(g.Videos) {
-				isSelected := hasFocus && (idx == g.SelectedIdx)
+				isSelected := (idx == g.SelectedIdx)
 				if len(rowCards) > 0 {
 					rowCards = append(rowCards, "  ") // Horizontal card gap
+				} else {
+					rowCards = append(rowCards, " ") // Left padding inside panel
 				}
 				rowCards = append(rowCards, RenderCard(g.Videos[idx], isSelected))
 			}
@@ -164,8 +176,8 @@ func RenderGrid(g *GridState, availableWidth, availableHeight int, hasFocus bool
 	}
 
 	gridContent := strings.Join(renderedRows, "\n\n")
-	return lipgloss.NewStyle().
-		Width(availableWidth).
-		Height(availableHeight).
-		Render(gridContent)
+	contentLines := strings.Split(gridContent, "\n")
+
+	panelTitle := fmt.Sprintf(" %s (%d/%d) • Fila %d/%d ", headerTitle, g.SelectedIdx+1, len(g.Videos), currRow+1, totalRows)
+	return RenderPanel(panelTitle, contentLines, availableWidth, availableHeight, hasFocus)
 }

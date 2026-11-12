@@ -126,9 +126,40 @@ func TestModelViewSpotatuiLayout(t *testing.T) {
 		t.Errorf("expected video titles in cards, got:\n%s", view)
 	}
 
-	// Should contain playing footer
+	// Check if playing footer is rendered
 	if !strings.Contains(view, "Reproductor") || !strings.Contains(view, "[⏯ Pausa]") {
 		t.Errorf("expected playing footer, got:\n%s", view)
 	}
 	t.Logf("\nRendered YouTube Web Terminal View:\n%s\n", view)
+}
+
+func TestTruncateANSIPreservesVisibleWidth(t *testing.T) {
+	styled := "\x1b[38;2;189;147;249mHola mundo largo con colores ANSI\x1b[0m"
+	out := truncateANSI(styled, 10)
+	visible := stripANSI(out)
+	if len(visible) != 10 {
+		t.Errorf("expected visible length 10, got %d (%q)", len(visible), visible)
+	}
+	if !strings.HasSuffix(out, "\x1b[0m") && !strings.Contains(out, "\x1b[0m") {
+		t.Errorf("expected ANSI reset sequence in truncated string, got %q", out)
+	}
+}
+
+func TestCleanThumbIDStripsMixPrefix(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"Standard video ID", "hgUyIeEJQrA", "hgUyIeEJQrA"},
+		{"Mix ID with RD prefix", "RDOgeR2oqZGTs", "OgeR2oqZGTs"},
+		{"Short ID untouched", "RD123", "RD123"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := cleanThumbID(tt.in); got != tt.want {
+				t.Errorf("cleanThumbID(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
 }

@@ -34,7 +34,7 @@ func RenderSidebarYouTube(activeTab model.Tab, focused bool, inPlaylists bool, w
 
 	var lines []string
 
-	sectionHeaderStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Bold(true)
+	sectionHeaderStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#9CA3AF")).Bold(true)
 	dividerStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#2E3346"))
 	dividerLine := dividerStyle.Render(strings.Repeat("─", innerWidth))
 
@@ -43,11 +43,11 @@ func RenderSidebarYouTube(activeTab model.Tab, focused bool, inPlaylists bool, w
 	mainTabs := []model.Tab{model.TabHome, model.TabMusic, model.TabSubscriptions}
 	for _, t := range mainTabs {
 		isSelected := (t == activeTab && !inPlaylists)
-		prefix := " "
+		prefix := "  "
 		if isSelected {
 			prefix = "▶ "
 		}
-		label := prefix + t.String()
+		label := fmt.Sprintf("%s%s %s", prefix, t.Icon(), t.String())
 		label = runewidth.Truncate(label, maxTextWidth, "…")
 
 		var rendered string
@@ -68,11 +68,11 @@ func RenderSidebarYouTube(activeTab model.Tab, focused bool, inPlaylists bool, w
 	biblioTabs := []model.Tab{model.TabHistory, model.TabDownloads}
 	for _, t := range biblioTabs {
 		isSelected := (t == activeTab && !inPlaylists)
-		prefix := " "
+		prefix := "  "
 		if isSelected {
 			prefix = "▶ "
 		}
-		label := prefix + t.String()
+		label := fmt.Sprintf("%s%s %s", prefix, t.Icon(), t.String())
 		label = runewidth.Truncate(label, maxTextWidth, "…")
 
 		var rendered string
@@ -88,12 +88,11 @@ func RenderSidebarYouTube(activeTab model.Tab, focused bool, inPlaylists bool, w
 
 	lines = append(lines, dividerLine)
 
-	// Section 3: LISTAS & CANALES
-	lines = append(lines, sectionHeaderStyle.Render(" CANALES & LISTAS"))
-	lines = append(lines, lipgloss.NewStyle().Foreground(colorDimTitle).Render("  + Add Playlist"))
+	// Section 3: EXPLORAR / COLECCIONES
+	lines = append(lines, sectionHeaderStyle.Render(" EXPLORAR MIXES"))
 
 	for i, p := range playlists {
-		prefix := " "
+		prefix := "  "
 		isSelected := (i == selectedPlaylistIdx && inPlaylists)
 		if isSelected {
 			prefix = "▶ "
@@ -104,15 +103,13 @@ func RenderSidebarYouTube(activeTab model.Tab, focused bool, inPlaylists bool, w
 		var rendered string
 		if isSelected && focused {
 			rendered = lipgloss.NewStyle().Foreground(colorFocusedPurple).Bold(true).Render(label)
+		} else if isSelected {
+			rendered = lipgloss.NewStyle().Foreground(colorTextNormal).Bold(true).Render(label)
 		} else {
 			rendered = lipgloss.NewStyle().Foreground(colorTextMuted).Render(label)
 		}
 		lines = append(lines, " "+rendered)
 	}
 
-	return RenderPanel("YouTube", lines, width, totalHeight, focused && (mIsSidebar(focused)))
-}
-
-func mIsSidebar(focused bool) bool {
-	return focused
+	return RenderPanel("YouTube", lines, width, totalHeight, focused)
 }

@@ -2,10 +2,16 @@ package tui
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/e12jassir/ytx-cli/internal/player"
 	"github.com/mattn/go-runewidth"
+)
+
+const (
+	TopHelpWidth     = 14
+	TopSettingsWidth = 16
 )
 
 // View renders YouTube Web's terminal interface with real ANSI thumbnail cards and sleek drawers.
@@ -15,8 +21,8 @@ func (m Model) View() string {
 	}
 
 	// 1. Top Bar: [Buscar en YouTube] [Ayuda] [Ajustes]
-	helpWidth := 12
-	settingsWidth := 14
+	helpWidth := TopHelpWidth
+	settingsWidth := TopSettingsWidth
 	searchWidth := m.Width - helpWidth - settingsWidth
 	if searchWidth < 20 {
 		searchWidth = 20
@@ -28,14 +34,14 @@ func (m Model) View() string {
 		if m.Focus == FocusSearch {
 			cursor = "█"
 		}
-		searchContent = "🔍 " + m.SearchQuery + cursor
+		searchContent = " 🔍 " + m.SearchQuery + cursor
 	} else {
-		searchContent = lipgloss.NewStyle().Foreground(colorTextMuted).Render("🔍 Buscar en YouTube (o presiona /)...")
+		searchContent = lipgloss.NewStyle().Foreground(colorTextMuted).Render(" 🔍 Buscar en YouTube (presiona / o haz clic)...")
 	}
 
 	searchBox := RenderPanel("Buscar", []string{searchContent}, searchWidth, 3, m.Focus == FocusSearch)
-	helpBox := RenderPanel("Ayuda", []string{"Type ?"}, helpWidth, 3, m.ShowHelp)
-	settingsBox := RenderPanel("Ajustes", []string{"[q] Salir"}, settingsWidth, 3, m.ShowSettings)
+	helpBox := RenderPanel("Ayuda", []string{" [?] Atajos"}, helpWidth, 3, m.ShowHelp)
+	settingsBox := RenderPanel("Ajustes", []string{" [q] Salir"}, settingsWidth, 3, m.ShowSettings)
 
 	topBar := lipgloss.JoinHorizontal(lipgloss.Top, searchBox, helpBox, settingsBox)
 
@@ -47,9 +53,9 @@ func (m Model) View() string {
 	}
 
 	sidebarWidth := SidebarWidth
-	gridWidth := m.Width - sidebarWidth - 2
-	if gridWidth < CardTotalWidth {
-		gridWidth = CardTotalWidth
+	gridWidth := m.Width - sidebarWidth - 1
+	if gridWidth < CardTotalWidth+2 {
+		gridWidth = CardTotalWidth + 2
 	}
 
 	sidebarView := RenderSidebarYouTube(
@@ -62,7 +68,14 @@ func (m Model) View() string {
 		m.SelectedPlaylistIdx,
 	)
 
-	gridView := RenderGrid(&m.Grid, gridWidth, middleHeight, m.Focus == FocusGrid)
+	gridHeader := m.ActiveTab.Icon() + " " + m.ActiveTab.String()
+	if m.InPlaylists && m.SelectedPlaylistIdx >= 0 && m.SelectedPlaylistIdx < len(m.Playlists) {
+		gridHeader = m.Playlists[m.SelectedPlaylistIdx]
+	} else if m.SearchQuery != "" {
+		gridHeader = "🔍 " + m.SearchQuery
+	}
+
+	gridView := RenderGridPanel(&m.Grid, gridHeader, gridWidth, middleHeight, m.Focus == FocusGrid)
 
 	middleSection := lipgloss.JoinHorizontal(lipgloss.Top, sidebarView, " ", gridView)
 
@@ -70,33 +83,56 @@ func (m Model) View() string {
 	var statusText string
 	if m.PlayerStatus.IsRunning {
 		if m.PlayerStatus.Paused {
-			statusText = "Pausado"
+			statusText = "⏸ Pausado"
 		} else {
-			statusText = "Reproduciendo"
+			statusText = "▶ Reproduciendo"
 		}
 	} else {
-		statusText = "Inactivo"
+		statusText = "⏹ Inactivo"
 	}
 
 	vol := int(m.PlayerStatus.Volume)
 	if vol == 0 && m.PlayerStatus.IsRunning {
 		vol = 100
 	}
-	playingTitle := fmt.Sprintf("Reproductor (mpv IPC • %s • Vol: %d%%)", statusText, vol)
+	playingTitle := fmt.Sprintf(" Reproductor (mpv IPC • %s • Vol: %d%%) ", statusText, vol)
 
-	// Line 1: Track Title
+	// Line 1: Track Title + StatusMessage on the right
+	var leftTitle string
+	if m.PlayerStatus.Title != "" {
+		leftTitle = " ▶ " + m.PlayerStatus.Title
+	} else if v, ok := m.Grid.SelectedVideo(); ok {
+		leftTitle = " 🎯 Seleccionado: " + v.Title + " (" + v.Channel + ")"
+	} else {
+		leftTitle = " (Ninguna reproducción activa)"
+	}
+
+	innerW := m.Width - 2
+	rightStatus := ""
+	if m.StatusMessage != "" {
+		rightStatus = " │ " + m.StatusMessage + " "
+	}
+	availLeft := innerW - runewidth.StringWidth(rightStatus)
+	if availLeft < 20 {
+		availLeft = innerW
+		rightStatus = ""
+	}
+	leftTrunc := runewidth.Truncate(leftTitle, availLeft, "…")
+	leftPad := runewidth.FillRight(leftTrunc, availLeft)
+
 	var titleLine string
 	if m.PlayerStatus.Title != "" {
-		t := runewidth.Truncate(m.PlayerStatus.Title, m.Width-6, "…")
-		titleLine = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFFFFF")).Bold(true).Render("  ▶ " + t)
+		titleLine = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFFFFF")).Bold(true).Render(leftPad) +
+			lipgloss.NewStyle().Foreground(colorFocusedPurple).Render(rightStatus)
 	} else {
-		titleLine = lipgloss.NewStyle().Foreground(colorTextMuted).Render("  (Ninguna reproducción activa)")
+		titleLine = lipgloss.NewStyle().Foreground(colorTextNormal).Render(leftPad) +
+			lipgloss.NewStyle().Foreground(colorFocusedPurple).Render(rightStatus)
 	}
 
 	// Line 2: Progress timeline
 	timePos := player.FormatTime(m.PlayerStatus.TimePos)
 	duration := player.FormatTime(m.PlayerStatus.Duration)
-	barBudget := m.Width - len(timePos) - len(duration) - 16
+	barBudget := m.Width - len(timePos) - len(duration) - 10
 	if barBudget < 10 {
 		barBudget = 10
 	}
@@ -109,15 +145,17 @@ func (m Model) View() string {
 
 	// Line 3: Interactive controls (clickable)
 	btnStyle := lipgloss.NewStyle().Foreground(colorCyan).Bold(true)
-	controlsLine := fmt.Sprintf("  %s   %s   %s   %s   %s   %s   %s   %s",
-		btnStyle.Render("[⏮ Anterior]"),
+	keyHintStyle := lipgloss.NewStyle().Foreground(colorTextMuted)
+	controlsLine := fmt.Sprintf("  %s  %s  %s  %s  %s  %s  %s  %s   %s",
+		btnStyle.Render("[⏮ Ant]"),
 		btnStyle.Render("[⏯ Pausa]"),
-		btnStyle.Render("[⏭ Siguiente]"),
+		btnStyle.Render("[⏭ Sig]"),
 		btnStyle.Render("[⏪ -10s]"),
 		btnStyle.Render("[⏩ +10s]"),
-		btnStyle.Render("[󰕾 Vol-]"),
-		btnStyle.Render("[󰕾 Vol+]"),
-		btnStyle.Render("[🗔 Ventana]"),
+		btnStyle.Render("[🔉 Vol-]"),
+		btnStyle.Render("[🔊 Vol+]"),
+		btnStyle.Render("[🗔 Video]"),
+		keyHintStyle.Render("Enter: Reproducir • a: Audio • /: Buscar • ?: Ayuda"),
 	)
 
 	playerLines := []string{titleLine, progressLine, controlsLine}
@@ -134,29 +172,35 @@ func (m Model) View() string {
 func (m Model) renderHelpModal() string {
 	helpText := []string{
 		"  ⌨ ATAJOS DE TECLADO:",
-		"  -------------------------------------------------------------",
-		"  Tab / Shift+Tab   Cambiar de panel (Buscador / Guía / Cuadrícula)",
+		"  " + strings.Repeat("─", 60),
+		"  Tab / Shift+Tab   Cambiar de panel (Buscador / Guía / Cuadrícula / Reproductor)",
 		"  /                 Enfocar buscador de YouTube directamente",
-		"  h / j / k / l     Navegar tarjetas de video (estilo Vim)",
-		"  Enter             Reproducir video en ventana mpv",
-		"  v                 Alternar / Levantar ventana de video mpv",
+		"  h / j / k / l     Navegar tarjetas o secciones (también flechas ← ↓ ↑ →)",
+		"  Enter             Reproducir video en ventana mpv (o buscar playlist)",
+		"  a                 Reproducir solo audio en segundo plano",
+		"  v                 Forzar apertura de ventana de video mpv",
 		"  Espacio           Pausar / Reanudar reproducción",
 		"  [ / ]             Retroceder / Avanzar 10 segundos",
-		"  + / -             Subir / Bajar volumen",
+		"  + / -             Subir / Bajar volumen (+5% / -5%)",
 		"  n / p             Siguiente / Anterior en cola",
-		"  ?                 Cerrar esta ventana de ayuda",
-		"  q / Esc           Salir de búsqueda o cerrar TUI",
+		"  r                 Recargar vista actual",
+		"  ?                 Abrir / Cerrar esta ventana de ayuda",
+		"  q / Ctrl+C        Cerrar YouTube Terminal",
 		"",
 		"  🖱 CONTROLES DE MOUSE:",
-		"  -------------------------------------------------------------",
-		"  • Clic en buscador: activa el cursor para escribir",
-		"  • Clic en panel izquierdo: cambia de sección de YouTube",
+		"  " + strings.Repeat("─", 60),
+		"  • Clic en buscador: activa el cursor para escribir búsqueda",
+		"  • Clic en panel izquierdo: cambia de sección o lanza colección",
 		"  • Clic en una tarjeta: la selecciona (borde morado #BD93F9)",
-		"  • Doble clic en tarjeta: reproduce el video en ventana mpv",
-		"  • Rueda del ratón: scroll fluido en la cuadrícula de videos",
-		"  • Clic en botones inferiores: control de reproducción directo",
+		"  • Segundo clic en tarjeta seleccionada: reproduce el video en mpv",
+		"  • Rueda del ratón: desplazamiento fluido por las filas de tarjetas",
+		"  • Clic en controles inferiores: pausa, salto ±10s y volumen directo",
 	}
 
-	box := RenderPanel("Ayuda & Atajos de YouTube Terminal", helpText, m.Width-8, len(helpText)+2, true)
+	modalW := 86
+	if m.Width-6 < modalW {
+		modalW = m.Width - 6
+	}
+	box := RenderPanel(" Ayuda & Atajos de YouTube Terminal ", helpText, modalW, len(helpText)+2, true)
 	return lipgloss.Place(m.Width, m.Height, lipgloss.Center, lipgloss.Center, box)
 }

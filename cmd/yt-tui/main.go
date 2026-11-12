@@ -11,18 +11,10 @@ import (
 )
 
 func main() {
-	tabs := []model.Tab{
-		model.TabHome,
-		model.TabMusic,
-		model.TabSubscriptions,
-		model.TabDownloads,
-		model.TabHistory,
-	}
-
 	feeds := make(map[model.Tab][]model.Video)
-	for _, t := range tabs {
-		vids, _ := data.LoadFeed(t)
-		feeds[t] = vids
+	// Load Home feed first so initial startup is fast; other tabs load on demand or from cache
+	if vids, err := data.LoadFeed(model.TabHome); err == nil {
+		feeds[model.TabHome] = vids
 	}
 
 	p := tea.NewProgram(

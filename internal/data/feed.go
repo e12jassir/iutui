@@ -10,16 +10,29 @@ import (
 	"github.com/e12jassir/ytx-cli/internal/model"
 )
 
+func resolveYtBin() string {
+	if exe, err := os.Executable(); err == nil {
+		sibling := filepath.Join(filepath.Dir(exe), "yt")
+		if info, err := os.Stat(sibling); err == nil && !info.IsDir() {
+			return sibling
+		}
+	}
+	if info, err := os.Stat("./bin/yt"); err == nil && !info.IsDir() {
+		return "./bin/yt"
+	}
+	if p, err := exec.LookPath("yt"); err == nil {
+		return p
+	}
+	return "yt"
+}
+
 // SearchYouTube performs an online or cached search via bin/yt __list search.
 func SearchYouTube(query string) ([]model.Video, error) {
 	if strings.TrimSpace(query) == "" {
 		return nil, nil
 	}
 
-	ytBin := "./bin/yt"
-	if _, err := os.Stat(ytBin); os.IsNotExist(err) {
-		ytBin = "yt"
-	}
+	ytBin := resolveYtBin()
 
 	cmd := exec.Command(ytBin, "__list", "search", query)
 	out, err := cmd.Output()
@@ -134,7 +147,20 @@ func parseTSV(path string) ([]model.Video, error) {
 			continue
 		}
 
-		id := parts[0]
+		id := strings.TrimSpace(parts[0])
+		// Check if legacy formatted history/cache row where ID is at column 4 and URL at column 5
+		if (len(id) < 5 || strings.Contains(id, " ")) && len(parts) >= 6 && strings.HasPrefix(strings.TrimSpace(parts[5]), "http") {
+			id = strings.TrimSpace(parts[4])
+			if len(id) >= 5 && !strings.Contains(id, " ") {
+				videos = append(videos, model.Video{
+					ID:       id,
+					Title:    strings.TrimSpace(parts[1]),
+					Channel:  strings.TrimSpace(parts[2]),
+					Duration: strings.TrimSpace(parts[3]),
+				})
+			}
+			continue
+		}
 		// Filter out non-video IDs or malformed tokens
 		if len(id) < 5 || strings.Contains(id, " ") {
 			continue
@@ -168,6 +194,8 @@ func parseTSV(path string) ([]model.Video, error) {
 		}
 		if v.Views == "NA" || v.Views == "-" {
 			v.Views = ""
+		} else {
+			v.Views = formatHumanViews(v.Views)
 		}
 		if v.Duration == "NA" || v.Duration == "-" {
 			v.Duration = ""
@@ -179,6 +207,54 @@ func parseTSV(path string) ([]model.Video, error) {
 	return videos, scanner.Err()
 }
 
+func formatHumanViews(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	var n int64
+	for _, ch := range raw {
+		if ch < '0' || ch > '9' {
+			// Already formatted like "1.7M" or "100K"
+			return raw
+		}
+		n = n*10 + int64(ch-'0')
+	}
+	switch {
+	case n >= 1_000_000_000:
+		return strings.TrimSuffix(formatFloat1(float64(n)/1e9), ".0") + "B vistas"
+	case n >= 1_000_000:
+		return strings.TrimSuffix(formatFloat1(float64(n)/1e6), ".0") + "M vistas"
+	case n >= 100_000:
+		return formatInt(n/1000) + "K vistas"
+	case n >= 1_000:
+		return strings.TrimSuffix(formatFloat1(float64(n)/1e3), ".0") + "K vistas"
+	default:
+		return raw + " vistas"
+	}
+}
+
+func formatInt(n int64) string {
+	if n == 0 {
+		return "0"
+	}
+	var buf [20]byte
+	i := len(buf)
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + n%10)
+		n /= 10
+	}
+	return string(buf[i:])
+}
+
+func formatFloat1(f float64) string {
+	tenths := int64(f*10 + 0.5)
+	whole := tenths / 10
+	rem := tenths % 10
+	return formatInt(whole) + "." + formatInt(rem)
+}
+
 func fetchViaCLI(tab model.Tab) ([]model.Video, error) {
 	var viewArg string
 	switch tab {
@@ -188,19 +264,17 @@ func fetchViaCLI(tab model.Tab) ([]model.Video, error) {
 		viewArg = "music"
 	case model.TabSubscriptions:
 		viewArg = "subs"
+	case model.TabHistory:
+		viewArg = "history"
 	default:
 		return nil, nil
 	}
 
-	cmd := exec.Command("yt", "__list", viewArg)
+	ytBin := resolveYtBin()
+	cmd := exec.Command(ytBin, "__list", viewArg)
 	out, err := cmd.Output()
 	if err != nil {
-		// Try ./bin/yt relative to current directory
-		cmd = exec.Command("./bin/yt", "__list", viewArg)
-		out, err = cmd.Output()
-		if err != nil {
-			return nil, err
-		}
+		return nil, err
 	}
 
 	var videos []model.Video

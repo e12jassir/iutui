@@ -10,7 +10,7 @@ fi
 stop_prev_playback() {
     local pid_file="$STATE_DIR/audio.pid"
     if mpv_is_running && mpv_send quit >/dev/null 2>&1; then
-        rm -f "$pid_file"
+        rm -f "$pid_file" "${YT_SOCK:-}"
         return 0
     fi
     if [ -f "$pid_file" ]; then
@@ -22,6 +22,7 @@ stop_prev_playback() {
         fi
         rm -f "$pid_file"
     fi
+    [ -n "${YT_SOCK:-}" ] && rm -f "$YT_SOCK" 2>/dev/null || true
 }
 
 build_format() { # mode [quality]
@@ -32,6 +33,17 @@ build_format() { # mode [quality]
         printf 'bestvideo+bestaudio/best'
     else
         printf 'bestvideo[height<=%s]+bestaudio/best' "$q"
+    fi
+}
+
+build_mpv_format() { # mode [quality] -> prefers HLS m3u8 streams first to avoid YouTube SABR 403 on direct HTTPS
+    local mode=${1:-window} q=${2:-${YT_QUALITY:-1080}}
+    if [ "$mode" = "audio" ]; then
+        printf 'ba[protocol*=m3u8]/b[height<=360][protocol*=m3u8]/b[protocol*=m3u8]/ba/b'
+    elif [ "$q" = 0 ] || [ -z "$q" ]; then
+        printf 'bestvideo[protocol*=m3u8]+bestaudio[protocol*=m3u8]/best[protocol*=m3u8]/bestvideo+bestaudio/best'
+    else
+        printf 'bestvideo[height<=%s][protocol*=m3u8]+bestaudio[protocol*=m3u8]/best[height<=%s][protocol*=m3u8]/bestvideo[height<=%s]+bestaudio/best' "$q" "$q" "$q"
     fi
 }
 
@@ -60,12 +72,25 @@ play_video() { # mode id url title channel dur
 
     # Reuse a live mpv session instead of killing it: the IPC socket swaps the
     # current stream in place so the player keeps its window, volume and queue.
-    if mpv_is_running && mpv_send loadfile "$url" replace >/dev/null 2>&1; then
-        notify "▶ $title"
-        return 0
+    if mpv_is_running; then
+        local cur_yf
+        cur_yf=$(mpv_property ytdl-format 2>/dev/null || true)
+        if [ -z "$cur_yf" ] || [[ "$cur_yf" == *"m3u8"* ]]; then
+            local want_vid="auto"
+            [ "$mode" = "audio" ] && want_vid="no"
+            mpv_send set_property vid "$want_vid" >/dev/null 2>&1 || true
+            if mpv_send loadfile "$url" replace >/dev/null 2>&1; then
+                mpv_send set_property force-media-title "$title" >/dev/null 2>&1 || true
+                mpv_send set_property pause no >/dev/null 2>&1 || true
+                notify "▶ $title"
+                return 0
+            fi
+        fi
     fi
 
     vfmt=$(build_format "$mode" "$YT_QUALITY")
+    local mpv_fmt
+    mpv_fmt=$(build_mpv_format "$mode" "$YT_QUALITY")
 
     # ytdl_hook settings travel with every mpv instance so both native direct
     # playback and later `loadfile ... replace` IPC swaps authenticate and
@@ -80,11 +105,12 @@ play_video() { # mode id url title channel dur
         --force-media-title="$title"
         --cache-pause=no
         --demuxer-readahead-secs=2
-        --ytdl-format="$vfmt"
-        --ytdl-raw-options-append="extractor-args=youtube:player_client=android,web"
+        --ytdl-format="$mpv_fmt"
     )
     if [ "${#COOKIE_ARGS[@]}" -ge 2 ] && [ "${COOKIE_ARGS[0]}" = "--cookies" ]; then
         mo+=(--ytdl-raw-options-append="cookies=${COOKIE_ARGS[1]}")
+    else
+        mo+=(--ytdl-raw-options-append="extractor-args=youtube:player_client=android,web")
     fi
     case $mode in
         pip)   mo+=(--no-terminal --no-fs --ontop --title="Picture-in-Picture" --geometry=30%x30%-20-20 --autofit=28% --force-window=immediate) ;;
@@ -131,11 +157,8 @@ play_video() { # mode id url title channel dur
     (
         trap '[ -n "$ck_tmp" ] && rm -f "$ck_tmp"' EXIT
         if [ "$direct" = 1 ]; then
-            mpv "${mo[@]}" "$url" </dev/null
-            direct_rc=$?
-            if [ "$direct_rc" -eq 0 ]; then
-                exit 0
-            fi
+            mpv "${mo[@]}" --idle=once "$url" </dev/null
+            exit $?
         fi
         if [ "$mode" = "audio" ]; then
             ytdlp "${COOKIE_ARGS[@]}" -f "$vfmt" -o - -- "$url" 2>/dev/null | mpv "${mo[@]}" -
