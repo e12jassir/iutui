@@ -100,7 +100,7 @@ func (s *State) handleLeftClick(x, y int) (*State, tea.Cmd) {
 	// 3. Sidebar / Mini-guide area
 	mainX := s.mainOriginX()
 	if mainX > 0 && x < mainX-1 {
-		if s.Width >= fullSidebarMinW && s.View == ViewHome {
+		if s.Width >= fullSidebarMinW {
 			switch y {
 			case 3:
 				return s.SwitchTab(model.TabHome)
@@ -218,7 +218,7 @@ func (s *State) handleLeftClick(x, y int) (*State, tea.Cmd) {
 }
 
 func (s *State) mainOriginX() int {
-	if s.Width >= fullSidebarMinW && s.View == ViewHome {
+	if s.Width >= fullSidebarMinW {
 		return fullSidebarW + 1
 	}
 	if s.Width >= miniGuideMinW {

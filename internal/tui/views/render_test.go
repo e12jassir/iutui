@@ -183,13 +183,16 @@ func TestRenderResponsiveSidebarRules(t *testing.T) {
 		}
 	})
 
-	t.Run("mini_guide_in_search_at_156", func(t *testing.T) {
+	t.Run("full_sidebar_kept_in_search_at_156", func(t *testing.T) {
 		s := newTestState(app.ViewSearch, 156, 45)
 		defer s.Close()
 		out := Render(s, th, tr)
 		assertBounds(t, out, 156, 45)
-		if strings.Contains(out, "SUSCRIPCIONES") {
-			t.Error("did not expect full sidebar in ViewSearch")
+		if !strings.Contains(out, "SUSCRIPCIONES") {
+			t.Error("expected unified full sidebar to remain visible in ViewSearch at 156")
+		}
+		if !strings.Contains(out, "│") {
+			t.Error("expected vertical divider between sidebar and main")
 		}
 	})
 

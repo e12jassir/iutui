@@ -52,16 +52,18 @@ func Render(s *app.State, th theme.Theme, tr thumbs.Renderer) string {
 
 	var middle string
 	switch {
-	case s.Width >= fullSidebarMinW && s.View == app.ViewHome:
+	case s.Width >= fullSidebarMinW:
 		side := renderSidebarFull(s, th, fullSidebarW, middleH)
+		sep := renderVerticalSep(middleH)
 		mainW := s.Width - fullSidebarW - 1
 		main := renderMain(s, th, tr, mainW, middleH)
-		middle = lipgloss.JoinHorizontal(lipgloss.Top, side, " ", main)
+		middle = lipgloss.JoinHorizontal(lipgloss.Top, side, sep, main)
 	case s.Width >= miniGuideMinW:
 		side := renderMiniGuide(s, th, miniGuideW, middleH)
+		sep := renderVerticalSep(middleH)
 		mainW := s.Width - miniGuideW - 1
 		main := renderMain(s, th, tr, mainW, middleH)
-		middle = lipgloss.JoinHorizontal(lipgloss.Top, side, " ", main)
+		middle = lipgloss.JoinHorizontal(lipgloss.Top, side, sep, main)
 	default:
 		// Width < 100: no sidebar (compact tabs/nav rendered in header).
 		middle = renderMain(s, th, tr, s.Width, middleH)
@@ -465,6 +467,7 @@ func renderSearchList(s *app.State, th theme.Theme, tr thumbs.Renderer, width, h
 }
 
 func renderSearchRow(v model.Video, selected, saved, playing bool, th theme.Theme, tr thumbs.Renderer, rowW int) string {
+	rowW = min(rowW, 108)
 	innerW := max(10, rowW-4)
 	tw := min(searchThumbW, max(12, innerW/3))
 	thumbStr := tr.Render(v.ID, tw, searchThumbH)

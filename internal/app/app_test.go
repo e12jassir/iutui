@@ -313,4 +313,16 @@ func TestMouseInteractions(t *testing.T) {
 			})
 		}
 	})
+
+	t.Run("space key works inside search input", func(t *testing.T) {
+		s, _, _, _ := newTestState()
+		defer s.Close()
+		s.Focus = FocusSearch
+		s, _ = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("pink")})
+		s, _ = s.Update(tea.KeyMsg{Type: tea.KeySpace})
+		s, _ = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("floyd")})
+		if s.SearchDraft != "pink floyd" {
+			t.Fatalf("expected SearchDraft %q, got %q", "pink floyd", s.SearchDraft)
+		}
+	})
 }

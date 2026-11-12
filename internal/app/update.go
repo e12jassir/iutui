@@ -201,8 +201,13 @@ func (s *State) handleKey(msg tea.KeyMsg) (*State, tea.Cmd) {
 				s.SearchDraft = string(r[:len(r)-1])
 			}
 			return s, nil
+		case " ":
+			s.SearchDraft += " "
+			return s, nil
 		default:
-			if msg.Type == tea.KeyRunes {
+			if msg.Type == tea.KeySpace {
+				s.SearchDraft += " "
+			} else if msg.Type == tea.KeyRunes {
 				s.SearchDraft += string(msg.Runes)
 			}
 			return s, nil
