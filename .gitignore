@@ -1,5 +1,5 @@
 # Cache & Temporary files
-thumbs/
+/thumbs/
 *.tsv
 *.sqlite
 .cache/
