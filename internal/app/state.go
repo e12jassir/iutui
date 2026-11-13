@@ -50,11 +50,17 @@ var SearchChips = []Chip{
 	{Label: "No vistos", Match: func(v model.Video, s *State) bool { return !s.HistoryIDs[v.ID] }},
 }
 
+// Downloader defines the video/audio download port.
+type Downloader interface {
+	Enqueue(ctx context.Context, v model.Video, audioOnly bool) error
+}
+
 // Dependencies holds the injected application ports.
 type Dependencies struct {
-	Catalog catalog.Catalog
-	Engine  player.Engine
-	Store   store.Store
+	Catalog    catalog.Catalog
+	Engine     player.Engine
+	Store      store.Store
+	Downloader Downloader
 }
 
 // State holds the pure application state decoupled from terminal rendering.
@@ -95,6 +101,7 @@ type State struct {
 	Ready        bool
 
 	searchCancel context.CancelFunc
+	statusCh     <-chan player.Status
 	appCtx       context.Context
 	appCancel    context.CancelFunc
 }

@@ -12,8 +12,8 @@ import (
 )
 
 const (
-	searchTimeout = 15 * time.Second
-	feedTimeout   = 15 * time.Second
+	searchTimeout = 45 * time.Second
+	feedTimeout   = 30 * time.Second
 	toastTTL      = 4 * time.Second
 	uiTickRate    = 250 * time.Millisecond // 4 Hz cap
 )
@@ -59,10 +59,22 @@ type ToastExpiredMsg struct {
 // TickMsg drives bounded UI progress interpolation (4 Hz) when playing.
 type TickMsg time.Time
 
+// ActionResultMsg surfaces async player or action errors/confirmations as a toast.
+type ActionResultMsg struct {
+	Info string
+	Err  error
+}
+
+// DownloadDoneMsg arrives when a video download completes or fails.
+type DownloadDoneMsg struct {
+	Video model.Video
+	Err   error
+}
+
 // Init starts initial feed/store loading and subscribes to player status push updates.
 func (s *State) Init() tea.Cmd {
 	return tea.Batch(
-		s.loadFeedCmd(s.ActiveTab),
+		s.loadFeedCmd(s.ActiveTab, false),
 		s.loadStoreCmd(),
 		s.waitPlayerStatusCmd(),
 	)
@@ -122,10 +134,32 @@ func (s *State) Update(msg tea.Msg) (*State, tea.Cmd) {
 		}
 		if msg.Saved {
 			s.SavedIDs[msg.Video.ID] = true
+			s.SetSelection(s.SelectedIdx)
 			return s, s.toastCmd("★ Guardado: " + msg.Video.Title)
 		}
 		delete(s.SavedIDs, msg.Video.ID)
+		s.SetSelection(s.SelectedIdx)
 		return s, s.toastCmd("Quitado de guardados")
+
+	case ActionResultMsg:
+		if msg.Err != nil {
+			return s, s.toastCmd(fmt.Sprintf("Error: %v", msg.Err))
+		}
+		if msg.Info != "" {
+			return s, s.toastCmd(msg.Info)
+		}
+		return s, nil
+
+	case DownloadDoneMsg:
+		if msg.Err != nil {
+			return s, s.toastCmd(fmt.Sprintf("Error descargando: %v", msg.Err))
+		}
+		delete(s.Feeds, model.TabDownloads)
+		var reload tea.Cmd
+		if s.ActiveTab == model.TabDownloads {
+			reload = s.loadFeedCmd(model.TabDownloads, true)
+		}
+		return s, tea.Batch(s.toastCmd("✓ Descargado: "+msg.Video.Title), reload)
 
 	case PlayerStatusMsg:
 		wasPlaying := s.PlayerStatus.IsRunning && !s.PlayerStatus.Paused
@@ -162,7 +196,7 @@ func (s *State) Update(msg tea.Msg) (*State, tea.Cmd) {
 // GridCols returns the current number of grid columns for the terminal width.
 func (s *State) GridCols() int {
 	mainW := s.Width
-	if s.Width >= 140 && s.View == ViewHome {
+	if s.Width >= 140 {
 		mainW -= 23
 	} else if s.Width >= 100 {
 		mainW -= 9
@@ -225,13 +259,29 @@ func (s *State) handleKey(msg tea.KeyMsg) (*State, tea.Cmd) {
 		s.Focus = FocusSearch
 		s.SearchDraft = s.SearchQuery
 		return s, nil
+	case "tab":
+		if s.Width >= miniGuideMinW {
+			if s.Focus == FocusSidebar {
+				s.Focus = FocusMain
+			} else {
+				s.Focus = FocusSidebar
+			}
+		}
+		return s, nil
 	case "esc":
+		if s.Focus == FocusSidebar {
+			s.Focus = FocusMain
+			return s, nil
+		}
 		if s.View == ViewSearch {
 			s.View = ViewHome
 			s.Focus = FocusMain
 		}
 		return s, nil
 	case "j", "down":
+		if s.Focus == FocusSidebar {
+			return s.cycleSidebarTab(1)
+		}
 		step := 1
 		if s.View == ViewHome {
 			step = s.GridCols()
@@ -239,6 +289,9 @@ func (s *State) handleKey(msg tea.KeyMsg) (*State, tea.Cmd) {
 		s.SetSelection(s.activeIdx() + step)
 		return s, nil
 	case "k", "up":
+		if s.Focus == FocusSidebar {
+			return s.cycleSidebarTab(-1)
+		}
 		step := 1
 		if s.View == ViewHome {
 			step = s.GridCols()
@@ -246,9 +299,17 @@ func (s *State) handleKey(msg tea.KeyMsg) (*State, tea.Cmd) {
 		s.SetSelection(s.activeIdx() - step)
 		return s, nil
 	case "l", "right":
+		if s.Focus == FocusSidebar {
+			s.Focus = FocusMain
+			return s, nil
+		}
 		s.SetSelection(s.activeIdx() + 1)
 		return s, nil
 	case "h", "left":
+		if s.Focus == FocusMain && s.Width >= miniGuideMinW && s.activeIdx() == 0 {
+			s.Focus = FocusSidebar
+			return s, nil
+		}
 		s.SetSelection(s.activeIdx() - 1)
 		return s, nil
 	case "1":
@@ -258,14 +319,18 @@ func (s *State) handleKey(msg tea.KeyMsg) (*State, tea.Cmd) {
 	case "3":
 		return s.SwitchTab(model.TabSubscriptions)
 	case "4":
-		return s.SwitchTab(model.TabDownloads)
-	case "5":
 		return s.SwitchTab(model.TabHistory)
+	case "5":
+		return s.SwitchTab(model.TabDownloads)
 	case "[":
 		return s.CycleChip(-1), nil
 	case "]":
 		return s.CycleChip(1), nil
 	case "enter":
+		if s.Focus == FocusSidebar {
+			s.Focus = FocusMain
+			return s, nil
+		}
 		return s.PlaySelected("auto")
 	case "a":
 		return s.PlaySelected("audio")
@@ -275,15 +340,25 @@ func (s *State) handleKey(msg tea.KeyMsg) (*State, tea.Cmd) {
 		return s.ToggleSaveSelected()
 	case "q":
 		return s.EnqueueSelected()
+	case "d":
+		return s.DownloadSelected(false)
 	case " ":
 		return s, s.engineCmd(func(ctx context.Context) error { return s.Deps.Engine.TogglePause(ctx) }, "")
 	case "n":
 		return s, s.engineCmd(func(ctx context.Context) error { return s.Deps.Engine.Next(ctx) }, "⏭ Siguiente")
 	case "p":
 		return s, s.engineCmd(func(ctx context.Context) error { return s.Deps.Engine.Prev(ctx) }, "⏮ Anterior")
+	case "+", "=":
+		return s, s.engineCmd(func(ctx context.Context) error { return s.Deps.Engine.AddVolume(ctx, 5) }, "🔊 Volumen +5%")
+	case "-":
+		return s, s.engineCmd(func(ctx context.Context) error { return s.Deps.Engine.AddVolume(ctx, -5) }, "🔉 Volumen -5%")
+	case ".", ">":
+		return s, s.engineCmd(func(ctx context.Context) error { return s.Deps.Engine.Seek(ctx, 10) }, "⏩ +10s")
+	case ",", "<":
+		return s, s.engineCmd(func(ctx context.Context) error { return s.Deps.Engine.Seek(ctx, -10) }, "⏪ -10s")
 	case "r":
 		s.Syncing = true
-		return s, s.loadFeedCmd(s.ActiveTab)
+		return s, s.loadFeedCmd(s.ActiveTab, true)
 	}
 
 	return s, nil
@@ -307,7 +382,20 @@ func (s *State) SwitchTab(tab model.Tab) (*State, tea.Cmd) {
 		return s, nil
 	}
 	s.Syncing = true
-	return s, s.loadFeedCmd(tab)
+	return s, s.loadFeedCmd(tab, false)
+}
+
+func (s *State) cycleSidebarTab(delta int) (*State, tea.Cmd) {
+	tabs := []model.Tab{model.TabHome, model.TabMusic, model.TabSubscriptions, model.TabHistory, model.TabDownloads}
+	cur := 0
+	for i, t := range tabs {
+		if t == s.ActiveTab {
+			cur = i
+			break
+		}
+	}
+	next := (cur + delta + len(tabs)) % len(tabs)
+	return s.SwitchTab(tabs[next])
 }
 
 // CycleChip steps through the active view's filter chips.
@@ -357,10 +445,20 @@ func (s *State) PlaySelected(mode string) (*State, tea.Cmd) {
 		return s, nil
 	}
 	s.HistoryIDs[v.ID] = true
+	if hist, ok := s.Feeds[model.TabHistory]; ok {
+		updated := make([]model.Video, 0, len(hist)+1)
+		updated = append(updated, v)
+		for _, item := range hist {
+			if item.ID != v.ID {
+				updated = append(updated, item)
+			}
+		}
+		s.Feeds[model.TabHistory] = updated
+	}
 	toastCmd := s.toastCmd("▶ Abriendo en mpv: " + v.Title)
 	playCmd := func() tea.Msg {
 		if err := s.Deps.Engine.Play(s.appCtx, v, mode); err != nil {
-			return ToastExpiredMsg{} // noop placeholder; surfaced via status if needed
+			return ActionResultMsg{Err: err}
 		}
 		if s.Deps.Store != nil {
 			_ = s.Deps.Store.RecordHistory(s.appCtx, v)
@@ -379,10 +477,29 @@ func (s *State) EnqueueSelected() (*State, tea.Cmd) {
 	s.Queue = append(s.Queue, v)
 	toastCmd := s.toastCmd(fmt.Sprintf("En cola (%d): %s", len(s.Queue), v.Title))
 	enqCmd := func() tea.Msg {
-		_ = s.Deps.Engine.Enqueue(s.appCtx, v)
+		if err := s.Deps.Engine.Enqueue(s.appCtx, v); err != nil {
+			return ActionResultMsg{Err: err}
+		}
 		return nil
 	}
 	return s, tea.Batch(toastCmd, enqCmd)
+}
+
+// DownloadSelected queues a background download for the highlighted video.
+func (s *State) DownloadSelected(audioOnly bool) (*State, tea.Cmd) {
+	v, ok := s.SelectedVideo()
+	if !ok {
+		return s, nil
+	}
+	if s.Deps.Downloader == nil {
+		return s, s.toastCmd("Descargas no configuradas")
+	}
+	toastCmd := s.toastCmd("⬇ Descargando: " + v.Title)
+	dlCmd := func() tea.Msg {
+		err := s.Deps.Downloader.Enqueue(s.appCtx, v, audioOnly)
+		return DownloadDoneMsg{Video: v, Err: err}
+	}
+	return s, tea.Batch(toastCmd, dlCmd)
 }
 
 // ToggleSaveSelected persists watch-later state via Store.
@@ -397,13 +514,23 @@ func (s *State) ToggleSaveSelected() (*State, tea.Cmd) {
 	}
 }
 
-func (s *State) loadFeedCmd(tab model.Tab) tea.Cmd {
+type feedRefresher interface {
+	RefreshFeed(ctx context.Context, tab model.Tab) ([]model.Video, error)
+}
+
+func (s *State) loadFeedCmd(tab model.Tab, forceRefresh bool) tea.Cmd {
 	if s.Deps.Catalog == nil {
 		return nil
 	}
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(s.appCtx, feedTimeout)
 		defer cancel()
+		if forceRefresh {
+			if r, ok := s.Deps.Catalog.(feedRefresher); ok {
+				videos, err := r.RefreshFeed(ctx, tab)
+				return FeedLoadedMsg{Tab: tab, Videos: videos, Err: err}
+			}
+		}
 		videos, err := s.Deps.Catalog.Feed(ctx, tab)
 		return FeedLoadedMsg{Tab: tab, Videos: videos, Err: err}
 	}
@@ -425,7 +552,10 @@ func (s *State) waitPlayerStatusCmd() tea.Cmd {
 	if s.Deps.Engine == nil {
 		return nil
 	}
-	ch := s.Deps.Engine.Subscribe(s.appCtx)
+	if s.statusCh == nil {
+		s.statusCh = s.Deps.Engine.Subscribe(s.appCtx)
+	}
+	ch := s.statusCh
 	return func() tea.Msg {
 		st, ok := <-ch
 		if !ok {
@@ -444,7 +574,9 @@ func (s *State) engineCmd(fn func(context.Context) error, toast string) tea.Cmd 
 		tCmd = s.toastCmd(toast)
 	}
 	execCmd := func() tea.Msg {
-		_ = fn(s.appCtx)
+		if err := fn(s.appCtx); err != nil {
+			return ActionResultMsg{Err: err}
+		}
 		return nil
 	}
 	return tea.Batch(tCmd, execCmd)

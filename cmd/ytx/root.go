@@ -100,11 +100,13 @@ func runTUI(paths platform.Paths) error {
 	st := store.NewTSVStore(paths.StateDir)
 	eng := player.NewIPCClient()
 	defer eng.Close()
+	dl := download.NewManager(paths.StateDir, "", "")
 
 	state := app.NewState(app.Dependencies{
-		Catalog: cat,
-		Engine:  eng,
-		Store:   st,
+		Catalog:    cat,
+		Engine:     eng,
+		Store:      st,
+		Downloader: dl,
 	})
 
 	p := tea.NewProgram(

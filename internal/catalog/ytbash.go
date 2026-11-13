@@ -60,6 +60,22 @@ func (c *BashCatalog) Feed(ctx context.Context, tab model.Tab) ([]model.Video, e
 	return c.runList(ctx, viewArg)
 }
 
+// RefreshFeed bypasses cached TSV files and fetches fresh results from yt.
+func (c *BashCatalog) RefreshFeed(ctx context.Context, tab model.Tab) ([]model.Video, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	_, stateDir := c.resolveDirs()
+	if tab == model.TabDownloads {
+		return loadDownloads(stateDir), nil
+	}
+	viewArg, ok := tabViewArg(tab)
+	if !ok {
+		return nil, nil
+	}
+	return c.runList(ctx, viewArg)
+}
+
 // Search queries YouTube via `yt __list search <query>` using exec.CommandContext.
 func (c *BashCatalog) Search(ctx context.Context, query string) ([]model.Video, error) {
 	if err := ctx.Err(); err != nil {

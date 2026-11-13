@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -226,9 +227,10 @@ func TestMouseInteractions(t *testing.T) {
 		defer s.Close()
 		s.Width, s.Height = 120, 36
 		s, _ = s.Update(FeedLoadedMsg{Tab: model.TabHome, Videos: cat.Feeds[model.TabHome]})
-		// mainX = 9; col 1 starts at 9 + 32 = 41, row 0 starts at y = 3
+		// mainX = 9; col 1 starts after col 0 width + gap
+		col1X := 9 + s.gridCardWidth() + 4
 		s, _ = s.Update(tea.MouseMsg{
-			X:      45,
+			X:      col1X,
 			Y:      5,
 			Button: tea.MouseButtonLeft,
 			Action: tea.MouseActionPress,
@@ -242,7 +244,7 @@ func TestMouseInteractions(t *testing.T) {
 
 		var cmd tea.Cmd
 		s, cmd = s.Update(tea.MouseMsg{
-			X:      45,
+			X:      col1X,
 			Y:      5,
 			Button: tea.MouseButtonLeft,
 			Action: tea.MouseActionPress,
@@ -323,6 +325,46 @@ func TestMouseInteractions(t *testing.T) {
 		s, _ = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("floyd")})
 		if s.SearchDraft != "pink floyd" {
 			t.Fatalf("expected SearchDraft %q, got %q", "pink floyd", s.SearchDraft)
+		}
+	})
+
+	t.Run("keys 4 and 5 match sidebar order History and Downloads", func(t *testing.T) {
+		s, _, _, _ := newTestState()
+		defer s.Close()
+		s, _ = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'4'}})
+		if s.ActiveTab != model.TabHistory {
+			t.Fatalf("key 4 ActiveTab = %v, want TabHistory", s.ActiveTab)
+		}
+		s, _ = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'5'}})
+		if s.ActiveTab != model.TabDownloads {
+			t.Fatalf("key 5 ActiveTab = %v, want TabDownloads", s.ActiveTab)
+		}
+	})
+
+	t.Run("Tab focuses sidebar and j/enter navigates tabs", func(t *testing.T) {
+		s, _, _, _ := newTestState()
+		defer s.Close()
+		s.Width, s.Height = 140, 36
+		s, _ = s.Update(tea.KeyMsg{Type: tea.KeyTab})
+		if s.Focus != FocusSidebar {
+			t.Fatalf("expected FocusSidebar, got %v", s.Focus)
+		}
+		s, _ = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+		if s.ActiveTab != model.TabMusic {
+			t.Fatalf("expected TabMusic after j in sidebar, got %v", s.ActiveTab)
+		}
+		s, _ = s.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		if s.Focus != FocusMain {
+			t.Fatalf("expected FocusMain after enter in sidebar, got %v", s.Focus)
+		}
+	})
+
+	t.Run("ActionResultMsg surfaces engine errors in toast", func(t *testing.T) {
+		s, _, _, _ := newTestState()
+		defer s.Close()
+		s, _ = s.Update(ActionResultMsg{Err: context.DeadlineExceeded})
+		if s.Toast == "" {
+			t.Fatal("expected error toast")
 		}
 	})
 }

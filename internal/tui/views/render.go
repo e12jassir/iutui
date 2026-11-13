@@ -100,7 +100,7 @@ func renderHeader(s *app.State, th theme.Theme, width int) string {
 
 	var navStr string
 	if width < miniGuideMinW {
-		tabs := []model.Tab{model.TabHome, model.TabMusic, model.TabSubscriptions, model.TabDownloads, model.TabHistory}
+		tabs := []model.Tab{model.TabHome, model.TabMusic, model.TabSubscriptions, model.TabHistory, model.TabDownloads}
 		parts := make([]string, 0, len(tabs))
 		for _, t := range tabs {
 			label := shortTabLabel(t)
@@ -290,7 +290,10 @@ func renderHomeGrid(s *app.State, th theme.Theme, tr thumbs.Renderer, width, hei
 	}
 
 	cols := max(1, (width+cardGap)/(cardWidth+cardGap))
-	actualCardW := min(cardWidth, width)
+	actualCardW := (width - (cols-1)*cardGap) / cols
+	if actualCardW < cardWidth {
+		actualCardW = min(cardWidth, width)
+	}
 
 	totalRows := (len(items) + cols - 1) / cols
 	selRow := 0
@@ -467,7 +470,6 @@ func renderSearchList(s *app.State, th theme.Theme, tr thumbs.Renderer, width, h
 }
 
 func renderSearchRow(v model.Video, selected, saved, playing bool, th theme.Theme, tr thumbs.Renderer, rowW int) string {
-	rowW = min(rowW, 108)
 	innerW := max(10, rowW-4)
 	tw := min(searchThumbW, max(12, innerW/3))
 	thumbStr := tr.Render(v.ID, tw, searchThumbH)
@@ -589,7 +591,7 @@ func renderStatusBar(s *app.State, th theme.Theme, width int) string {
 	rightStyled := th.StatusBadge.Render(truncatePlain(rightText, max(10, width/3)))
 
 	availHintW := max(0, width-lipgloss.Width(badge)-lipgloss.Width(rightStyled)-2)
-	hints := truncatePlain(" j/k nav · Enter play · a audio · w ★ · q cola · / buscar · ? ayuda", availHintW)
+	hints := truncatePlain(" j/k nav · Enter play · a audio · d desc · w ★ · q cola · / buscar · ? ayuda", availHintW)
 	hintStyled := lipgloss.NewStyle().Foreground(theme.Dim).Render(hints)
 
 	spacerW := max(0, width-lipgloss.Width(badge)-lipgloss.Width(hintStyled)-lipgloss.Width(rightStyled))
@@ -605,12 +607,11 @@ func renderHelpOverlay(_ string, width, height int, th theme.Theme) string {
 		"  j / k / ↑ / ↓   Mover selección",
 		"  Enter / a / v   Reproducir (auto / audio / video)",
 		"  Space / n / p   Pausar · Siguiente · Anterior",
-		"  w / q           Guardar (★) · Agregar a cola",
-		"  [ / ]           Cambiar filtro (chip)",
-		"  /               Buscar en YouTube",
-		"  r               Recargar feed actual",
-		"  Esc             Volver / Cerrar modal",
-		"  ? / Q           Ayuda / Salir",
+		"  , / . · - / +   Retroceder/Avanzar 10s · Volumen ±5%",
+		"  w / q / d       Guardar (★) · Cola · Descargar",
+		"  [ / ] · Tab     Cambiar chip · Foco sidebar",
+		"  1..5 / / / r    Pestañas · Buscar · Recargar",
+		"  Esc · ? / Q     Volver/Cerrar · Ayuda · Salir",
 	}
 	boxW := min(62, max(30, width-8))
 	trimmed := make([]string, 0, len(rows))

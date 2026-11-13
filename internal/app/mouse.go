@@ -60,7 +60,7 @@ func (s *State) handleLeftClick(x, y int) (*State, tea.Cmd) {
 		if x >= s.Width-12 && x < s.Width-7 {
 			s.Focus = FocusMain
 			s.Syncing = true
-			return s, s.loadFeedCmd(s.ActiveTab)
+			return s, s.loadFeedCmd(s.ActiveTab, true)
 		}
 		if x >= s.Width-7 && x < s.Width-3 {
 			s.ShowHelp = !s.ShowHelp
@@ -112,6 +112,12 @@ func (s *State) handleLeftClick(x, y int) (*State, tea.Cmd) {
 				return s.SwitchTab(model.TabHistory)
 			case 9:
 				return s.SwitchTab(model.TabDownloads)
+			}
+			// Clicking a subscribed channel searches that channel
+			subIdx := y - 12
+			if subIdx >= 0 && subIdx < len(s.Subscriptions) {
+				s.SearchDraft = s.Subscriptions[subIdx]
+				return s.SubmitSearch()
 			}
 			return s, nil
 		}
@@ -185,7 +191,8 @@ func (s *State) handleLeftClick(x, y int) (*State, tea.Cmd) {
 
 	// Home grid
 	cols := s.GridCols()
-	col := (x - mainX) / (cardW + cardGap)
+	stepW := s.gridCardWidth() + cardGap
+	col := (x - mainX) / stepW
 	if col < 0 || col >= cols {
 		return s, nil
 	}
@@ -225,6 +232,22 @@ func (s *State) mainOriginX() int {
 		return miniGuideW + 1
 	}
 	return 0
+}
+
+func (s *State) gridCardWidth() int {
+	mainW := s.Width - s.mainOriginX()
+	cols := s.GridCols()
+	if mainW <= 0 || cols <= 0 {
+		return cardW
+	}
+	w := (mainW - (cols-1)*cardGap) / cols
+	if w < cardW {
+		if mainW < cardW {
+			return mainW
+		}
+		return cardW
+	}
+	return w
 }
 
 func (s *State) headerSearchBounds() (btnStart, btnEnd, barStart int) {
