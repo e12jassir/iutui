@@ -104,6 +104,11 @@ func (e *YTDLPError) Unwrap() error {
 	return e.Err
 }
 
+type searchCacheEntry struct {
+	videos    []model.Video
+	fetchedAt time.Time
+}
+
 // YTDLPCatalog implements Catalog by invoking yt-dlp with exec.CommandContext
 // and maintaining a stale-while-revalidate file cache in CacheDir.
 type YTDLPCatalog struct {
@@ -111,6 +116,9 @@ type YTDLPCatalog struct {
 	CacheDir string
 	CacheTTL time.Duration
 	Quality  int
+
+	searchMu    sync.RWMutex
+	searchCache map[string]searchCacheEntry
 
 	wg sync.WaitGroup
 }
@@ -178,7 +186,7 @@ func (c *YTDLPCatalog) Feed(ctx context.Context, tab model.Tab) ([]model.Video, 
 	return videos, nil
 }
 
-// Search queries YouTube via yt-dlp's ytsearch20 extractor.
+// Search queries YouTube via yt-dlp's ytsearch20 extractor with an in-memory TTL cache.
 func (c *YTDLPCatalog) Search(ctx context.Context, query string) ([]model.Video, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -187,7 +195,36 @@ func (c *YTDLPCatalog) Search(ctx context.Context, query string) ([]model.Video,
 	if query == "" {
 		return nil, nil
 	}
-	return c.fetchTarget(ctx, "ytsearch20:"+query)
+
+	ttl := c.CacheTTL
+	if ttl <= 0 {
+		ttl = 5 * time.Minute
+	}
+
+	c.searchMu.RLock()
+	if entry, ok := c.searchCache[query]; ok && time.Since(entry.fetchedAt) <= ttl {
+		videos := make([]model.Video, len(entry.videos))
+		copy(videos, entry.videos)
+		c.searchMu.RUnlock()
+		return videos, nil
+	}
+	c.searchMu.RUnlock()
+
+	videos, err := c.fetchTarget(ctx, "ytsearch20:"+query)
+	if err != nil {
+		return nil, err
+	}
+
+	c.searchMu.Lock()
+	if c.searchCache == nil {
+		c.searchCache = make(map[string]searchCacheEntry)
+	}
+	copied := make([]model.Video, len(videos))
+	copy(copied, videos)
+	c.searchCache[query] = searchCacheEntry{videos: copied, fetchedAt: time.Now()}
+	c.searchMu.Unlock()
+
+	return videos, nil
 }
 
 func (c *YTDLPCatalog) fetchTarget(ctx context.Context, target string) ([]model.Video, error) {

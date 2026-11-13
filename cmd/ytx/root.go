@@ -96,11 +96,22 @@ func newRootCmd() *cobra.Command {
 }
 
 func runTUI(paths platform.Paths) error {
-	cat := catalog.NewBashCatalog(paths.CacheDir, paths.StateDir, "")
+	cfg, _ := config.Load(filepath.Join(paths.ConfigDir, "config"))
+	dlDir := cfg.DownloadDir
+	if dlDir == "" {
+		if home, err := os.UserHomeDir(); err == nil {
+			dlDir = filepath.Join(home, "Videos", "yt")
+		}
+	}
+
+	bashCat := catalog.NewBashCatalog(paths.CacheDir, paths.StateDir, "")
+	ytdlpCat := catalog.NewYTDLPCatalog(paths.CacheDir, time.Duration(cfg.CacheTTL)*time.Second, cfg.YtdlpBin)
+	cat := catalog.NewHybridCatalog(bashCat, ytdlpCat)
+
 	st := store.NewTSVStore(paths.StateDir)
 	eng := player.NewIPCClient()
 	defer eng.Close()
-	dl := download.NewManager(paths.StateDir, "", "")
+	dl := download.NewManager(paths.StateDir, dlDir, cfg.YtdlpBin)
 
 	state := app.NewState(app.Dependencies{
 		Catalog:    cat,
