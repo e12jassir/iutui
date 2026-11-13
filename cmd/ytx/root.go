@@ -109,7 +109,16 @@ func runTUI(paths platform.Paths) error {
 	cat := catalog.NewHybridCatalog(bashCat, ytdlpCat)
 
 	st := store.NewTSVStore(paths.StateDir)
-	eng := player.NewIPCClient()
+	eng := player.NewIPCClient(
+		player.WithSocketPath(paths.SocketPath),
+		player.WithLaunchDefaults(player.LaunchOpts{
+			Mode:         cfg.DefaultMode,
+			SocketPath:   paths.SocketPath,
+			Quality:      cfg.Quality,
+			Volume:       cfg.AudioVolume,
+			FastPlayback: true,
+		}),
+	)
 	defer eng.Close()
 	dl := download.NewManager(paths.StateDir, dlDir, cfg.YtdlpBin)
 

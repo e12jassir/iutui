@@ -8,7 +8,9 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -72,6 +74,14 @@ func WithCommandTimeout(d time.Duration) IPCOption {
 	}
 }
 
+// WithLaunchDefaults configures native mpv launch options used when no IPC
+// socket is currently connected.
+func WithLaunchDefaults(opts LaunchOpts) IPCOption {
+	return func(c *IPCClient) {
+		c.launchDefaults = opts
+	}
+}
+
 type ipcResponse struct {
 	Data      any    `json:"data"`
 	RequestID *int64 `json:"request_id"`
@@ -93,6 +103,7 @@ type IPCClient struct {
 	initialBackoff time.Duration
 	maxBackoff     time.Duration
 	cmdTimeout     time.Duration
+	launchDefaults LaunchOpts
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -448,12 +459,33 @@ func (c *IPCClient) sendCommand(ctx context.Context, args ...any) (ipcResponse, 
 	}
 }
 
-// Play starts playback of v using the active socket or falls back to PlayVideo.
+// Play starts playback of v using the active socket or launches mpv directly.
 func (c *IPCClient) Play(ctx context.Context, v model.Video, mode string) error {
+	url := fmt.Sprintf("https://www.youtube.com/watch?v=%s", v.ID)
 	if c.isConnected() {
-		url := fmt.Sprintf("https://www.youtube.com/watch?v=%s", v.ID)
-		_, err := c.sendCommand(ctx, "loadfile", url, "replace")
-		return err
+		wantVid := "auto"
+		if mode == "audio" {
+			wantVid = "no"
+		}
+		_, _ = c.sendCommand(ctx, "set_property", "vid", wantVid)
+		if _, err := c.sendCommand(ctx, "loadfile", url, "replace"); err == nil {
+			if v.Title != "" {
+				_, _ = c.sendCommand(ctx, "set_property", "force-media-title", v.Title)
+			}
+			_, _ = c.sendCommand(ctx, "set_property", "pause", false)
+			return nil
+		}
+	}
+	if c.launchDefaults.SocketPath != "" {
+		_ = os.MkdirAll(filepath.Dir(c.launchDefaults.SocketPath), 0o700)
+		opts := c.launchDefaults
+		opts.VideoID = v.ID
+		opts.Title = v.Title
+		opts.URL = url
+		if mode != "" && mode != "auto" {
+			opts.Mode = mode
+		}
+		return LaunchMPV("mpv", opts)
 	}
 	return PlayVideo(v, mode)
 }

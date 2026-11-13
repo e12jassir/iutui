@@ -9,23 +9,37 @@ import (
 // LaunchOpts configures an mpv process launch.
 type LaunchOpts struct {
 	VideoID       string
+	Title         string
 	URL           string
 	Mode          string
 	SocketPath    string
 	Quality       int
 	Volume        int
 	CookieJarPath string
+	FastPlayback  bool
 }
 
 // BuildMPVArgs constructs the command-line argument slice for mpv from opts.
 func BuildMPVArgs(opts LaunchOpts) []string {
 	var args []string
+	if opts.FastPlayback {
+		args = append(args,
+			"--hwdec=auto-safe",
+			"--really-quiet",
+			"--cache=yes",
+			"--cache-pause=no",
+			"--demuxer-readahead-secs=3",
+		)
+	}
 
 	if opts.SocketPath != "" {
 		args = append(args, "--input-ipc-server="+opts.SocketPath)
 	}
 	if opts.Volume > 0 {
 		args = append(args, fmt.Sprintf("--volume=%d", opts.Volume))
+	}
+	if opts.Title != "" {
+		args = append(args, "--force-media-title="+opts.Title)
 	}
 
 	switch opts.Mode {
@@ -47,6 +61,8 @@ func BuildMPVArgs(opts LaunchOpts) []string {
 
 	if opts.CookieJarPath != "" {
 		args = append(args, "--ytdl-raw-options=cookies="+opts.CookieJarPath)
+	} else if opts.FastPlayback {
+		args = append(args, "--ytdl-raw-options=no-playlist=,extractor-args=youtube:player_client=android")
 	}
 
 	if opts.URL != "" {
