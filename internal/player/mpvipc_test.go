@@ -6,12 +6,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -1750,5 +1754,653 @@ esac
 	mu.Unlock()
 	if len(gotLoads) != 1 || gotLoads[0] != "https://cdn.example.com/coalesced-2200.mp4" {
 		t.Fatalf("expected WaitOrGet 2200ms coalescing to load direct CDN URL, got loads=%v", gotLoads)
+	}
+}
+
+func TestIPCClient_SponsorBlockAutoSkipAndCooldown(t *testing.T) {
+	t.Run("fetches segments for 11-char video, auto-skips when playing, respects pause, toggle, and 5s cooldown", func(t *testing.T) {
+		var sbRequested []string
+		var sbMu sync.Mutex
+		sbSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			vid := r.URL.Query().Get("videoID")
+			sbMu.Lock()
+			sbRequested = append(sbRequested, vid)
+			sbMu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[
+				{"segment":[10.0,30.0],"category":"sponsor","UUID":"seg-uuid-1"},
+				{"segment":[50.0,70.0],"category":"selfpromo","UUID":"seg-uuid-2"}
+			]`))
+		}))
+		defer sbSrv.Close()
+
+		var (
+			cmdMu sync.Mutex
+			seeks []float64
+		)
+		srv := startTestMPVServer(t, func(conn net.Conn, cmd []any, reqID int64) {
+			if len(cmd) >= 3 && fmt.Sprint(cmd[0]) == "seek" && fmt.Sprint(cmd[2]) == "absolute" {
+				if pos, ok := toFloat64(cmd[1]); ok {
+					cmdMu.Lock()
+					seeks = append(seeks, pos)
+					cmdMu.Unlock()
+				}
+			}
+			_ = json.NewEncoder(conn).Encode(map[string]any{
+				"error":      "success",
+				"request_id": reqID,
+			})
+		})
+
+		sbClient := NewSponsorBlockClient()
+		sbClient.BaseURL = sbSrv.URL
+
+		var clockMu sync.Mutex
+		nowTime := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+
+		client := NewIPCClient(
+			WithSocketPath(srv.sockPath),
+			WithCommandTimeout(2*time.Second),
+			WithSponsorBlockClient(sbClient),
+			WithLaunchDefaults(LaunchOpts{
+				SocketPath: srv.sockPath,
+				Mode:       "window",
+			}),
+		)
+		defer client.Close()
+		client.sbMu.Lock()
+		client.nowFn = func() time.Time {
+			clockMu.Lock()
+			defer clockMu.Unlock()
+			return nowTime
+		}
+		client.sbMu.Unlock()
+
+		if !client.SponsorBlockEnabled() {
+			t.Fatal("expected NewIPCClient to enable SponsorBlock by default")
+		}
+
+		var serverConn net.Conn
+		select {
+		case serverConn = <-srv.accepts:
+		case <-time.After(time.Second):
+			t.Fatal("server did not accept client connection")
+		}
+
+		client.SetAutoplay(false)
+		if err := client.Play(context.Background(), model.Video{ID: "sbVideo1234", Title: "Sponsored"}, "window"); err != nil {
+			t.Fatalf("Play failed: %v", err)
+		}
+
+		// Wait for async SponsorBlock segment fetch to populate client state.
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			client.sbMu.Lock()
+			fetched := client.sbFetched
+			n := len(client.sbSegments)
+			client.sbMu.Unlock()
+			if fetched && n == 2 {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+
+		seekCount := func() int {
+			cmdMu.Lock()
+			defer cmdMu.Unlock()
+			return len(seeks)
+		}
+
+		// Outside segment -> no skip.
+		if err := srv.SendJSON(serverConn, map[string]any{"event": "property-change", "name": "time-pos", "data": 9.5}); err != nil {
+			t.Fatalf("send time-pos 9.5: %v", err)
+		}
+		// Inside [seg.End-0.5, seg.End) -> no skip (30.0 - 0.5 = 29.5).
+		if err := srv.SendJSON(serverConn, map[string]any{"event": "property-change", "name": "time-pos", "data": 29.6}); err != nil {
+			t.Fatalf("send time-pos 29.6: %v", err)
+		}
+		time.Sleep(40 * time.Millisecond)
+		if seekCount() != 0 {
+			t.Fatalf("expected 0 seeks outside skip window, got %v", seeks)
+		}
+
+		// Paused inside segment -> must NOT skip.
+		if err := srv.SendJSON(serverConn, map[string]any{"event": "property-change", "name": "pause", "data": true}); err != nil {
+			t.Fatalf("send pause true: %v", err)
+		}
+		if err := srv.SendJSON(serverConn, map[string]any{"event": "property-change", "name": "time-pos", "data": 12.0}); err != nil {
+			t.Fatalf("send time-pos 12.0 while paused: %v", err)
+		}
+		time.Sleep(40 * time.Millisecond)
+		if seekCount() != 0 {
+			t.Fatalf("expected 0 seeks while paused, got %v", seeks)
+		}
+
+		// Unpause and emit time-pos inside [10.0, 29.5) -> triggers skip to 30.0 without deadlocking readLoop.
+		if err := srv.SendJSON(serverConn, map[string]any{"event": "property-change", "name": "pause", "data": false}); err != nil {
+			t.Fatalf("send pause false: %v", err)
+		}
+		if err := srv.SendJSON(serverConn, map[string]any{"event": "property-change", "name": "time-pos", "data": 14.0}); err != nil {
+			t.Fatalf("send time-pos 14.0: %v", err)
+		}
+
+		deadline = time.Now().Add(2 * time.Second)
+		for seekCount() < 1 && time.Now().Before(deadline) {
+			time.Sleep(10 * time.Millisecond)
+		}
+		if seekCount() != 1 {
+			t.Fatalf("expected 1 SponsorBlock skip seek, got %d (%v)", seekCount(), seeks)
+		}
+		cmdMu.Lock()
+		if seeks[0] != 30.0 {
+			cmdMu.Unlock()
+			t.Fatalf("first seek = %v, want 30.0", seeks[0])
+		}
+		cmdMu.Unlock()
+
+		// Confirm readLoop is responsive immediately after skip (no mutex/IPC deadlock).
+		if err := client.TogglePause(context.Background()); err != nil {
+			t.Fatalf("TogglePause after SponsorBlock skip failed (possible readLoop deadlock): %v", err)
+		}
+
+		// Advance clock by 2s (<5s cooldown) and re-emit inside same segment -> must NOT re-skip.
+		clockMu.Lock()
+		nowTime = nowTime.Add(2 * time.Second)
+		clockMu.Unlock()
+		if err := srv.SendJSON(serverConn, map[string]any{"event": "property-change", "name": "time-pos", "data": 15.0}); err != nil {
+			t.Fatalf("send time-pos 15.0 during cooldown: %v", err)
+		}
+		time.Sleep(50 * time.Millisecond)
+		if seekCount() != 1 {
+			t.Fatalf("expected cooldown to suppress duplicate skip within 5s, got %v", seeks)
+		}
+
+		// Advance clock past 5s cooldown -> same segment CAN skip again.
+		clockMu.Lock()
+		nowTime = nowTime.Add(4 * time.Second)
+		clockMu.Unlock()
+		if err := srv.SendJSON(serverConn, map[string]any{"event": "property-change", "name": "time-pos", "data": 16.0}); err != nil {
+			t.Fatalf("send time-pos 16.0 after cooldown: %v", err)
+		}
+		deadline = time.Now().Add(2 * time.Second)
+		for seekCount() < 2 && time.Now().Before(deadline) {
+			time.Sleep(10 * time.Millisecond)
+		}
+		if seekCount() != 2 {
+			t.Fatalf("expected 2nd skip after 5s cooldown expired, got %v", seeks)
+		}
+
+		// Disabling SponsorBlock suppresses skipping on seg-uuid-2.
+		client.SetSponsorBlock(false)
+		if client.SponsorBlockEnabled() {
+			t.Fatal("expected SponsorBlockEnabled() == false")
+		}
+		if err := srv.SendJSON(serverConn, map[string]any{"event": "property-change", "name": "time-pos", "data": 55.0}); err != nil {
+			t.Fatalf("send time-pos 55.0 while disabled: %v", err)
+		}
+		time.Sleep(50 * time.Millisecond)
+		if seekCount() != 2 {
+			t.Fatalf("expected no skip when SponsorBlock disabled, got %v", seeks)
+		}
+
+		// Re-enabling SponsorBlock skips seg-uuid-2 when time-pos is observed.
+		client.SetSponsorBlock(true)
+		if err := srv.SendJSON(serverConn, map[string]any{"event": "property-change", "name": "time-pos", "data": 56.0}); err != nil {
+			t.Fatalf("send time-pos 56.0 after re-enable: %v", err)
+		}
+		deadline = time.Now().Add(2 * time.Second)
+		for seekCount() < 3 && time.Now().Before(deadline) {
+			time.Sleep(10 * time.Millisecond)
+		}
+		if seekCount() != 3 {
+			t.Fatalf("expected 3rd skip after re-enabling SponsorBlock, got %v", seeks)
+		}
+		cmdMu.Lock()
+		if seeks[2] != 70.0 {
+			cmdMu.Unlock()
+			t.Fatalf("third seek = %v, want 70.0", seeks[2])
+		}
+		cmdMu.Unlock()
+
+		sbMu.Lock()
+		reqs := slices.Clone(sbRequested)
+		sbMu.Unlock()
+		if !slices.Equal(reqs, []string{"sbVideo1234"}) {
+			t.Fatalf("SponsorBlock requested IDs = %v, want [sbVideo1234]", reqs)
+		}
+	})
+
+	t.Run("ignores playlist IDs RD/PL and clears prior segments", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		binDir := filepath.Join(tmpDir, "bin")
+		ytdlp := writeStubBin(t, binDir, "yt-dlp", `printf '{"id":"plItem00001"}\n'`)
+
+		var sbHits atomic.Int32
+		sbSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			sbHits.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[{"segment":[5.0,20.0],"category":"sponsor","UUID":"uuid-single"}]`))
+		}))
+		defer sbSrv.Close()
+
+		var seekHits atomic.Int32
+		srv := startTestMPVServer(t, func(conn net.Conn, cmd []any, reqID int64) {
+			if len(cmd) >= 1 && fmt.Sprint(cmd[0]) == "seek" {
+				seekHits.Add(1)
+			}
+			_ = json.NewEncoder(conn).Encode(map[string]any{
+				"error":      "success",
+				"request_id": reqID,
+			})
+		})
+
+		sbClient := NewSponsorBlockClient()
+		sbClient.BaseURL = sbSrv.URL
+
+		client := NewIPCClient(
+			WithSocketPath(srv.sockPath),
+			WithSponsorBlockClient(sbClient),
+			WithLaunchDefaults(LaunchOpts{
+				SocketPath: srv.sockPath,
+				Mode:       "window",
+				YtdlpBin:   ytdlp,
+			}),
+		)
+		defer client.Close()
+		client.SetAutoplay(false)
+
+		var serverConn net.Conn
+		select {
+		case serverConn = <-srv.accepts:
+		case <-time.After(time.Second):
+			t.Fatal("server did not accept connection")
+		}
+
+		// Play single 11-char video first -> fetches segments.
+		if err := client.Play(context.Background(), model.Video{ID: "singleVid11", Title: "Single"}, "window"); err != nil {
+			t.Fatalf("Play single failed: %v", err)
+		}
+		deadline := time.Now().Add(2 * time.Second)
+		for sbHits.Load() < 1 && time.Now().Before(deadline) {
+			time.Sleep(10 * time.Millisecond)
+		}
+		if sbHits.Load() != 1 {
+			t.Fatalf("expected 1 SponsorBlock fetch for single video, got %d", sbHits.Load())
+		}
+
+		// Play RD and PL playlists -> must NOT query SponsorBlock and must clear active state.
+		for _, plID := range []string{"RDdQw4w9WgXcQ", "PLplaylist123"} {
+			if err := client.Play(context.Background(), model.Video{ID: plID, Title: "Playlist"}, "window"); err != nil {
+				t.Fatalf("Play %s failed: %v", plID, err)
+			}
+		}
+		if err := srv.SendJSON(serverConn, map[string]any{"event": "property-change", "name": "time-pos", "data": 10.0}); err != nil {
+			t.Fatalf("send time-pos: %v", err)
+		}
+		time.Sleep(60 * time.Millisecond)
+
+		if sbHits.Load() != 1 {
+			t.Fatalf("expected playlists not to trigger SponsorBlock fetches, hits=%d", sbHits.Load())
+		}
+		if seekHits.Load() != 0 {
+			t.Fatalf("expected stale segments cleared on playlist Play, got %d seeks", seekHits.Load())
+		}
+	})
+}
+
+func TestIPCClient_ToggleVideoMode(t *testing.T) {
+	t.Run("disconnected toggles launchDefaults.AudioOnly and updates mpv launch args", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		binDir := filepath.Join(tmpDir, "bin")
+		argsLog := filepath.Join(tmpDir, "mpv-args.log")
+
+		writeStubBin(t, binDir, "mpv", fmt.Sprintf(`printf '%%s\n' "$@" > %q`, argsLog))
+		t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+		sockPath := filepath.Join(tmpDir, "run", "mpv.sock")
+		client := NewIPCClient(
+			WithSocketPath(sockPath),
+			WithBackoff(200*time.Millisecond, 500*time.Millisecond),
+			WithLaunchDefaults(LaunchOpts{
+				SocketPath: sockPath,
+				Mode:       "window",
+			}),
+		)
+		defer client.Close()
+
+		videoOn, err := client.ToggleVideoMode(context.Background())
+		if err != nil {
+			t.Fatalf("first ToggleVideoMode unexpected error: %v", err)
+		}
+		if videoOn {
+			t.Fatal("expected videoOn=false after toggling from window mode to audio-only")
+		}
+
+		// Launch mpv while AudioOnly=true and verify --no-video is emitted.
+		if err := client.Play(context.Background(), model.Video{ID: "toggleVid01", Title: "AudioLaunch"}, "auto"); err != nil {
+			t.Fatalf("Play in audio-only mode failed: %v", err)
+		}
+		deadline := time.Now().Add(2 * time.Second)
+		var rawArgs []byte
+		for time.Now().Before(deadline) {
+			if rawArgs, err = os.ReadFile(argsLog); err == nil && len(rawArgs) > 0 {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		if len(rawArgs) == 0 {
+			t.Fatalf("timed out waiting for mpv launch args: %v", err)
+		}
+		if !slices.Contains(strings.Split(strings.TrimSpace(string(rawArgs)), "\n"), "--no-video") {
+			t.Fatalf("expected --no-video in mpv launch args after ToggleVideoMode, got:\n%s", string(rawArgs))
+		}
+
+		// Toggle back to video ON.
+		videoOn, err = client.ToggleVideoMode(context.Background())
+		if err != nil {
+			t.Fatalf("second ToggleVideoMode unexpected error: %v", err)
+		}
+		if !videoOn {
+			t.Fatal("expected videoOn=true after toggling back")
+		}
+	})
+
+	t.Run("connected reads and toggles live vid property without stop or loadfile", func(t *testing.T) {
+		var (
+			mu          sync.Mutex
+			currentVid  = "auto"
+			cmds        [][]string
+			failNextSet bool
+		)
+		srv := startTestMPVServer(t, func(conn net.Conn, cmd []any, reqID int64) {
+			parts := make([]string, len(cmd))
+			for i, item := range cmd {
+				parts[i] = fmt.Sprint(item)
+			}
+			mu.Lock()
+			cmds = append(cmds, parts)
+			if len(cmd) >= 2 && parts[0] == "get_property" && parts[1] == "vid" {
+				val := currentVid
+				mu.Unlock()
+				_ = json.NewEncoder(conn).Encode(map[string]any{
+					"data":       val,
+					"error":      "success",
+					"request_id": reqID,
+				})
+				return
+			}
+			if len(cmd) >= 3 && parts[0] == "set_property" && parts[1] == "vid" {
+				if failNextSet {
+					failNextSet = false
+					mu.Unlock()
+					_ = json.NewEncoder(conn).Encode(map[string]any{
+						"error":      "property unavailable",
+						"request_id": reqID,
+					})
+					return
+				}
+				currentVid = parts[2]
+			}
+			mu.Unlock()
+			_ = json.NewEncoder(conn).Encode(map[string]any{
+				"error":      "success",
+				"request_id": reqID,
+			})
+		})
+
+		client := NewIPCClient(
+			WithSocketPath(srv.sockPath),
+			WithCommandTimeout(2*time.Second),
+			WithLaunchDefaults(LaunchOpts{
+				SocketPath: srv.sockPath,
+				Mode:       "window",
+			}),
+		)
+		defer client.Close()
+
+		// auto -> no (videoOn = false)
+		videoOn, err := client.ToggleVideoMode(context.Background())
+		if err != nil {
+			t.Fatalf("ToggleVideoMode auto->no error: %v", err)
+		}
+		if videoOn {
+			t.Fatal("expected videoOn=false when switching vid to no")
+		}
+		client.launchMu.RLock()
+		audioOnly := client.launchDefaults.AudioOnly
+		client.launchMu.RUnlock()
+		if !audioOnly {
+			t.Fatal("expected launchDefaults.AudioOnly=true after switching vid to no")
+		}
+
+		// no -> auto (videoOn = true)
+		videoOn, err = client.ToggleVideoMode(context.Background())
+		if err != nil {
+			t.Fatalf("ToggleVideoMode no->auto error: %v", err)
+		}
+		if !videoOn {
+			t.Fatal("expected videoOn=true when switching vid to auto")
+		}
+		client.launchMu.RLock()
+		audioOnly = client.launchDefaults.AudioOnly
+		client.launchMu.RUnlock()
+		if audioOnly {
+			t.Fatal("expected launchDefaults.AudioOnly=false after switching vid to auto")
+		}
+
+		// Failed set_property must return error and keep AudioOnly unchanged.
+		mu.Lock()
+		failNextSet = true
+		mu.Unlock()
+		if _, err := client.ToggleVideoMode(context.Background()); err == nil {
+			t.Fatal("expected ToggleVideoMode error when set_property vid fails")
+		}
+		client.launchMu.RLock()
+		audioOnly = client.launchDefaults.AudioOnly
+		client.launchMu.RUnlock()
+		if audioOnly {
+			t.Fatal("expected launchDefaults.AudioOnly unchanged after failed set_property")
+		}
+
+		// Verify no stop or loadfile commands were issued during live toggles.
+		mu.Lock()
+		gotCmds := slices.Clone(cmds)
+		mu.Unlock()
+		var setVidValues []string
+		for _, c := range gotCmds {
+			if len(c) > 0 && (c[0] == "stop" || c[0] == "loadfile") {
+				t.Fatalf("ToggleVideoMode must not restart playback, saw cmd=%v", c)
+			}
+			if len(c) == 3 && c[0] == "set_property" && c[1] == "vid" {
+				setVidValues = append(setVidValues, c[2])
+			}
+		}
+		wantSetVids := []string{"no", "auto", "no"}
+		if !slices.Equal(setVidValues, wantSetVids) {
+			t.Fatalf("set_property vid sequence = %v, want %v", setVidValues, wantSetVids)
+		}
+	})
+}
+
+func TestIPCClient_ChaptersAndSeekAbsolute(t *testing.T) {
+	t.Run("Chapters parses chapter-list, handles empty list, and propagates errors", func(t *testing.T) {
+		var (
+			mu       sync.Mutex
+			mode     = "populated"
+			lastCmds [][]any
+		)
+		srv := startTestMPVServer(t, func(conn net.Conn, cmd []any, reqID int64) {
+			cp := make([]any, len(cmd))
+			copy(cp, cmd)
+			mu.Lock()
+			lastCmds = append(lastCmds, cp)
+			curMode := mode
+			mu.Unlock()
+
+			if len(cmd) >= 2 && fmt.Sprint(cmd[0]) == "get_property" && fmt.Sprint(cmd[1]) == "chapter-list" {
+				switch curMode {
+				case "populated":
+					_ = json.NewEncoder(conn).Encode(map[string]any{
+						"data": []any{
+							map[string]any{"title": "Intro", "time": 0},
+							map[string]any{"title": "Chorus", "time": 63.75},
+							map[string]any{"time": 120.5},
+						},
+						"error":      "success",
+						"request_id": reqID,
+					})
+				case "empty":
+					_ = json.NewEncoder(conn).Encode(map[string]any{
+						"data":       []any{},
+						"error":      "success",
+						"request_id": reqID,
+					})
+				case "unavailable":
+					_ = json.NewEncoder(conn).Encode(map[string]any{
+						"error":      "property unavailable",
+						"request_id": reqID,
+					})
+				case "badtype":
+					_ = json.NewEncoder(conn).Encode(map[string]any{
+						"data":       "unexpected-string",
+						"error":      "success",
+						"request_id": reqID,
+					})
+				}
+				return
+			}
+			_ = json.NewEncoder(conn).Encode(map[string]any{
+				"error":      "success",
+				"request_id": reqID,
+			})
+		})
+
+		client := NewIPCClient(WithSocketPath(srv.sockPath), WithCommandTimeout(2*time.Second))
+		defer client.Close()
+
+		chapters, err := client.Chapters(context.Background())
+		if err != nil {
+			t.Fatalf("Chapters() unexpected error: %v", err)
+		}
+		want := []Chapter{
+			{Title: "Intro", Time: 0},
+			{Title: "Chorus", Time: 63.75},
+			{Title: "", Time: 120.5},
+		}
+		if !reflect.DeepEqual(chapters, want) {
+			t.Fatalf("Chapters() = %+v, want %+v", chapters, want)
+		}
+
+		mu.Lock()
+		mode = "empty"
+		mu.Unlock()
+		chapters, err = client.Chapters(context.Background())
+		if err != nil {
+			t.Fatalf("empty Chapters() unexpected error: %v", err)
+		}
+		if len(chapters) != 0 {
+			t.Fatalf("empty Chapters() = %+v, want empty slice", chapters)
+		}
+
+		mu.Lock()
+		mode = "unavailable"
+		mu.Unlock()
+		if _, err := client.Chapters(context.Background()); err == nil {
+			t.Fatal("expected error when chapter-list is unavailable")
+		}
+
+		mu.Lock()
+		mode = "badtype"
+		mu.Unlock()
+		if _, err := client.Chapters(context.Background()); err == nil {
+			t.Fatal("expected error for unexpected chapter-list payload type")
+		}
+
+		// Verify SeekAbsolute sends ["seek", seconds, "absolute"].
+		if err := client.SeekAbsolute(context.Background(), 42.5); err != nil {
+			t.Fatalf("SeekAbsolute(42.5) unexpected error: %v", err)
+		}
+		mu.Lock()
+		var seekCmd []any
+		for _, c := range lastCmds {
+			if len(c) > 0 && fmt.Sprint(c[0]) == "seek" {
+				seekCmd = c
+			}
+		}
+		mu.Unlock()
+		if len(seekCmd) != 3 || fmt.Sprint(seekCmd[0]) != "seek" || seekCmd[1] != 42.5 || fmt.Sprint(seekCmd[2]) != "absolute" {
+			t.Fatalf("SeekAbsolute sent command %#v, want [seek 42.5 absolute]", seekCmd)
+		}
+	})
+
+	t.Run("Chapters and SeekAbsolute fail when disconnected", func(t *testing.T) {
+		client := NewIPCClient(WithSocketPath(filepath.Join(t.TempDir(), "missing.sock")))
+		defer client.Close()
+
+		if _, err := client.Chapters(context.Background()); err == nil {
+			t.Fatal("expected error from Chapters when disconnected")
+		}
+		if err := client.SeekAbsolute(context.Background(), 15.0); err == nil {
+			t.Fatal("expected error from SeekAbsolute when disconnected")
+		}
+	})
+}
+
+func TestFakeEngine_SponsorBlockVideoModeChaptersAndSeekAbsolute(t *testing.T) {
+	fake := NewFakeEngine()
+	defer fake.Close()
+
+	ctx := context.Background()
+	if !fake.SponsorBlockEnabled() {
+		t.Fatal("expected FakeEngine SponsorBlock enabled by default")
+	}
+	fake.SetSponsorBlock(false)
+	if fake.SponsorBlockEnabled() {
+		t.Fatal("expected FakeEngine SponsorBlock disabled after SetSponsorBlock(false)")
+	}
+
+	videoOn, err := fake.ToggleVideoMode(ctx)
+	if err != nil || videoOn {
+		t.Fatalf("first ToggleVideoMode = (%v, %v), want (false, nil)", videoOn, err)
+	}
+	videoOn, err = fake.ToggleVideoMode(ctx)
+	if err != nil || !videoOn {
+		t.Fatalf("second ToggleVideoMode = (%v, %v), want (true, nil)", videoOn, err)
+	}
+
+	wantChapters := []Chapter{
+		{Title: "Start", Time: 0},
+		{Title: "Solo", Time: 95.5},
+	}
+	fake.SetChapters(wantChapters)
+	gotChapters, err := fake.Chapters(ctx)
+	if err != nil {
+		t.Fatalf("Chapters error: %v", err)
+	}
+	if !reflect.DeepEqual(gotChapters, wantChapters) {
+		t.Fatalf("Chapters = %+v, want %+v", gotChapters, wantChapters)
+	}
+	// Mutate returned slice and confirm internal slice is unchanged.
+	gotChapters[0].Title = "Tampered"
+	gotChapters2, _ := fake.Chapters(ctx)
+	if !reflect.DeepEqual(gotChapters2, wantChapters) {
+		t.Fatalf("FakeEngine Chapters returned aliased slice: %+v", gotChapters2)
+	}
+
+	if err := fake.SeekAbsolute(ctx, 88.25); err != nil {
+		t.Fatalf("SeekAbsolute error: %v", err)
+	}
+	if fake.Status().TimePos != 88.25 {
+		t.Fatalf("TimePos = %v, want 88.25", fake.Status().TimePos)
+	}
+
+	calls := fake.Calls()
+	var methods []string
+	for _, c := range calls {
+		methods = append(methods, c.Method)
+	}
+	wantMethods := []string{"SetSponsorBlock", "ToggleVideoMode", "ToggleVideoMode", "Chapters", "Chapters", "SeekAbsolute"}
+	if !slices.Equal(methods, wantMethods) {
+		t.Fatalf("FakeEngine recorded calls = %v, want %v", methods, wantMethods)
 	}
 }

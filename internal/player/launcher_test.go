@@ -69,6 +69,22 @@ func TestBuildMPVArgs_Modes(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("audioOnly flag overrides window mode", func(t *testing.T) {
+		got := BuildMPVArgs(LaunchOpts{
+			Mode:      "window",
+			AudioOnly: true,
+			URL:       baseURL,
+		})
+		for _, want := range []string{"--no-video", "--force-window=no"} {
+			if !slices.Contains(got, want) {
+				t.Errorf("BuildMPVArgs(AudioOnly=true) = %v, missing %q", got, want)
+			}
+		}
+		if slices.Contains(got, "--force-window=yes") {
+			t.Errorf("BuildMPVArgs(AudioOnly=true) = %v, should not contain --force-window=yes", got)
+		}
+	})
 }
 
 func TestBuildMPVArgs_Quality(t *testing.T) {

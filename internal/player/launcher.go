@@ -14,6 +14,7 @@ type LaunchOpts struct {
 	URL           string
 	AudioFile     string
 	Mode          string
+	AudioOnly     bool
 	SocketPath    string
 	Quality       int
 	Volume        int
@@ -55,15 +56,17 @@ func BuildMPVArgs(opts LaunchOpts) []string {
 		winFlag = "--force-window=immediate"
 	}
 
-	switch opts.Mode {
-	case "audio":
+	if opts.AudioOnly || opts.Mode == "audio" {
 		args = append(args, "--no-video", "--force-window=no")
-	case "pip":
-		args = append(args, winFlag, "--ontop", "--autofit=35%")
-	case "fs":
-		args = append(args, winFlag, "--fs")
-	default: // "window", "auto", or unspecified
-		args = append(args, winFlag)
+	} else {
+		switch opts.Mode {
+		case "pip":
+			args = append(args, winFlag, "--ontop", "--autofit=35%")
+		case "fs":
+			args = append(args, winFlag, "--fs")
+		default: // "window", "auto", or unspecified
+			args = append(args, winFlag)
+		}
 	}
 
 	if opts.Quality <= 0 {

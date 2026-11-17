@@ -81,12 +81,30 @@ func WithCommandTimeout(d time.Duration) IPCOption {
 // socket is currently connected.
 func WithLaunchDefaults(opts LaunchOpts) IPCOption {
 	return func(c *IPCClient) {
+		if opts.Mode == "audio" {
+			opts.AudioOnly = true
+		}
 		c.launchDefaults = opts
 		if opts.FastPlayback {
 			c.resolver = NewStreamResolver(opts.YtdlpBin, opts.Quality)
 			c.resolver.SetCookieJar(opts.CookieJarPath)
 		}
 	}
+}
+
+// WithSponsorBlockClient configures the SponsorBlockClient used to fetch skip segments.
+func WithSponsorBlockClient(sb *SponsorBlockClient) IPCOption {
+	return func(c *IPCClient) {
+		if sb != nil {
+			c.sbClient = sb
+		}
+	}
+}
+
+// Chapter represents a single playback chapter marker reported by mpv.
+type Chapter struct {
+	Title string  `json:"title"`
+	Time  float64 `json:"time"`
 }
 
 type ipcResponse struct {
@@ -136,6 +154,17 @@ type IPCClient struct {
 	fallbackMu          sync.RWMutex
 	autoplayFallbackIDs []string
 
+	sponsorBlock   atomic.Bool
+	sbClient       *SponsorBlockClient
+	sbMu           sync.Mutex
+	sbSeq          uint64
+	sbVideoID      string
+	sbSegments     []Segment
+	sbLastSkipped  map[string]time.Time
+	sbTimeObserved bool
+	sbFetched      bool
+	nowFn          func() time.Time
+
 	nextReqID atomic.Int64
 
 	pendingMu sync.Mutex
@@ -160,6 +189,8 @@ func NewIPCClient(opts ...IPCOption) *IPCClient {
 		initialBackoff: 100 * time.Millisecond,
 		maxBackoff:     5 * time.Second,
 		cmdTimeout:     2 * time.Second,
+		sbClient:       NewSponsorBlockClient(),
+		nowFn:          time.Now,
 		ctx:            ctx,
 		cancel:         cancel,
 		done:           make(chan struct{}),
@@ -168,6 +199,7 @@ func NewIPCClient(opts ...IPCOption) *IPCClient {
 		subs:           make(map[uint64]chan Status),
 	}
 	c.autoplay.Store(true)
+	c.sponsorBlock.Store(true)
 	for _, opt := range opts {
 		if opt != nil {
 			opt(c)
@@ -327,6 +359,9 @@ func (c *IPCClient) handleLine(line []byte) {
 		c.status.TimePos = 0
 		st := c.status
 		c.statusMu.Unlock()
+		if msg.Reason == "eof" {
+			c.clearSponsorBlockState(0)
+		}
 		c.broadcast(st)
 	}
 }
@@ -334,11 +369,13 @@ func (c *IPCClient) handleLine(line []byte) {
 func (c *IPCClient) applyPropertyChange(name string, data any) {
 	c.statusMu.Lock()
 	changed := false
+	timePosUpdated := false
 	switch name {
 	case "time-pos":
 		if f, ok := toFloat64(data); ok {
 			c.status.TimePos = f
 			changed = true
+			timePosUpdated = true
 		} else if data == nil && c.status.TimePos != 0 {
 			c.status.TimePos = 0
 			changed = true
@@ -381,6 +418,12 @@ func (c *IPCClient) applyPropertyChange(name string, data any) {
 	if changed {
 		c.broadcast(st)
 	}
+	if timePosUpdated {
+		c.markSponsorTimeObserved()
+		if !st.Paused && c.SponsorBlockEnabled() {
+			c.checkAndSkipSponsorSegment(st.TimePos)
+		}
+	}
 }
 
 func (c *IPCClient) handleDisconnect(conn net.Conn) {
@@ -392,6 +435,7 @@ func (c *IPCClient) handleDisconnect(conn net.Conn) {
 
 	_ = conn.Close()
 	c.failPending(ErrNotConnected)
+	c.clearSponsorBlockState(0)
 
 	c.statusMu.Lock()
 	c.status = Status{IsRunning: false}
@@ -550,6 +594,211 @@ func (c *IPCClient) SetAutoplayFallback(ids []string) {
 	c.fallbackMu.Unlock()
 }
 
+const sponsorBlockSkipCooldown = 5 * time.Second
+
+func (c *IPCClient) now() time.Time {
+	if c != nil && c.nowFn != nil {
+		return c.nowFn()
+	}
+	return time.Now()
+}
+
+// SetSponsorBlock enables or disables automatic SponsorBlock segment skipping.
+func (c *IPCClient) SetSponsorBlock(enabled bool) {
+	if c == nil {
+		return
+	}
+	c.sponsorBlock.Store(enabled)
+	if !enabled {
+		return
+	}
+
+	c.sbMu.Lock()
+	videoID := c.sbVideoID
+	seq := c.sbSeq
+	needsFetch := videoID != "" && !c.sbFetched && c.sbClient != nil && c.isCurrentPlay(seq)
+	c.sbMu.Unlock()
+	if needsFetch {
+		c.spawnSponsorBlockFetch(c.ctx, seq, videoID)
+	}
+}
+
+// SponsorBlockEnabled reports whether automatic SponsorBlock segment skipping is enabled.
+func (c *IPCClient) SponsorBlockEnabled() bool {
+	if c == nil {
+		return false
+	}
+	return c.sponsorBlock.Load()
+}
+
+func isSingleYouTubeVideoID(id string) bool {
+	id = strings.TrimSpace(id)
+	if len(id) != 11 || model.IsPlaylistID(id) {
+		return false
+	}
+	for i := 0; i < len(id); i++ {
+		ch := id[i]
+		isAlnum := (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9')
+		if !isAlnum && ch != '_' && ch != '-' {
+			return false
+		}
+	}
+	return true
+}
+
+func (c *IPCClient) clearSponsorBlockState(seq uint64) {
+	c.sbMu.Lock()
+	c.sbSeq = seq
+	c.sbVideoID = ""
+	c.sbSegments = nil
+	c.sbLastSkipped = nil
+	c.sbTimeObserved = false
+	c.sbFetched = false
+	c.sbMu.Unlock()
+}
+
+func (c *IPCClient) initSponsorBlockForPlay(ctx context.Context, seq uint64, rawVideoID string) {
+	vid := strings.TrimSpace(rawVideoID)
+	if !isSingleYouTubeVideoID(vid) {
+		c.clearSponsorBlockState(seq)
+		return
+	}
+
+	c.sbMu.Lock()
+	if !c.isCurrentPlay(seq) {
+		c.sbMu.Unlock()
+		return
+	}
+	c.sbSeq = seq
+	c.sbVideoID = vid
+	c.sbSegments = nil
+	c.sbLastSkipped = make(map[string]time.Time)
+	c.sbTimeObserved = false
+	c.sbFetched = false
+	c.sbMu.Unlock()
+
+	if c.SponsorBlockEnabled() && c.sbClient != nil {
+		c.spawnSponsorBlockFetch(ctx, seq, vid)
+	}
+}
+
+func (c *IPCClient) spawnSponsorBlockFetch(ctx context.Context, seq uint64, videoID string) {
+	if ctx == nil {
+		ctx = c.ctx
+	}
+	c.subMu.Lock()
+	canSpawn := !c.closed && c.ctx.Err() == nil && ctx.Err() == nil && c.isCurrentPlay(seq)
+	if canSpawn {
+		c.wg.Add(1)
+	}
+	c.subMu.Unlock()
+	if canSpawn {
+		go c.fetchSponsorBlockSegments(ctx, seq, videoID)
+	}
+}
+
+func (c *IPCClient) fetchSponsorBlockSegments(ctx context.Context, seq uint64, videoID string) {
+	defer c.wg.Done()
+
+	if !c.isCurrentPlay(seq) || ctx.Err() != nil || c.sbClient == nil {
+		return
+	}
+
+	segs, err := c.sbClient.FetchSegments(ctx, videoID)
+	if err != nil || !c.isCurrentPlay(seq) || ctx.Err() != nil {
+		return
+	}
+
+	c.sbMu.Lock()
+	observed := false
+	if c.isCurrentPlay(seq) && c.sbSeq == seq && c.sbVideoID == videoID {
+		c.sbSegments = segs
+		c.sbFetched = true
+		observed = c.sbTimeObserved
+	}
+	c.sbMu.Unlock()
+
+	if observed && c.SponsorBlockEnabled() {
+		st := c.Status()
+		if st.IsRunning && !st.Paused {
+			c.checkAndSkipSponsorSegment(st.TimePos)
+		}
+	}
+}
+
+func (c *IPCClient) markSponsorTimeObserved() {
+	c.sbMu.Lock()
+	if c.sbVideoID != "" {
+		c.sbTimeObserved = true
+	}
+	c.sbMu.Unlock()
+}
+
+func (c *IPCClient) checkAndSkipSponsorSegment(timePos float64) {
+	if !c.SponsorBlockEnabled() {
+		return
+	}
+
+	now := c.now()
+	var (
+		shouldSkip bool
+		targetEnd  float64
+		seq        uint64
+	)
+
+	c.sbMu.Lock()
+	if c.sbVideoID != "" && len(c.sbSegments) > 0 && c.isCurrentPlay(c.sbSeq) {
+		for _, seg := range c.sbSegments {
+			if timePos >= seg.Start && timePos < seg.End-0.5 {
+				key := seg.UUID
+				if key == "" {
+					key = fmt.Sprintf("%.3f-%.3f", seg.Start, seg.End)
+				}
+				if last, ok := c.sbLastSkipped[key]; ok && now.Sub(last) < sponsorBlockSkipCooldown {
+					continue
+				}
+				if c.sbLastSkipped == nil {
+					c.sbLastSkipped = make(map[string]time.Time)
+				}
+				c.sbLastSkipped[key] = now
+				targetEnd = seg.End
+				seq = c.sbSeq
+				shouldSkip = true
+				break
+			}
+		}
+	}
+	c.sbMu.Unlock()
+
+	if !shouldSkip {
+		return
+	}
+
+	c.spawnSponsorSeek(seq, targetEnd)
+}
+
+func (c *IPCClient) spawnSponsorSeek(seq uint64, seconds float64) {
+	c.subMu.Lock()
+	canSpawn := !c.closed && c.ctx.Err() == nil && c.isCurrentPlay(seq)
+	if canSpawn {
+		c.wg.Add(1)
+	}
+	c.subMu.Unlock()
+	if !canSpawn {
+		return
+	}
+
+	go func() {
+		defer c.wg.Done()
+		if !c.SponsorBlockEnabled() || !c.isCurrentPlay(seq) || c.ctx.Err() != nil {
+			return
+		}
+		seekCtx, cancel := context.WithTimeout(c.ctx, c.cmdTimeout)
+		defer cancel()
+		_ = c.SeekAbsolute(seekCtx, seconds)
+	}()
+}
+
 func (c *IPCClient) signalWake() {
 	if c.wakeCh == nil {
 		return
@@ -696,6 +945,8 @@ func (c *IPCClient) Play(ctx context.Context, v model.Video, mode string) error 
 		prevCancel()
 	}
 
+	c.clearSponsorBlockState(seq)
+
 	waitCtx, waitCancel := context.WithCancel(mixCtx)
 	defer waitCancel()
 	if ctx != nil && ctx != context.Background() && ctx != context.TODO() {
@@ -717,6 +968,7 @@ func (c *IPCClient) Play(ctx context.Context, v model.Video, mode string) error 
 		return err
 	}
 
+	c.initSponsorBlockForPlay(mixCtx, seq, v.ID)
 	c.scheduleMixAppend(mixCtx, seq, plan)
 	return nil
 }
@@ -753,9 +1005,16 @@ func (c *IPCClient) cutActivePlayback(waitCtx context.Context, seq uint64) (skip
 }
 
 func (c *IPCClient) resolvePlayTarget(waitCtx context.Context, v model.Video, mode string) resolvedPlayTarget {
+	c.launchMu.RLock()
+	audioOnly := c.launchDefaults.AudioOnly
+	c.launchMu.RUnlock()
+
 	effectiveMode := mode
 	if effectiveMode == "mix" {
 		effectiveMode = "auto"
+	}
+	if audioOnly && (effectiveMode == "" || effectiveMode == "auto") {
+		effectiveMode = "audio"
 	}
 	targetURL, allowPlaylist, seedID := model.BuildTargetURL(v.ID, mode == "mix")
 
@@ -878,6 +1137,16 @@ func (c *IPCClient) playOnSingleMPV(ctx, waitCtx context.Context, seq uint64, v 
 	if plan.effectiveMode != "" && plan.effectiveMode != "auto" {
 		opts.Mode = plan.effectiveMode
 	}
+	switch plan.effectiveMode {
+	case "video", "pip", "fs":
+		opts.AudioOnly = false
+	case "audio":
+		opts.AudioOnly = true
+	default:
+		if !opts.AudioOnly && opts.Mode == "audio" {
+			opts.Mode = "window"
+		}
+	}
 	proc, err := StartMPVProcess("mpv", opts)
 	if err != nil {
 		c.procMu.Unlock()
@@ -895,9 +1164,20 @@ func (c *IPCClient) tryPlayViaIPC(waitCtx context.Context, seq uint64, v model.V
 	if !c.isConnected() {
 		return false
 	}
+	c.launchMu.RLock()
+	audioOnly := c.launchDefaults.AudioOnly
+	c.launchMu.RUnlock()
+
 	wantVid := "auto"
-	if plan.effectiveMode == "audio" {
+	switch plan.effectiveMode {
+	case "audio":
 		wantVid = "no"
+	case "video", "pip", "fs":
+		wantVid = "auto"
+	default:
+		if audioOnly {
+			wantVid = "no"
+		}
 	}
 	_, _ = c.sendCommand(waitCtx, "set_property", "vid", wantVid)
 	_, _ = c.sendCommand(waitCtx, "set_property", "audio-files", []string{})
@@ -1173,6 +1453,108 @@ func (c *IPCClient) Prev(ctx context.Context) error {
 func (c *IPCClient) Seek(ctx context.Context, seconds int) error {
 	_, err := c.sendCommand(ctx, "seek", seconds)
 	return err
+}
+
+// SeekAbsolute seeks playback to an absolute timestamp in seconds in mpv.
+func (c *IPCClient) SeekAbsolute(ctx context.Context, seconds float64) error {
+	_, err := c.sendCommand(ctx, "seek", seconds, "absolute")
+	return err
+}
+
+// ToggleVideoMode toggles audio-only vs video mode in launch defaults and, when an
+// mpv IPC socket is active, toggles the live "vid" property ("no" <-> "auto").
+func (c *IPCClient) ToggleVideoMode(ctx context.Context) (bool, error) {
+	if c.ctx.Err() != nil {
+		return false, ErrClientClosed
+	}
+	if !c.isConnected() {
+		c.launchMu.Lock()
+		c.launchDefaults.AudioOnly = !c.launchDefaults.AudioOnly
+		if !c.launchDefaults.AudioOnly && c.launchDefaults.Mode == "audio" {
+			c.launchDefaults.Mode = "window"
+		}
+		videoOn := !c.launchDefaults.AudioOnly
+		c.launchMu.Unlock()
+		return videoOn, nil
+	}
+
+	resp, err := c.sendCommand(ctx, "get_property", "vid")
+	if err != nil {
+		c.launchMu.RLock()
+		videoOn := !c.launchDefaults.AudioOnly
+		c.launchMu.RUnlock()
+		return videoOn, err
+	}
+
+	var newAudioOnly bool
+	if resp.Data == nil {
+		c.launchMu.RLock()
+		newAudioOnly = !c.launchDefaults.AudioOnly
+		c.launchMu.RUnlock()
+	} else {
+		newAudioOnly = !isVideoDisabledValue(resp.Data)
+	}
+
+	wantVid := "auto"
+	if newAudioOnly {
+		wantVid = "no"
+	}
+	if _, err := c.sendCommand(ctx, "set_property", "vid", wantVid); err != nil {
+		c.launchMu.RLock()
+		videoOn := !c.launchDefaults.AudioOnly
+		c.launchMu.RUnlock()
+		return videoOn, err
+	}
+
+	c.launchMu.Lock()
+	c.launchDefaults.AudioOnly = newAudioOnly
+	if !newAudioOnly && c.launchDefaults.Mode == "audio" {
+		c.launchDefaults.Mode = "window"
+	}
+	c.launchMu.Unlock()
+	return !newAudioOnly, nil
+}
+
+func isVideoDisabledValue(v any) bool {
+	switch val := v.(type) {
+	case string:
+		return val == "no" || val == "false"
+	case bool:
+		return !val
+	default:
+		return false
+	}
+}
+
+// Chapters queries mpv's "chapter-list" property and parses chapter titles and timestamps.
+func (c *IPCClient) Chapters(ctx context.Context) ([]Chapter, error) {
+	resp, err := c.sendCommand(ctx, "get_property", "chapter-list")
+	if err != nil {
+		return nil, err
+	}
+	if resp.Data == nil {
+		return []Chapter{}, nil
+	}
+	rawList, ok := resp.Data.([]any)
+	if !ok {
+		return nil, fmt.Errorf("unexpected chapter-list payload type %T", resp.Data)
+	}
+	chapters := make([]Chapter, 0, len(rawList))
+	for _, item := range rawList {
+		m, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		var ch Chapter
+		if title, ok := m["title"].(string); ok {
+			ch.Title = title
+		}
+		if t, ok := toFloat64(m["time"]); ok {
+			ch.Time = t
+		}
+		chapters = append(chapters, ch)
+	}
+	return chapters, nil
 }
 
 // AddVolume adjusts playback volume by delta.

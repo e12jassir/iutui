@@ -14,25 +14,30 @@ type FakeCall struct {
 	Mode    string
 	Seconds int
 	Delta   float64
+	Enabled bool
 }
 
 // FakeEngine is a thread-safe mock implementation of Engine for tests.
 type FakeEngine struct {
-	mu        sync.Mutex
-	calls     []FakeCall
-	status    Status
-	err       error
-	subs      map[uint64]chan Status
-	nextSubID uint64
-	closed    bool
-	done      chan struct{}
+	mu           sync.Mutex
+	calls        []FakeCall
+	status       Status
+	err          error
+	subs         map[uint64]chan Status
+	nextSubID    uint64
+	closed       bool
+	done         chan struct{}
+	sponsorBlock bool
+	audioOnly    bool
+	chapters     []Chapter
 }
 
 // NewFakeEngine creates a new FakeEngine with default initial status.
 func NewFakeEngine() *FakeEngine {
 	return &FakeEngine{
-		subs: make(map[uint64]chan Status),
-		done: make(chan struct{}),
+		subs:         make(map[uint64]chan Status),
+		done:         make(chan struct{}),
+		sponsorBlock: true,
 	}
 }
 
@@ -48,6 +53,15 @@ func (f *FakeEngine) SetStatus(st Status) {
 	f.mu.Lock()
 	f.status = st
 	f.broadcastLocked(st)
+	f.mu.Unlock()
+}
+
+// SetChapters configures the chapter list returned by Chapters.
+func (f *FakeEngine) SetChapters(chapters []Chapter) {
+	f.mu.Lock()
+	copied := make([]Chapter, len(chapters))
+	copy(copied, chapters)
+	f.chapters = copied
 	f.mu.Unlock()
 }
 
@@ -146,6 +160,62 @@ func (f *FakeEngine) Seek(_ context.Context, seconds int) error {
 	}
 	f.broadcastLocked(f.status)
 	return nil
+}
+
+// SeekAbsolute records the SeekAbsolute call, sets TimePos, and notifies subscribers.
+func (f *FakeEngine) SeekAbsolute(_ context.Context, seconds float64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, FakeCall{Method: "SeekAbsolute", Delta: seconds})
+	if f.err != nil {
+		return f.err
+	}
+	if seconds < 0 {
+		seconds = 0
+	}
+	f.status.TimePos = seconds
+	f.broadcastLocked(f.status)
+	return nil
+}
+
+// SetSponsorBlock records the call and toggles FakeEngine SponsorBlock state.
+func (f *FakeEngine) SetSponsorBlock(enabled bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, FakeCall{Method: "SetSponsorBlock", Enabled: enabled})
+	f.sponsorBlock = enabled
+}
+
+// SponsorBlockEnabled returns whether SponsorBlock skipping is enabled on FakeEngine.
+func (f *FakeEngine) SponsorBlockEnabled() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.sponsorBlock
+}
+
+// ToggleVideoMode records the call, toggles video/audio-only mode, and returns videoOn.
+func (f *FakeEngine) ToggleVideoMode(_ context.Context) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, FakeCall{Method: "ToggleVideoMode"})
+	if f.err != nil {
+		return !f.audioOnly, f.err
+	}
+	f.audioOnly = !f.audioOnly
+	return !f.audioOnly, nil
+}
+
+// Chapters records the call and returns configured fake chapters.
+func (f *FakeEngine) Chapters(_ context.Context) ([]Chapter, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, FakeCall{Method: "Chapters"})
+	if f.err != nil {
+		return nil, f.err
+	}
+	out := make([]Chapter, len(f.chapters))
+	copy(out, f.chapters)
+	return out, nil
 }
 
 // AddVolume records the AddVolume call, adjusts Volume, and notifies subscribers.
