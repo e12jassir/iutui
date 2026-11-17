@@ -1,6 +1,9 @@
 package model
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // Tab represents the active view category in the sidebar.
 type Tab int
@@ -82,4 +85,51 @@ func (v Video) Badge() string {
 
 func (v Video) String() string {
 	return fmt.Sprintf("[%s] %s (%s)", v.ID, v.Title, v.Channel)
+}
+
+var playlistPrefixes = []string{"PL", "OLAK5uy_", "UU", "FL", "LP"}
+
+// IsMixID reports whether id looks like a YouTube Mix identifier (e.g. RD...).
+func IsMixID(id string) bool {
+	trimmed := strings.TrimSpace(id)
+	return strings.HasPrefix(trimmed, "RD") && len(trimmed) > 2
+}
+
+// IsPlaylistID reports whether id represents a YouTube playlist or Mix ID.
+func IsPlaylistID(id string) bool {
+	trimmed := strings.TrimSpace(id)
+	if IsMixID(trimmed) {
+		return true
+	}
+	for _, prefix := range playlistPrefixes {
+		if strings.HasPrefix(trimmed, prefix) && len(trimmed) > len(prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// MixSeedVideoID extracts the 11-character seed video ID from an RD<videoID> Mix ID.
+func MixSeedVideoID(id string) string {
+	trimmed := strings.TrimSpace(id)
+	if strings.HasPrefix(trimmed, "RD") && len(trimmed) == 13 {
+		return trimmed[2:]
+	}
+	return ""
+}
+
+// BuildTargetURL builds the YouTube playback target URL, whether playlists are
+// allowed, and the seed video ID (empty for non-seeded playlists).
+func BuildTargetURL(id string, asMix bool) (url string, allowPlaylist bool, seedID string) {
+	trimmed := strings.TrimSpace(id)
+	if seed := MixSeedVideoID(trimmed); seed != "" {
+		return "https://www.youtube.com/watch?v=" + seed + "&list=" + trimmed, true, seed
+	}
+	if IsPlaylistID(trimmed) {
+		return "https://www.youtube.com/playlist?list=" + trimmed, true, ""
+	}
+	if asMix && trimmed != "" {
+		return "https://www.youtube.com/watch?v=" + trimmed + "&list=RD" + trimmed, true, trimmed
+	}
+	return "https://www.youtube.com/watch?v=" + trimmed, false, trimmed
 }

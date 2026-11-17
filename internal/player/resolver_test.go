@@ -372,3 +372,223 @@ printf 'https://cdn.example.com/%%s.mp4\n' "$id"
 		}
 	})
 }
+
+func TestStreamResolver_CookiesAndYTDLPBin(t *testing.T) {
+	t.Run("nil receiver is safe no-op for SetCookieJar and SetYTDLPBin", func(t *testing.T) {
+		var r *StreamResolver
+		r.SetCookieJar("/tmp/cookies.txt")
+		r.SetYTDLPBin("/usr/bin/yt-dlp")
+	})
+
+	t.Run("SetYTDLPBin ignores empty string and switches binary", func(t *testing.T) {
+		usedFile := filepath.Join(t.TempDir(), "used.txt")
+		initialBin := writeFakeYTDLP(t, "exit 1")
+		updatedBin := writeFakeYTDLP(t, fmt.Sprintf("printf 'updated\\n' > %q\nprintf 'https://cdn.example.com/ok.mp4\\n'", usedFile))
+
+		r := NewStreamResolver(initialBin, 720)
+		r.SetYTDLPBin("")
+		if _, ok := r.resolve(context.Background(), "vid1"); ok {
+			t.Fatal("expected empty SetYTDLPBin to keep initial binary")
+		}
+
+		r.SetYTDLPBin(updatedBin)
+		st, ok := r.resolve(context.Background(), "vid1")
+		if !ok || st.VideoURL != "https://cdn.example.com/ok.mp4" {
+			t.Fatalf("expected updated binary to resolve stream, got st=%+v ok=%v", st, ok)
+		}
+	})
+
+	t.Run("uses --cookies only when cookie jar is a non-empty regular file, otherwise uses android,web extractor args", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		argsFile := filepath.Join(tmpDir, "args.txt")
+		bin := writeFakeYTDLP(t, fmt.Sprintf(`
+printf '%%s\n' "$@" > %q
+printf 'https://cdn.example.com/v.mp4\n'
+`, argsFile))
+
+		// Case 1: valid non-empty cookie file
+		cookieFile := filepath.Join(tmpDir, "cookies.txt")
+		if err := os.WriteFile(cookieFile, []byte("# Netscape HTTP Cookie File\n"), 0o600); err != nil {
+			t.Fatalf("write cookie jar: %v", err)
+		}
+		r := NewStreamResolver(bin, 720)
+		r.SetCookieJar(cookieFile)
+		if _, ok := r.resolve(context.Background(), "vid-cookie"); !ok {
+			t.Fatal("resolve with cookie file failed")
+		}
+		b, err := os.ReadFile(argsFile)
+		if err != nil {
+			t.Fatalf("read args: %v", err)
+		}
+		got := string(b)
+		if !strings.Contains(got, "--cookies\n"+cookieFile) {
+			t.Errorf("expected --cookies %s in args:\n%s", cookieFile, got)
+		}
+		if strings.Contains(got, "player_client=android,web") {
+			t.Errorf("did not expect extractor-args when valid cookie jar is set:\n%s", got)
+		}
+
+		// Case 2: empty cookie file falls back to extractor-args
+		emptyCookie := filepath.Join(tmpDir, "empty.txt")
+		if err := os.WriteFile(emptyCookie, nil, 0o600); err != nil {
+			t.Fatalf("write empty cookie jar: %v", err)
+		}
+		r.SetCookieJar(emptyCookie)
+		if _, ok := r.resolve(context.Background(), "vid-empty-cookie"); !ok {
+			t.Fatal("resolve with empty cookie file failed")
+		}
+		b, err = os.ReadFile(argsFile)
+		if err != nil {
+			t.Fatalf("read args: %v", err)
+		}
+		got = string(b)
+		if strings.Contains(got, "--cookies") {
+			t.Errorf("did not expect --cookies for empty file:\n%s", got)
+		}
+		if !strings.Contains(got, "--extractor-args\nyoutube:player_client=android,web") {
+			t.Errorf("expected android,web extractor-args fallback:\n%s", got)
+		}
+
+		// Case 3: directory or missing path falls back to extractor-args
+		r.SetCookieJar(tmpDir)
+		if _, ok := r.resolve(context.Background(), "vid-dir-cookie"); !ok {
+			t.Fatal("resolve with directory cookie path failed")
+		}
+		b, err = os.ReadFile(argsFile)
+		if err != nil {
+			t.Fatalf("read args: %v", err)
+		}
+		if strings.Contains(string(b), "--cookies") || !strings.Contains(string(b), "youtube:player_client=android,web") {
+			t.Errorf("expected extractor-args fallback for directory path:\n%s", string(b))
+		}
+	})
+}
+
+func TestStreamResolver_MixPrefetchAndWaitOrGet(t *testing.T) {
+	t.Run("Prefetch normalizes RD<11char> seed and skips non-seeded playlists", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		callsFile := filepath.Join(tmpDir, "calls.txt")
+		bin := writeFakeYTDLP(t, fmt.Sprintf(`
+printf '%%s\n' "$*" >> %q
+printf 'https://cdn.example.com/seed.mp4\n'
+`, callsFile))
+
+		r := NewStreamResolver(bin, 720)
+		// Non-seeded playlists should not invoke yt-dlp.
+		r.Prefetch(context.Background(), model.Video{ID: "PL1234567890"})
+		r.Prefetch(context.Background(), model.Video{ID: "RDCLAK5uy_abc123"})
+		time.Sleep(40 * time.Millisecond)
+		if _, err := os.Stat(callsFile); !os.IsNotExist(err) {
+			t.Fatalf("expected playlists not to trigger Prefetch, stat err=%v", err)
+		}
+
+		// RD + 11-char video ID normalizes to the 11-char seed video ID.
+		r.Prefetch(context.Background(), model.Video{ID: "RDdQw4w9WgXcQ"})
+		st, ok := r.WaitOrGet(context.Background(), "RDdQw4w9WgXcQ", 2*time.Second)
+		if !ok {
+			t.Fatal("WaitOrGet(RDdQw4w9WgXcQ) returned false, want true")
+		}
+		if st.VideoURL != "https://cdn.example.com/seed.mp4" {
+			t.Errorf("VideoURL = %q, want %q", st.VideoURL, "https://cdn.example.com/seed.mp4")
+		}
+		if _, ok := r.GetCached("dQw4w9WgXcQ"); !ok {
+			t.Fatal("expected normalized seed ID dQw4w9WgXcQ to be cached")
+		}
+	})
+
+	t.Run("WaitOrGet coalesces in-flight lookup, times out, and respects ctx cancellation", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		startedFile := filepath.Join(tmpDir, "started")
+		gateFile := filepath.Join(tmpDir, "gate")
+		bin := writeFakeYTDLP(t, fmt.Sprintf(`
+touch %q
+while [ ! -f %q ]; do sleep 0.01; done
+printf 'https://cdn.example.com/coalesced.mp4\n'
+`, startedFile, gateFile))
+
+		r := NewStreamResolver(bin, 720)
+		r.Prefetch(context.Background(), model.Video{ID: "wait-vid"})
+
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			if _, err := os.Stat(startedFile); err == nil {
+				break
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+
+		// Short maxWait times out while gate is closed.
+		if _, ok := r.WaitOrGet(context.Background(), "wait-vid", 25*time.Millisecond); ok {
+			t.Fatal("expected WaitOrGet to time out while lookup is gated")
+		}
+
+		// Canceled context returns false promptly.
+		cctx, cancel := context.WithCancel(context.Background())
+		go func() {
+			time.Sleep(20 * time.Millisecond)
+			cancel()
+		}()
+		if _, ok := r.WaitOrGet(cctx, "wait-vid", 2*time.Second); ok {
+			t.Fatal("expected WaitOrGet to return false when ctx is canceled")
+		}
+
+		// Concurrent WaitOrGet succeeds once gate is released.
+		resCh := make(chan bool, 1)
+		go func() {
+			st, ok := r.WaitOrGet(context.Background(), "wait-vid", 2*time.Second)
+			resCh <- (ok && st.VideoURL == "https://cdn.example.com/coalesced.mp4")
+		}()
+
+		time.Sleep(20 * time.Millisecond)
+		if err := os.WriteFile(gateFile, []byte("go"), 0o644); err != nil {
+			t.Fatalf("write gate: %v", err)
+		}
+
+		if !<-resCh {
+			t.Fatal("expected WaitOrGet to return resolved stream once in-flight finished")
+		}
+	})
+
+	t.Run("WaitOrGet unblocks early when SetQuality invalidates generation", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		startedFile := filepath.Join(tmpDir, "started")
+		gateFile := filepath.Join(tmpDir, "gate")
+		bin := writeFakeYTDLP(t, fmt.Sprintf(`
+touch %q
+while [ ! -f %q ]; do sleep 0.01; done
+printf 'https://cdn.example.com/stale.mp4\n'
+`, startedFile, gateFile))
+
+		r := NewStreamResolver(bin, 720)
+		r.Prefetch(context.Background(), model.Video{ID: "gen-vid"})
+
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			if _, err := os.Stat(startedFile); err == nil {
+				break
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+
+		waitDone := make(chan bool, 1)
+		go func() {
+			_, ok := r.WaitOrGet(context.Background(), "gen-vid", 3*time.Second)
+			waitDone <- ok
+		}()
+
+		time.Sleep(20 * time.Millisecond)
+		r.SetQuality(1080)
+		if err := os.WriteFile(gateFile, []byte("go"), 0o644); err != nil {
+			t.Fatalf("write gate: %v", err)
+		}
+
+		select {
+		case ok := <-waitDone:
+			if ok {
+				t.Fatal("expected WaitOrGet to return false for invalidated generation")
+			}
+		case <-time.After(1 * time.Second):
+			t.Fatal("WaitOrGet stayed blocked instead of unblocking when old goroutine exited")
+		}
+	})
+}

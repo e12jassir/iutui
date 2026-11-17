@@ -11,8 +11,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/e12jassir/ytx/internal/model"
@@ -80,7 +83,8 @@ func WithLaunchDefaults(opts LaunchOpts) IPCOption {
 	return func(c *IPCClient) {
 		c.launchDefaults = opts
 		if opts.FastPlayback {
-			c.resolver = NewStreamResolver("", opts.Quality)
+			c.resolver = NewStreamResolver(opts.YtdlpBin, opts.Quality)
+			c.resolver.SetCookieJar(opts.CookieJarPath)
 		}
 	}
 }
@@ -113,11 +117,20 @@ type IPCClient struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	done   chan struct{}
+	wakeCh chan struct{}
 	wg     sync.WaitGroup
 
 	connMu  sync.RWMutex
 	writeMu sync.Mutex
 	conn    net.Conn
+
+	procMu  sync.Mutex
+	mpvProc *os.Process
+
+	playMu     sync.Mutex
+	playSeq    atomic.Uint64
+	playCancel context.CancelFunc
+	step3Mu    sync.Mutex
 
 	nextReqID atomic.Int64
 
@@ -146,6 +159,7 @@ func NewIPCClient(opts ...IPCOption) *IPCClient {
 		ctx:            ctx,
 		cancel:         cancel,
 		done:           make(chan struct{}),
+		wakeCh:         make(chan struct{}, 1),
 		pending:        make(map[int64]chan ipcResponse),
 		subs:           make(map[uint64]chan Status),
 	}
@@ -182,11 +196,13 @@ func (c *IPCClient) run() {
 				select {
 				case <-c.ctx.Done():
 					return
+				case <-c.wakeCh:
+					backoff = c.initialBackoff
 				case <-time.After(backoff):
-				}
-				backoff *= 2
-				if backoff > c.maxBackoff {
-					backoff = c.maxBackoff
+					backoff *= 2
+					if backoff > c.maxBackoff {
+						backoff = c.maxBackoff
+					}
 				}
 				continue
 			}
@@ -196,10 +212,16 @@ func (c *IPCClient) run() {
 				_ = dialed.Close()
 				return
 			}
-			c.conn = dialed
-			c.connMu.Unlock()
-			conn = dialed
-			c.setRunning(true)
+			if c.conn != nil {
+				conn = c.conn
+				c.connMu.Unlock()
+				_ = dialed.Close()
+			} else {
+				c.conn = dialed
+				c.connMu.Unlock()
+				conn = dialed
+				c.setRunning(true)
+			}
 		}
 
 		backoff = c.initialBackoff
@@ -213,11 +235,13 @@ func (c *IPCClient) run() {
 		select {
 		case <-c.ctx.Done():
 			return
+		case <-c.wakeCh:
+			backoff = c.initialBackoff
 		case <-time.After(backoff):
-		}
-		backoff *= 2
-		if backoff > c.maxBackoff {
-			backoff = c.maxBackoff
+			backoff *= 2
+			if backoff > c.maxBackoff {
+				backoff = c.maxBackoff
+			}
 		}
 	}
 }
@@ -496,58 +520,557 @@ func (c *IPCClient) Prefetch(v model.Video) {
 	}
 }
 
+func (c *IPCClient) signalWake() {
+	if c.wakeCh == nil {
+		return
+	}
+	select {
+	case c.wakeCh <- struct{}{}:
+	default:
+	}
+}
+
+func (c *IPCClient) hasManagedProc() bool {
+	c.procMu.Lock()
+	defer c.procMu.Unlock()
+	if c.mpvProc == nil {
+		return false
+	}
+	if err := c.mpvProc.Signal(syscall.Signal(0)); err != nil {
+		c.mpvProc = nil
+		return false
+	}
+	return true
+}
+
+func (c *IPCClient) killManagedMPV() {
+	c.procMu.Lock()
+	proc := c.mpvProc
+	c.mpvProc = nil
+	c.procMu.Unlock()
+	if proc == nil {
+		return
+	}
+	if proc.Pid > 0 {
+		_ = syscall.Kill(-proc.Pid, syscall.SIGTERM)
+	}
+	_ = proc.Kill()
+}
+
+func (c *IPCClient) isCurrentPlay(seq uint64) bool {
+	return c.playSeq.Load() == seq
+}
+
+func (c *IPCClient) tryConnectImmediate(maxWait time.Duration) bool {
+	return c.tryConnectImmediateCtx(c.ctx, maxWait)
+}
+
+func (c *IPCClient) tryConnectImmediateCtx(ctx context.Context, maxWait time.Duration) bool {
+	if c.ctx.Err() != nil {
+		return false
+	}
+	if ctx == nil {
+		ctx = c.ctx
+	}
+	if ctx.Err() != nil {
+		return false
+	}
+	if c.isConnected() {
+		return true
+	}
+	if maxWait <= 0 {
+		return false
+	}
+
+	deadline := time.Now().Add(maxWait)
+	for {
+		if c.ctx.Err() != nil || ctx.Err() != nil {
+			return false
+		}
+		if c.isConnected() {
+			return true
+		}
+		if dialed, err := c.dialAndObserve(); err == nil {
+			c.connMu.Lock()
+			if c.ctx.Err() != nil || ctx.Err() != nil {
+				c.connMu.Unlock()
+				_ = dialed.Close()
+				return false
+			}
+			if c.conn != nil {
+				c.connMu.Unlock()
+				_ = dialed.Close()
+				return true
+			}
+			c.conn = dialed
+			c.connMu.Unlock()
+			c.setRunning(true)
+			c.signalWake()
+			return true
+		}
+
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return false
+		}
+		wait := 25 * time.Millisecond
+		if remaining < wait {
+			wait = remaining
+		}
+		timer := time.NewTimer(wait)
+		select {
+		case <-c.ctx.Done():
+			timer.Stop()
+			return false
+		case <-ctx.Done():
+			timer.Stop()
+			return false
+		case <-timer.C:
+		}
+	}
+}
+
+type resolvedPlayTarget struct {
+	targetURL           string
+	url                 string
+	fallbackURL         string
+	audioFile           string
+	seedID              string
+	effectiveMode       string
+	playlistIDs         []string
+	playlistFetched     bool
+	isMix               bool
+	launchAllowPlaylist bool
+}
+
 // Play starts playback of v using the active socket or launches mpv directly.
+// Any active or in-flight playback is immediately interrupted so the latest Play wins.
 func (c *IPCClient) Play(ctx context.Context, v model.Video, mode string) error {
-	url := fmt.Sprintf("https://www.youtube.com/watch?v=%s", v.ID)
-	audioFile := ""
-	if c.resolver != nil {
-		if st, ok := c.resolver.GetCached(v.ID); ok {
-			if mode == "audio" && st.AudioURL != "" {
-				url = st.AudioURL
-			} else {
-				url = st.VideoURL
-				if mode != "audio" {
-					audioFile = st.AudioURL
-				}
+	if c.ctx.Err() != nil {
+		return ErrClientClosed
+	}
+	if ctx != nil && ctx.Err() != nil {
+		return ctx.Err()
+	}
+
+	c.playMu.Lock()
+	seq := c.playSeq.Add(1)
+	prevCancel := c.playCancel
+	mixCtx, mixCancel := context.WithCancel(c.ctx)
+	c.playCancel = mixCancel
+	c.playMu.Unlock()
+	if prevCancel != nil {
+		prevCancel()
+	}
+
+	waitCtx, waitCancel := context.WithCancel(mixCtx)
+	defer waitCancel()
+	if ctx != nil && ctx != context.Background() && ctx != context.TODO() {
+		stopWatch := context.AfterFunc(ctx, waitCancel)
+		defer stopWatch()
+	}
+
+	skipReconnect, ok := c.cutActivePlayback(waitCtx, seq)
+	if !ok {
+		return nil
+	}
+
+	plan := c.resolvePlayTarget(waitCtx, v, mode)
+	if !c.isCurrentPlay(seq) || c.ctx.Err() != nil {
+		return nil
+	}
+
+	if err := c.playOnSingleMPV(ctx, waitCtx, seq, v, plan, skipReconnect); err != nil {
+		return err
+	}
+
+	c.scheduleMixAppend(mixCtx, seq, plan)
+	return nil
+}
+
+func (c *IPCClient) cutActivePlayback(waitCtx context.Context, seq uint64) (skipReconnect bool, ok bool) {
+	if c.isConnected() || (c.hasManagedProc() && c.tryConnectImmediateCtx(waitCtx, 200*time.Millisecond)) {
+		if !c.isCurrentPlay(seq) || c.ctx.Err() != nil {
+			return false, false
+		}
+		conn := c.getConn()
+		stopCtx, stopCancel := context.WithTimeout(waitCtx, 500*time.Millisecond)
+		_, stopErr := c.sendCommand(stopCtx, "stop")
+		stopCancel()
+		if stopErr != nil {
+			if !c.isCurrentPlay(seq) || c.ctx.Err() != nil {
+				return false, false
+			}
+			if conn != nil {
+				c.handleDisconnect(conn)
+			}
+			c.killManagedMPV()
+			return true, true
+		}
+		return false, true
+	}
+	if c.hasManagedProc() {
+		if !c.isCurrentPlay(seq) || c.ctx.Err() != nil {
+			return false, false
+		}
+		c.killManagedMPV()
+		return true, true
+	}
+	return false, true
+}
+
+func (c *IPCClient) resolvePlayTarget(waitCtx context.Context, v model.Video, mode string) resolvedPlayTarget {
+	effectiveMode := mode
+	if effectiveMode == "mix" {
+		effectiveMode = "auto"
+	}
+	targetURL, allowPlaylist, seedID := model.BuildTargetURL(v.ID, mode == "mix")
+
+	plan := resolvedPlayTarget{
+		targetURL:     targetURL,
+		url:           targetURL,
+		fallbackURL:   targetURL,
+		seedID:        seedID,
+		effectiveMode: effectiveMode,
+		isMix:         mode == "mix" || model.IsPlaylistID(v.ID),
+	}
+
+	applyResolved := func(st ResolvedStream) {
+		if effectiveMode == "audio" && st.AudioURL != "" {
+			plan.url = st.AudioURL
+			plan.audioFile = ""
+			return
+		}
+		if st.VideoURL != "" {
+			plan.url = st.VideoURL
+			if effectiveMode != "audio" {
+				plan.audioFile = st.AudioURL
 			}
 		}
 	}
 
-	if c.isConnected() {
-		wantVid := "auto"
-		if mode == "audio" {
-			wantVid = "no"
-		}
-		_, _ = c.sendCommand(ctx, "set_property", "vid", wantVid)
-		var err error
-		if audioFile != "" {
-			_, err = c.sendCommand(ctx, "loadfile", url, "replace", 0, "audio-file="+audioFile)
-		} else {
-			_, err = c.sendCommand(ctx, "loadfile", url, "replace")
-		}
-		if err == nil {
-			if v.Title != "" {
-				_, _ = c.sendCommand(ctx, "set_property", "force-media-title", v.Title)
+	if !allowPlaylist {
+		if c.resolver != nil {
+			if st, ok := c.resolver.WaitOrGet(waitCtx, v.ID, 900*time.Millisecond); ok {
+				applyResolved(st)
 			}
-			_, _ = c.sendCommand(ctx, "set_property", "pause", false)
-			return nil
 		}
+		return plan
 	}
+
+	if seedID != "" {
+		plan.url = "https://www.youtube.com/watch?v=" + seedID
+		plan.fallbackURL = plan.url
+		if c.resolver != nil {
+			if st, ok := c.resolver.WaitOrGet(waitCtx, seedID, 900*time.Millisecond); ok {
+				applyResolved(st)
+			}
+		}
+		return plan
+	}
+
+	ids := c.fetchPlaylistIDs(waitCtx, targetURL, 25)
+	plan.playlistFetched = true
+	if len(ids) > 0 {
+		plan.seedID = ids[0]
+		plan.url = "https://www.youtube.com/watch?v=" + plan.seedID
+		plan.fallbackURL = plan.url
+		plan.playlistIDs = ids[1:]
+		if c.resolver != nil {
+			if st, ok := c.resolver.WaitOrGet(waitCtx, plan.seedID, 900*time.Millisecond); ok {
+				applyResolved(st)
+			}
+		}
+		return plan
+	}
+
+	plan.launchAllowPlaylist = true
+	return plan
+}
+
+func (c *IPCClient) playOnSingleMPV(ctx, waitCtx context.Context, seq uint64, v model.Video, plan resolvedPlayTarget, skipReconnect bool) error {
+	if !skipReconnect && !c.isConnected() {
+		_ = c.tryConnectImmediateCtx(waitCtx, 150*time.Millisecond)
+	}
+
+	c.step3Mu.Lock()
+	if !c.isCurrentPlay(seq) || c.ctx.Err() != nil {
+		c.step3Mu.Unlock()
+		return nil
+	}
+	if ctx != nil && ctx.Err() != nil {
+		c.step3Mu.Unlock()
+		return ctx.Err()
+	}
+
+	if c.tryPlayViaIPC(waitCtx, seq, v, plan) {
+		c.step3Mu.Unlock()
+		return nil
+	}
+	if !c.isCurrentPlay(seq) || c.ctx.Err() != nil {
+		c.step3Mu.Unlock()
+		return nil
+	}
+
 	c.launchMu.RLock()
 	opts := c.launchDefaults
 	c.launchMu.RUnlock()
-	if opts.SocketPath != "" {
-		_ = os.MkdirAll(filepath.Dir(opts.SocketPath), 0o700)
-		opts.VideoID = v.ID
-		opts.Title = v.Title
-		opts.URL = url
-		opts.AudioFile = audioFile
-		if mode != "" && mode != "auto" {
-			opts.Mode = mode
-		}
-		return LaunchMPV("mpv", opts)
+
+	if opts.SocketPath == "" {
+		c.step3Mu.Unlock()
+		return PlayVideo(v, plan.effectiveMode)
 	}
-	return PlayVideo(v, mode)
+
+	c.killManagedMPV()
+	c.procMu.Lock()
+	if !c.isCurrentPlay(seq) || c.ctx.Err() != nil {
+		c.procMu.Unlock()
+		c.step3Mu.Unlock()
+		return nil
+	}
+	_ = os.MkdirAll(filepath.Dir(opts.SocketPath), 0o700)
+	_ = os.Remove(opts.SocketPath)
+	opts.VideoID = v.ID
+	opts.Title = v.Title
+	opts.URL = plan.url
+	opts.AudioFile = plan.audioFile
+	opts.AllowPlaylist = plan.launchAllowPlaylist
+	if plan.effectiveMode != "" && plan.effectiveMode != "auto" {
+		opts.Mode = plan.effectiveMode
+	}
+	proc, err := StartMPVProcess("mpv", opts)
+	if err != nil {
+		c.procMu.Unlock()
+		c.step3Mu.Unlock()
+		return err
+	}
+	c.mpvProc = proc
+	c.procMu.Unlock()
+	c.step3Mu.Unlock()
+	c.signalWake()
+	return nil
+}
+
+func (c *IPCClient) tryPlayViaIPC(waitCtx context.Context, seq uint64, v model.Video, plan resolvedPlayTarget) bool {
+	if !c.isConnected() {
+		return false
+	}
+	wantVid := "auto"
+	if plan.effectiveMode == "audio" {
+		wantVid = "no"
+	}
+	_, _ = c.sendCommand(waitCtx, "set_property", "vid", wantVid)
+	if !c.isCurrentPlay(seq) || c.ctx.Err() != nil {
+		return true
+	}
+
+	var err error
+	if plan.audioFile != "" {
+		_, err = c.sendCommand(waitCtx, "loadfile", plan.url, "replace", 0, "audio-file="+plan.audioFile)
+		if err != nil && c.isCurrentPlay(seq) && c.ctx.Err() == nil && c.isConnected() {
+			_, err = c.sendCommand(waitCtx, "loadfile", plan.fallbackURL, "replace")
+		}
+	} else {
+		_, err = c.sendCommand(waitCtx, "loadfile", plan.url, "replace")
+		if err != nil && plan.url != plan.fallbackURL && c.isCurrentPlay(seq) && c.ctx.Err() == nil && c.isConnected() {
+			_, err = c.sendCommand(waitCtx, "loadfile", plan.fallbackURL, "replace")
+		}
+	}
+
+	if !c.isCurrentPlay(seq) || c.ctx.Err() != nil {
+		return true
+	}
+	if err != nil {
+		return false
+	}
+
+	if v.Title != "" {
+		_, _ = c.sendCommand(waitCtx, "set_property", "force-media-title", v.Title)
+	}
+	if c.isCurrentPlay(seq) {
+		_, _ = c.sendCommand(waitCtx, "set_property", "pause", false)
+	}
+	return true
+}
+
+func (c *IPCClient) scheduleMixAppend(mixCtx context.Context, seq uint64, plan resolvedPlayTarget) {
+	if !plan.isMix || plan.seedID == "" || (plan.playlistFetched && len(plan.playlistIDs) == 0) {
+		return
+	}
+	c.subMu.Lock()
+	canSpawn := !c.closed && c.ctx.Err() == nil && c.isCurrentPlay(seq)
+	if canSpawn {
+		c.wg.Add(1)
+	}
+	c.subMu.Unlock()
+	if canSpawn {
+		go c.appendMixTracks(mixCtx, seq, plan.targetURL, plan.seedID, plan.playlistIDs)
+	}
+}
+
+func (c *IPCClient) appendMixTracks(mixCtx context.Context, seq uint64, targetURL, seedID string, playlistIDs []string) {
+	defer c.wg.Done()
+
+	if !c.isCurrentPlay(seq) || mixCtx.Err() != nil {
+		return
+	}
+
+	if len(playlistIDs) == 0 {
+		playlistIDs = c.fetchPlaylistIDs(mixCtx, targetURL, 25)
+	}
+	if !c.isCurrentPlay(seq) || mixCtx.Err() != nil {
+		return
+	}
+
+	seen := map[string]struct{}{seedID: {}}
+	var remaining []string
+	for _, id := range playlistIDs {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		remaining = append(remaining, id)
+	}
+	if len(remaining) == 0 {
+		return
+	}
+
+	if c.resolver != nil {
+		c.resolver.Prefetch(mixCtx, model.Video{ID: remaining[0]})
+	}
+
+	if !c.isConnected() && !c.tryConnectImmediateCtx(mixCtx, 2*time.Second) {
+		return
+	}
+
+	for _, id := range remaining {
+		if !c.isCurrentPlay(seq) || mixCtx.Err() != nil {
+			return
+		}
+		if _, err := c.sendCommand(mixCtx, "loadfile", "https://www.youtube.com/watch?v="+id, "append"); err != nil {
+			return
+		}
+	}
+}
+
+func (c *IPCClient) fetchPlaylistIDs(ctx context.Context, targetURL string, limit int) []string {
+	if targetURL == "" {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if ctx.Err() != nil {
+		return nil
+	}
+	if limit <= 0 {
+		limit = 25
+	}
+
+	c.launchMu.RLock()
+	ytdlpBin := c.launchDefaults.YtdlpBin
+	cookieJar := c.launchDefaults.CookieJarPath
+	c.launchMu.RUnlock()
+	if ytdlpBin == "" {
+		ytdlpBin = "yt-dlp"
+	}
+
+	args := []string{
+		"--flat-playlist",
+		"--dump-json",
+		"--no-warnings",
+		"--ignore-errors",
+		"--socket-timeout", "8",
+		"--playlist-end", strconv.Itoa(limit),
+	}
+	if isValidCookieJar(cookieJar) {
+		args = append(args, "--cookies", cookieJar)
+	}
+	args = append(args, targetURL)
+
+	cmd := exec.CommandContext(ctx, ytdlpBin, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+	cmd.WaitDelay = 100 * time.Millisecond
+
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
+	err := cmd.Run()
+	if ctx.Err() != nil {
+		return nil
+	}
+	if err != nil && stdout.Len() == 0 {
+		return nil
+	}
+
+	return parsePlaylistIDs(stdout.Bytes(), limit)
+}
+
+func parsePlaylistIDs(data []byte, limit int) []string {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 {
+		return nil
+	}
+
+	var ids []string
+	seen := make(map[string]struct{})
+	addID := func(raw string) {
+		id := strings.TrimSpace(raw)
+		if id == "" {
+			return
+		}
+		if _, dup := seen[id]; dup {
+			return
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+
+	if trimmed[0] == '{' {
+		var pl struct {
+			Entries []struct {
+				ID string `json:"id"`
+			} `json:"entries"`
+		}
+		if err := json.Unmarshal(trimmed, &pl); err == nil && len(pl.Entries) > 0 {
+			for _, e := range pl.Entries {
+				addID(e.ID)
+				if limit > 0 && len(ids) >= limit {
+					break
+				}
+			}
+			return ids
+		}
+	}
+
+	scanner := bufio.NewScanner(bytes.NewReader(trimmed))
+	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	for scanner.Scan() {
+		line := bytes.TrimSpace(scanner.Bytes())
+		if len(line) == 0 || line[0] != '{' {
+			continue
+		}
+		var entry struct {
+			ID   string `json:"id"`
+			Type string `json:"_type"`
+		}
+		if err := json.Unmarshal(line, &entry); err == nil && entry.Type != "playlist" {
+			addID(entry.ID)
+			if limit > 0 && len(ids) >= limit {
+				break
+			}
+		}
+	}
+	return ids
 }
 
 // Enqueue appends v to the active playlist or delegates to yt __do enqueue.
@@ -662,11 +1185,13 @@ func (c *IPCClient) broadcast(st Status) {
 	}
 }
 
-// Close shuts down the IPC client, closes the socket, and releases all subscribers.
+// Close shuts down the IPC client, stops any managed mpv process, closes the
+// socket, and releases all subscribers.
 func (c *IPCClient) Close() error {
 	c.closeOnce.Do(func() {
 		c.cancel()
 		close(c.done)
+		c.killManagedMPV()
 
 		c.connMu.Lock()
 		conn := c.conn

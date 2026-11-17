@@ -2,6 +2,7 @@ package player
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"syscall"
 )
@@ -18,6 +19,8 @@ type LaunchOpts struct {
 	Volume        int
 	CookieJarPath string
 	FastPlayback  bool
+	YtdlpBin      string
+	AllowPlaylist bool
 }
 
 // BuildMPVArgs constructs the command-line argument slice for mpv from opts.
@@ -34,7 +37,11 @@ func BuildMPVArgs(opts LaunchOpts) []string {
 	}
 
 	if opts.SocketPath != "" {
-		args = append(args, "--input-ipc-server="+opts.SocketPath)
+		args = append(args,
+			"--input-ipc-server="+opts.SocketPath,
+			"--idle=yes",
+			"--keep-open=no",
+		)
 	}
 	if opts.Volume > 0 {
 		args = append(args, fmt.Sprintf("--volume=%d", opts.Volume))
@@ -65,10 +72,16 @@ func BuildMPVArgs(opts LaunchOpts) []string {
 		args = append(args, fmt.Sprintf("--ytdl-format=bestvideo[height<=%d]+bestaudio/best[height<=%d]/best", opts.Quality, opts.Quality))
 	}
 
+	playlistOpt := "no-playlist="
+	if opts.AllowPlaylist {
+		playlistOpt = "yes-playlist="
+	}
 	if opts.CookieJarPath != "" {
-		args = append(args, "--ytdl-raw-options=cookies="+opts.CookieJarPath)
+		args = append(args, "--ytdl-raw-options=cookies="+opts.CookieJarPath+","+playlistOpt)
 	} else if opts.FastPlayback {
-		args = append(args, "--ytdl-raw-options=no-playlist=")
+		args = append(args, "--ytdl-raw-options="+playlistOpt+",extractor-args=youtube:player_client=android,web")
+	} else if opts.AllowPlaylist {
+		args = append(args, "--ytdl-raw-options=yes-playlist=")
 	}
 
 	if opts.AudioFile != "" {
@@ -82,9 +95,9 @@ func BuildMPVArgs(opts LaunchOpts) []string {
 	return args
 }
 
-// LaunchMPV starts a detached mpv process with the given binary and options
-// without blocking the caller.
-func LaunchMPV(mpvBin string, opts LaunchOpts) error {
+// StartMPVProcess starts a detached mpv process with the given binary and
+// options, asynchronously reaps it, and returns its OS process handle.
+func StartMPVProcess(mpvBin string, opts LaunchOpts) (*os.Process, error) {
 	if mpvBin == "" {
 		mpvBin = "mpv"
 	}
@@ -96,13 +109,21 @@ func LaunchMPV(mpvBin string, opts LaunchOpts) error {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("launch mpv: %w", err)
+		return nil, fmt.Errorf("launch mpv: %w", err)
 	}
 
+	proc := cmd.Process
 	// Reap the child process asynchronously so it does not become a zombie.
 	go func() {
 		_ = cmd.Wait()
 	}()
 
-	return nil
+	return proc, nil
+}
+
+// LaunchMPV starts a detached mpv process with the given binary and options
+// without blocking the caller.
+func LaunchMPV(mpvBin string, opts LaunchOpts) error {
+	_, err := StartMPVProcess(mpvBin, opts)
+	return err
 }

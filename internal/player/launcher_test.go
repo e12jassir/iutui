@@ -132,12 +132,90 @@ func TestBuildMPVArgs_OptionsAndFlagInjection(t *testing.T) {
 			},
 			want: []string{
 				"--input-ipc-server=/tmp/yt-1000/mpv.sock",
+				"--idle=yes",
+				"--keep-open=no",
 				"--volume=80",
 				"--force-window=yes",
 				"--ytdl-format=bestvideo[height<=720]+bestaudio/best[height<=720]/best",
-				"--ytdl-raw-options=cookies=/tmp/cookies.txt",
+				"--ytdl-raw-options=cookies=/tmp/cookies.txt,no-playlist=",
 				"--",
 				"https://www.youtube.com/watch?v=abc123",
+			},
+		},
+		{
+			name: "fast playback adds warm flags, no-playlist, and android,web extractor args",
+			opts: LaunchOpts{
+				URL:          "https://www.youtube.com/watch?v=abc123",
+				Mode:         "window",
+				SocketPath:   "/tmp/yt-1000/mpv.sock",
+				FastPlayback: true,
+			},
+			want: []string{
+				"--hwdec=auto-safe",
+				"--really-quiet",
+				"--cache=yes",
+				"--cache-pause=no",
+				"--demuxer-readahead-secs=3",
+				"--input-ipc-server=/tmp/yt-1000/mpv.sock",
+				"--idle=yes",
+				"--keep-open=no",
+				"--force-window=immediate",
+				"--ytdl-format=bestvideo+bestaudio/best",
+				"--ytdl-raw-options=no-playlist=,extractor-args=youtube:player_client=android,web",
+				"--",
+				"https://www.youtube.com/watch?v=abc123",
+			},
+		},
+		{
+			name: "allow playlist with fast playback uses yes-playlist=",
+			opts: LaunchOpts{
+				URL:           "https://www.youtube.com/playlist?list=PL123",
+				Mode:          "window",
+				FastPlayback:  true,
+				AllowPlaylist: true,
+			},
+			want: []string{
+				"--hwdec=auto-safe",
+				"--really-quiet",
+				"--cache=yes",
+				"--cache-pause=no",
+				"--demuxer-readahead-secs=3",
+				"--force-window=immediate",
+				"--ytdl-format=bestvideo+bestaudio/best",
+				"--ytdl-raw-options=yes-playlist=,extractor-args=youtube:player_client=android,web",
+				"--",
+				"https://www.youtube.com/playlist?list=PL123",
+			},
+		},
+		{
+			name: "allow playlist without fast playback or cookies emits yes-playlist=",
+			opts: LaunchOpts{
+				URL:           "https://www.youtube.com/playlist?list=PL123",
+				Mode:          "window",
+				AllowPlaylist: true,
+			},
+			want: []string{
+				"--force-window=yes",
+				"--ytdl-format=bestvideo+bestaudio/best",
+				"--ytdl-raw-options=yes-playlist=",
+				"--",
+				"https://www.youtube.com/playlist?list=PL123",
+			},
+		},
+		{
+			name: "cookies with allow playlist preserves cookies and yes-playlist=",
+			opts: LaunchOpts{
+				URL:           "https://www.youtube.com/playlist?list=PL123",
+				Mode:          "window",
+				CookieJarPath: "/tmp/cookies.txt",
+				AllowPlaylist: true,
+			},
+			want: []string{
+				"--force-window=yes",
+				"--ytdl-format=bestvideo+bestaudio/best",
+				"--ytdl-raw-options=cookies=/tmp/cookies.txt,yes-playlist=",
+				"--",
+				"https://www.youtube.com/playlist?list=PL123",
 			},
 		},
 		{
@@ -221,6 +299,53 @@ func TestLaunchMPV(t *testing.T) {
 	t.Run("returns error for missing binary", func(t *testing.T) {
 		missingBin := filepath.Join(t.TempDir(), "does-not-exist")
 		if err := LaunchMPV(missingBin, LaunchOpts{URL: "https://example.com"}); err == nil {
+			t.Fatal("expected error for missing mpv binary, got nil")
+		}
+	})
+}
+
+func TestStartMPVProcess(t *testing.T) {
+	t.Run("returns live process handle with positive PID", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		pidFile := filepath.Join(tmpDir, "pid.txt")
+		scriptPath := filepath.Join(tmpDir, "sleep-mpv.sh")
+
+		script := "#!/bin/sh\necho $$ > \"" + pidFile + "\"\nsleep 10\n"
+		if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+			t.Fatalf("write fake mpv script: %v", err)
+		}
+
+		proc, err := StartMPVProcess(scriptPath, LaunchOpts{
+			URL:      "https://www.youtube.com/watch?v=test",
+			YtdlpBin: "yt-dlp",
+		})
+		if err != nil {
+			t.Fatalf("StartMPVProcess() unexpected error: %v", err)
+		}
+		if proc == nil || proc.Pid <= 0 {
+			t.Fatalf("expected non-nil process with positive PID, got %+v", proc)
+		}
+		t.Cleanup(func() {
+			_ = proc.Kill()
+		})
+
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			if b, err := os.ReadFile(pidFile); err == nil && len(strings.TrimSpace(string(b))) > 0 {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatal("timed out waiting for started process to run")
+	})
+
+	t.Run("returns error for missing binary", func(t *testing.T) {
+		missingBin := filepath.Join(t.TempDir(), "does-not-exist")
+		proc, err := StartMPVProcess(missingBin, LaunchOpts{URL: "https://example.com"})
+		if err == nil {
+			if proc != nil {
+				_ = proc.Kill()
+			}
 			t.Fatal("expected error for missing mpv binary, got nil")
 		}
 	})
