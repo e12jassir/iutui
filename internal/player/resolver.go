@@ -40,7 +40,7 @@ type StreamResolver struct {
 	sem        chan struct{}
 }
 
-// NewStreamResolver constructs a StreamResolver bounded to 3 concurrent yt-dlp lookups.
+// NewStreamResolver constructs a StreamResolver bounded to 4 concurrent yt-dlp lookups.
 func NewStreamResolver(ytdlpBin string, quality int) *StreamResolver {
 	if ytdlpBin == "" {
 		ytdlpBin = "yt-dlp"
@@ -51,7 +51,7 @@ func NewStreamResolver(ytdlpBin string, quality int) *StreamResolver {
 		cache:      make(map[string]ResolvedStream),
 		inFlight:   make(map[string]bool),
 		inFlightCh: make(map[string]chan struct{}),
-		sem:        make(chan struct{}, 3),
+		sem:        make(chan struct{}, 4),
 	}
 }
 
@@ -205,6 +205,10 @@ func (r *StreamResolver) Prefetch(ctx context.Context, v model.Video) {
 }
 
 func (r *StreamResolver) resolve(ctx context.Context, videoID string) (ResolvedStream, bool) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	r.mu.RLock()
 	q := r.quality
 	bin := r.ytdlpBin
@@ -215,6 +219,20 @@ func (r *StreamResolver) resolve(ctx context.Context, videoID string) (ResolvedS
 	if q > 0 {
 		fmtStr = fmt.Sprintf("bestvideo[height<=%d]+bestaudio/best[height<=%d]/best", q, q)
 	}
+
+	// Attempt 1: Fast cookieless android path avoids yt-dlp's slow web JS solver.
+	if st, ok := runResolve(ctx, bin, videoID, fmtStr, ""); ok {
+		return st, true
+	}
+
+	// Attempt 2: Retry with cookies only for restricted/private videos when valid.
+	if ctx.Err() == nil && isValidCookieJar(cookieJar) {
+		return runResolve(ctx, bin, videoID, fmtStr, cookieJar)
+	}
+	return ResolvedStream{}, false
+}
+
+func runResolve(ctx context.Context, bin, videoID, fmtStr, cookieJar string) (ResolvedStream, bool) {
 	target := "https://www.youtube.com/watch?v=" + videoID
 
 	args := []string{
@@ -223,10 +241,10 @@ func (r *StreamResolver) resolve(ctx context.Context, videoID string) (ResolvedS
 		"--no-check-certificates",
 		"--socket-timeout", "8",
 	}
-	if isValidCookieJar(cookieJar) {
+	if cookieJar != "" {
 		args = append(args, "--cookies", cookieJar)
 	} else {
-		args = append(args, "--extractor-args", "youtube:player_client=android,web")
+		args = append(args, "--extractor-args", "youtube:player_client=android")
 	}
 	args = append(args, "-f", fmtStr, "-g", target)
 

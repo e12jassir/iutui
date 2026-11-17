@@ -132,6 +132,10 @@ type IPCClient struct {
 	playCancel context.CancelFunc
 	step3Mu    sync.Mutex
 
+	autoplay            atomic.Bool
+	fallbackMu          sync.RWMutex
+	autoplayFallbackIDs []string
+
 	nextReqID atomic.Int64
 
 	pendingMu sync.Mutex
@@ -163,6 +167,7 @@ func NewIPCClient(opts ...IPCOption) *IPCClient {
 		pending:        make(map[int64]chan ipcResponse),
 		subs:           make(map[uint64]chan Status),
 	}
+	c.autoplay.Store(true)
 	for _, opt := range opts {
 		if opt != nil {
 			opt(c)
@@ -520,6 +525,31 @@ func (c *IPCClient) Prefetch(v model.Video) {
 	}
 }
 
+// SetAutoplay enables or disables automatic continuous queueing for single videos.
+func (c *IPCClient) SetAutoplay(enabled bool) {
+	if c == nil {
+		return
+	}
+	c.autoplay.Store(enabled)
+}
+
+// SetAutoplayFallback configures fallback video IDs used by autoplay when
+// YouTube does not return an RD Mix playlist for the active video.
+func (c *IPCClient) SetAutoplayFallback(ids []string) {
+	if c == nil {
+		return
+	}
+	copied := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if trimmed := strings.TrimSpace(id); trimmed != "" {
+			copied = append(copied, trimmed)
+		}
+	}
+	c.fallbackMu.Lock()
+	c.autoplayFallbackIDs = copied
+	c.fallbackMu.Unlock()
+}
+
 func (c *IPCClient) signalWake() {
 	if c.wakeCh == nil {
 		return
@@ -630,6 +660,8 @@ func (c *IPCClient) tryConnectImmediateCtx(ctx context.Context, maxWait time.Dur
 	}
 }
 
+const streamWaitTimeout = 2200 * time.Millisecond
+
 type resolvedPlayTarget struct {
 	targetURL           string
 	url                 string
@@ -640,6 +672,7 @@ type resolvedPlayTarget struct {
 	playlistIDs         []string
 	playlistFetched     bool
 	isMix               bool
+	isAutoplay          bool
 	launchAllowPlaylist bool
 }
 
@@ -750,8 +783,15 @@ func (c *IPCClient) resolvePlayTarget(waitCtx context.Context, v model.Video, mo
 	}
 
 	if !allowPlaylist {
+		if mode != "mix" && c.autoplay.Load() && !v.IsLive && v.ID != "" {
+			if seed := strings.TrimSpace(v.ID); seed != "" {
+				plan.isAutoplay = true
+				plan.seedID = seed
+				plan.targetURL = "https://www.youtube.com/watch?v=" + seed + "&list=RD" + seed
+			}
+		}
 		if c.resolver != nil {
-			if st, ok := c.resolver.WaitOrGet(waitCtx, v.ID, 900*time.Millisecond); ok {
+			if st, ok := c.resolver.WaitOrGet(waitCtx, v.ID, streamWaitTimeout); ok {
 				applyResolved(st)
 			}
 		}
@@ -762,7 +802,7 @@ func (c *IPCClient) resolvePlayTarget(waitCtx context.Context, v model.Video, mo
 		plan.url = "https://www.youtube.com/watch?v=" + seedID
 		plan.fallbackURL = plan.url
 		if c.resolver != nil {
-			if st, ok := c.resolver.WaitOrGet(waitCtx, seedID, 900*time.Millisecond); ok {
+			if st, ok := c.resolver.WaitOrGet(waitCtx, seedID, streamWaitTimeout); ok {
 				applyResolved(st)
 			}
 		}
@@ -777,7 +817,7 @@ func (c *IPCClient) resolvePlayTarget(waitCtx context.Context, v model.Video, mo
 		plan.fallbackURL = plan.url
 		plan.playlistIDs = ids[1:]
 		if c.resolver != nil {
-			if st, ok := c.resolver.WaitOrGet(waitCtx, plan.seedID, 900*time.Millisecond); ok {
+			if st, ok := c.resolver.WaitOrGet(waitCtx, plan.seedID, streamWaitTimeout); ok {
 				applyResolved(st)
 			}
 		}
@@ -898,7 +938,7 @@ func (c *IPCClient) tryPlayViaIPC(waitCtx context.Context, seq uint64, v model.V
 }
 
 func (c *IPCClient) scheduleMixAppend(mixCtx context.Context, seq uint64, plan resolvedPlayTarget) {
-	if !plan.isMix || plan.seedID == "" || (plan.playlistFetched && len(plan.playlistIDs) == 0) {
+	if (!plan.isMix && !plan.isAutoplay) || plan.seedID == "" || (plan.playlistFetched && len(plan.playlistIDs) == 0) {
 		return
 	}
 	c.subMu.Lock()
@@ -908,11 +948,11 @@ func (c *IPCClient) scheduleMixAppend(mixCtx context.Context, seq uint64, plan r
 	}
 	c.subMu.Unlock()
 	if canSpawn {
-		go c.appendMixTracks(mixCtx, seq, plan.targetURL, plan.seedID, plan.playlistIDs)
+		go c.appendMixTracks(mixCtx, seq, plan.targetURL, plan.seedID, plan.playlistIDs, plan.isAutoplay)
 	}
 }
 
-func (c *IPCClient) appendMixTracks(mixCtx context.Context, seq uint64, targetURL, seedID string, playlistIDs []string) {
+func (c *IPCClient) appendMixTracks(mixCtx context.Context, seq uint64, targetURL, seedID string, playlistIDs []string, isAutoplay bool) {
 	defer c.wg.Done()
 
 	if !c.isCurrentPlay(seq) || mixCtx.Err() != nil {
@@ -920,24 +960,18 @@ func (c *IPCClient) appendMixTracks(mixCtx context.Context, seq uint64, targetUR
 	}
 
 	if len(playlistIDs) == 0 {
-		playlistIDs = c.fetchPlaylistIDs(mixCtx, targetURL, 25)
+		playlistIDs = c.fetchPlaylistIDs(mixCtx, targetURL, 20)
 	}
 	if !c.isCurrentPlay(seq) || mixCtx.Err() != nil {
 		return
 	}
 
-	seen := map[string]struct{}{seedID: {}}
-	var remaining []string
-	for _, id := range playlistIDs {
-		id = strings.TrimSpace(id)
-		if id == "" {
-			continue
-		}
-		if _, dup := seen[id]; dup {
-			continue
-		}
-		seen[id] = struct{}{}
-		remaining = append(remaining, id)
+	remaining := deduplicateTrackIDs(playlistIDs, seedID)
+	if len(remaining) == 0 && isAutoplay {
+		c.fallbackMu.RLock()
+		fallbackIDs := append([]string(nil), c.autoplayFallbackIDs...)
+		c.fallbackMu.RUnlock()
+		remaining = deduplicateTrackIDs(fallbackIDs, seedID)
 	}
 	if len(remaining) == 0 {
 		return
@@ -959,6 +993,23 @@ func (c *IPCClient) appendMixTracks(mixCtx context.Context, seq uint64, targetUR
 			return
 		}
 	}
+}
+
+func deduplicateTrackIDs(rawIDs []string, excludeID string) []string {
+	seen := map[string]struct{}{excludeID: {}}
+	var out []string
+	for _, id := range rawIDs {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	return out
 }
 
 func (c *IPCClient) fetchPlaylistIDs(ctx context.Context, targetURL string, limit int) []string {
@@ -1097,6 +1148,12 @@ func (c *IPCClient) Enqueue(ctx context.Context, v model.Video) error {
 // TogglePause toggles playback pause state in mpv.
 func (c *IPCClient) TogglePause(ctx context.Context) error {
 	_, err := c.sendCommand(ctx, "cycle", "pause")
+	return err
+}
+
+// Pause pauses playback in mpv.
+func (c *IPCClient) Pause(ctx context.Context) error {
+	_, err := c.sendCommand(ctx, "set_property", "pause", true)
 	return err
 }
 

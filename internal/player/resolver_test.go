@@ -31,8 +31,8 @@ func TestNewStreamResolver_Defaults(t *testing.T) {
 	if r.quality != 1080 {
 		t.Errorf("quality = %d, want %d", r.quality, 1080)
 	}
-	if cap(r.sem) != 3 {
-		t.Errorf("sem capacity = %d, want 3", cap(r.sem))
+	if cap(r.sem) != 4 {
+		t.Errorf("sem capacity = %d, want 4", cap(r.sem))
 	}
 }
 
@@ -296,7 +296,7 @@ printf 'https://cdn.example.com/dedup.mp4\n'
 		}
 	})
 
-	t.Run("respects semaphore limit of 3 and cancels waiting goroutine on ctx Done", func(t *testing.T) {
+	t.Run("respects semaphore limit of 4 and cancels waiting goroutine on ctx Done", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		startedDir := filepath.Join(tmpDir, "started")
 		if err := os.MkdirAll(startedDir, 0o755); err != nil {
@@ -316,36 +316,36 @@ printf 'https://cdn.example.com/%%s.mp4\n' "$id"
 
 		r := NewStreamResolver(bin, 720)
 		ctx := context.Background()
-		for _, id := range []string{"v1", "v2", "v3", "v4"} {
+		for _, id := range []string{"v1", "v2", "v3", "v4", "v5"} {
 			r.Prefetch(ctx, model.Video{ID: id})
 		}
 
-		// Wait until 3 invocations have started.
+		// Wait until 4 invocations have started.
 		deadline := time.Now().Add(2 * time.Second)
 		for time.Now().Before(deadline) {
 			entries, _ := os.ReadDir(startedDir)
-			if len(entries) >= 3 {
+			if len(entries) >= 4 {
 				break
 			}
 			time.Sleep(10 * time.Millisecond)
 		}
 
-		// Give a brief window to confirm a 4th process does not start while the gate is closed.
+		// Give a brief window to confirm a 5th process does not start while the gate is closed.
 		time.Sleep(50 * time.Millisecond)
 		entries, err := os.ReadDir(startedDir)
 		if err != nil {
 			t.Fatalf("readdir started: %v", err)
 		}
-		if len(entries) != 3 {
-			t.Fatalf("active yt-dlp processes = %d, want 3 (semaphore bound)", len(entries))
+		if len(entries) != 4 {
+			t.Fatalf("active yt-dlp processes = %d, want 4 (semaphore bound)", len(entries))
 		}
 
-		// Also verify a 5th Prefetch with an already-canceled context aborts while waiting for semaphore.
+		// Also verify a 6th Prefetch with an already-canceled context aborts while waiting for semaphore.
 		canceledCtx, cancel := context.WithCancel(context.Background())
 		cancel()
-		r.Prefetch(canceledCtx, model.Video{ID: "v5-canceled"})
+		r.Prefetch(canceledCtx, model.Video{ID: "v6-canceled"})
 
-		// Release the gate and wait for v1..v4 to complete.
+		// Release the gate and wait for v1..v5 to complete.
 		if err := os.WriteFile(gateFile, []byte("ok"), 0o644); err != nil {
 			t.Fatalf("write gate file: %v", err)
 		}
@@ -356,19 +356,20 @@ printf 'https://cdn.example.com/%%s.mp4\n' "$id"
 			_, ok2 := r.GetCached("v2")
 			_, ok3 := r.GetCached("v3")
 			_, ok4 := r.GetCached("v4")
-			if ok1 && ok2 && ok3 && ok4 {
+			_, ok5 := r.GetCached("v5")
+			if ok1 && ok2 && ok3 && ok4 && ok5 {
 				break
 			}
 			time.Sleep(10 * time.Millisecond)
 		}
 
-		for _, id := range []string{"v1", "v2", "v3", "v4"} {
+		for _, id := range []string{"v1", "v2", "v3", "v4", "v5"} {
 			if _, ok := r.GetCached(id); !ok {
 				t.Errorf("expected %s to be cached after semaphore release", id)
 			}
 		}
-		if _, ok := r.GetCached("v5-canceled"); ok {
-			t.Errorf("expected v5-canceled not to be cached when context was canceled")
+		if _, ok := r.GetCached("v6-canceled"); ok {
+			t.Errorf("expected v6-canceled not to be cached when context was canceled")
 		}
 	})
 }
@@ -398,68 +399,156 @@ func TestStreamResolver_CookiesAndYTDLPBin(t *testing.T) {
 		}
 	})
 
-	t.Run("uses --cookies only when cookie jar is a non-empty regular file, otherwise uses android,web extractor args", func(t *testing.T) {
+	t.Run("cookieless android succeeds without --cookies even when valid cookie jar is set", func(t *testing.T) {
 		tmpDir := t.TempDir()
-		argsFile := filepath.Join(tmpDir, "args.txt")
+		callsFile := filepath.Join(tmpDir, "calls.log")
 		bin := writeFakeYTDLP(t, fmt.Sprintf(`
-printf '%%s\n' "$@" > %q
-printf 'https://cdn.example.com/v.mp4\n'
-`, argsFile))
+printf -- '---CALL---\n' >> %q
+printf '%%s\n' "$@" >> %q
+printf 'https://cdn.example.com/android-fast.mp4\n'
+`, callsFile, callsFile))
 
-		// Case 1: valid non-empty cookie file
 		cookieFile := filepath.Join(tmpDir, "cookies.txt")
 		if err := os.WriteFile(cookieFile, []byte("# Netscape HTTP Cookie File\n"), 0o600); err != nil {
 			t.Fatalf("write cookie jar: %v", err)
 		}
+
 		r := NewStreamResolver(bin, 720)
 		r.SetCookieJar(cookieFile)
-		if _, ok := r.resolve(context.Background(), "vid-cookie"); !ok {
-			t.Fatal("resolve with cookie file failed")
-		}
-		b, err := os.ReadFile(argsFile)
-		if err != nil {
-			t.Fatalf("read args: %v", err)
-		}
-		got := string(b)
-		if !strings.Contains(got, "--cookies\n"+cookieFile) {
-			t.Errorf("expected --cookies %s in args:\n%s", cookieFile, got)
-		}
-		if strings.Contains(got, "player_client=android,web") {
-			t.Errorf("did not expect extractor-args when valid cookie jar is set:\n%s", got)
+
+		st, ok := r.resolve(context.Background(), "vid-android-ok")
+		if !ok || st.VideoURL != "https://cdn.example.com/android-fast.mp4" {
+			t.Fatalf("resolve failed: ok=%v st=%+v", ok, st)
 		}
 
-		// Case 2: empty cookie file falls back to extractor-args
+		raw, err := os.ReadFile(callsFile)
+		if err != nil {
+			t.Fatalf("read calls: %v", err)
+		}
+		got := string(raw)
+		if gotCalls := strings.Count(got, "---CALL---"); gotCalls != 1 {
+			t.Fatalf("yt-dlp invocations = %d, want 1:\n%s", gotCalls, got)
+		}
+		if strings.Contains(got, "--cookies") {
+			t.Errorf("did not expect --cookies on fast android success:\n%s", got)
+		}
+		if !strings.Contains(got, "--extractor-args\nyoutube:player_client=android\n") {
+			t.Errorf("expected youtube:player_client=android extractor-args:\n%s", got)
+		}
+		if strings.Contains(got, "player_client=android,web") {
+			t.Errorf("did not expect web client on fast android primary path:\n%s", got)
+		}
+	})
+
+	t.Run("retries with --cookies when cookieless android fails or returns zero URLs", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		cookieFile := filepath.Join(tmpDir, "cookies.txt")
+		if err := os.WriteFile(cookieFile, []byte("# Netscape HTTP Cookie File\n"), 0o600); err != nil {
+			t.Fatalf("write cookie jar: %v", err)
+		}
+
+		cases := []struct {
+			name         string
+			attempt1Body string
+		}{
+			{
+				name:         "cookieless exits non-zero (age/member restricted)",
+				attempt1Body: "exit 1",
+			},
+			{
+				name:         "cookieless exits zero with no HTTP URLs",
+				attempt1Body: "printf 'warning only\\n'",
+			},
+		}
+
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				callsFile := filepath.Join(t.TempDir(), "calls.log")
+				bin := writeFakeYTDLP(t, fmt.Sprintf(`
+printf -- '---CALL---\n' >> %q
+printf '%%s\n' "$@" >> %q
+for a in "$@"; do
+  if [ "$a" = "--cookies" ]; then
+    printf 'https://cdn.example.com/cookie-fallback.mp4\n'
+    exit 0
+  fi
+done
+%s
+`, callsFile, callsFile, tc.attempt1Body))
+
+				r := NewStreamResolver(bin, 720)
+				r.SetCookieJar(cookieFile)
+
+				st, ok := r.resolve(context.Background(), "vid-restricted")
+				if !ok || st.VideoURL != "https://cdn.example.com/cookie-fallback.mp4" {
+					t.Fatalf("resolve fallback failed: ok=%v st=%+v", ok, st)
+				}
+
+				raw, err := os.ReadFile(callsFile)
+				if err != nil {
+					t.Fatalf("read calls: %v", err)
+				}
+				calls := strings.Split(strings.TrimPrefix(string(raw), "---CALL---\n"), "---CALL---\n")
+				if len(calls) != 2 {
+					t.Fatalf("yt-dlp invocations = %d, want 2:\n%s", len(calls), string(raw))
+				}
+				if strings.Contains(calls[0], "--cookies") || !strings.Contains(calls[0], "--extractor-args\nyoutube:player_client=android\n") {
+					t.Errorf("attempt 1 should use cookieless android:\n%s", calls[0])
+				}
+				if !strings.Contains(calls[1], "--cookies\n"+cookieFile+"\n") || strings.Contains(calls[1], "player_client=android") {
+					t.Errorf("attempt 2 should use --cookies without player_client=android:\n%s", calls[1])
+				}
+			})
+		}
+	})
+
+	t.Run("does not retry with --cookies for empty, directory, or missing cookie jar", func(t *testing.T) {
+		tmpDir := t.TempDir()
 		emptyCookie := filepath.Join(tmpDir, "empty.txt")
 		if err := os.WriteFile(emptyCookie, nil, 0o600); err != nil {
 			t.Fatalf("write empty cookie jar: %v", err)
 		}
-		r.SetCookieJar(emptyCookie)
-		if _, ok := r.resolve(context.Background(), "vid-empty-cookie"); !ok {
-			t.Fatal("resolve with empty cookie file failed")
-		}
-		b, err = os.ReadFile(argsFile)
-		if err != nil {
-			t.Fatalf("read args: %v", err)
-		}
-		got = string(b)
-		if strings.Contains(got, "--cookies") {
-			t.Errorf("did not expect --cookies for empty file:\n%s", got)
-		}
-		if !strings.Contains(got, "--extractor-args\nyoutube:player_client=android,web") {
-			t.Errorf("expected android,web extractor-args fallback:\n%s", got)
-		}
+		missingCookie := filepath.Join(tmpDir, "missing.txt")
 
-		// Case 3: directory or missing path falls back to extractor-args
-		r.SetCookieJar(tmpDir)
-		if _, ok := r.resolve(context.Background(), "vid-dir-cookie"); !ok {
-			t.Fatal("resolve with directory cookie path failed")
-		}
-		b, err = os.ReadFile(argsFile)
-		if err != nil {
-			t.Fatalf("read args: %v", err)
-		}
-		if strings.Contains(string(b), "--cookies") || !strings.Contains(string(b), "youtube:player_client=android,web") {
-			t.Errorf("expected extractor-args fallback for directory path:\n%s", string(b))
+		for _, tc := range []struct {
+			name string
+			path string
+		}{
+			{name: "empty path", path: ""},
+			{name: "empty file", path: emptyCookie},
+			{name: "directory path", path: tmpDir},
+			{name: "missing path", path: missingCookie},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				callsFile := filepath.Join(t.TempDir(), "calls.log")
+				bin := writeFakeYTDLP(t, fmt.Sprintf(`
+printf -- '---CALL---\n' >> %q
+printf '%%s\n' "$@" >> %q
+exit 1
+`, callsFile, callsFile))
+
+				r := NewStreamResolver(bin, 720)
+				r.SetCookieJar(tc.path)
+
+				if _, ok := r.resolve(context.Background(), "vid-fail"); ok {
+					t.Fatal("expected resolve to fail when cookieless fails and cookie jar is invalid")
+				}
+
+				raw, err := os.ReadFile(callsFile)
+				if err != nil {
+					t.Fatalf("read calls: %v", err)
+				}
+				got := string(raw)
+				if gotCalls := strings.Count(got, "---CALL---"); gotCalls != 1 {
+					t.Fatalf("yt-dlp invocations = %d, want 1:\n%s", gotCalls, got)
+				}
+				if strings.Contains(got, "--cookies") {
+					t.Errorf("did not expect --cookies retry:\n%s", got)
+				}
+				if !strings.Contains(got, "--extractor-args\nyoutube:player_client=android\n") {
+					t.Errorf("expected android extractor-args on single attempt:\n%s", got)
+				}
+			})
 		}
 	})
 }

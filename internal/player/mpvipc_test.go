@@ -1326,3 +1326,429 @@ func TestIPCClient_PlayClearsStickyAudioFilesBeforeLoadfile(t *testing.T) {
 		t.Fatalf("expected second loadfile for plain123456, got %v", secondLoad)
 	}
 }
+
+func TestIPCClient_AutoplayQueuesRDTracksAndFallsBackToFeed(t *testing.T) {
+	t.Run("default Autoplay=true plays single video immediately and appends deduplicated RD tracks", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		binDir := filepath.Join(tmpDir, "bin")
+		ytdlpArgsFile := filepath.Join(tmpDir, "ytdlp-autoplay.log")
+
+		ytdlp := writeStubBin(t, binDir, "yt-dlp", fmt.Sprintf(`
+printf '%%s\n' "$*" >> %q
+case "$*" in
+  *--flat-playlist*)
+    printf '{"id":"autoSeed111"}\n{"id":"autoNext001"}\n{"id":"autoNext002"}\n{"id":"autoNext001"}\n'
+    ;;
+  *)
+    printf 'https://cdn.example.com/prefetched-next.mp4\n'
+    ;;
+esac
+`, ytdlpArgsFile))
+
+		var (
+			mu    sync.Mutex
+			loads [][]string
+		)
+		srv := startTestMPVServer(t, func(conn net.Conn, cmd []any, reqID int64) {
+			if len(cmd) >= 3 && fmt.Sprint(cmd[0]) == "loadfile" {
+				mu.Lock()
+				loads = append(loads, []string{fmt.Sprint(cmd[1]), fmt.Sprint(cmd[2])})
+				mu.Unlock()
+			}
+			_ = json.NewEncoder(conn).Encode(map[string]any{
+				"error":      "success",
+				"request_id": reqID,
+			})
+		})
+
+		client := NewIPCClient(
+			WithSocketPath(srv.sockPath),
+			WithCommandTimeout(2*time.Second),
+			WithLaunchDefaults(LaunchOpts{
+				SocketPath:   srv.sockPath,
+				Mode:         "window",
+				Quality:      720,
+				FastPlayback: true,
+				YtdlpBin:     ytdlp,
+			}),
+		)
+		defer client.Close()
+
+		if err := client.Play(context.Background(), model.Video{ID: "autoSeed111", Title: "Autoplay Seed"}, "window"); err != nil {
+			t.Fatalf("Play single video failed: %v", err)
+		}
+
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			mu.Lock()
+			n := len(loads)
+			mu.Unlock()
+			if n >= 3 {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		time.Sleep(30 * time.Millisecond)
+
+		mu.Lock()
+		gotLoads := slices.Clone(loads)
+		mu.Unlock()
+
+		wantLoads := [][]string{
+			{"https://www.youtube.com/watch?v=autoSeed111", "replace"},
+			{"https://www.youtube.com/watch?v=autoNext001", "append"},
+			{"https://www.youtube.com/watch?v=autoNext002", "append"},
+		}
+		if len(gotLoads) != len(wantLoads) {
+			t.Fatalf("got loads=%v, want %v", gotLoads, wantLoads)
+		}
+		for i := range wantLoads {
+			if !slices.Equal(gotLoads[i], wantLoads[i]) {
+				t.Errorf("load[%d] = %v, want %v", i, gotLoads[i], wantLoads[i])
+			}
+		}
+
+		rawArgs, err := os.ReadFile(ytdlpArgsFile)
+		if err != nil {
+			t.Fatalf("read yt-dlp args: %v", err)
+		}
+		if !strings.Contains(string(rawArgs), "https://www.youtube.com/watch?v=autoSeed111&list=RDautoSeed111") {
+			t.Errorf("expected RD autoplay target URL in yt-dlp args, got:\n%s", string(rawArgs))
+		}
+
+		// Confirm next track (remaining[0]) was prefetched.
+		deadline = time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			if st, ok := client.resolver.GetCached("autoNext001"); ok && st.VideoURL == "https://cdn.example.com/prefetched-next.mp4" {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatal("expected remaining[0] (autoNext001) to be prefetched by autoplay")
+	})
+
+	t.Run("falls back to SetAutoplayFallback IDs when RD mix is empty", func(t *testing.T) {
+		for _, tc := range []struct {
+			name      string
+			flatReply string
+		}{
+			{
+				name:      "yt-dlp returns empty output",
+				flatReply: "exit 1",
+			},
+			{
+				name:      "yt-dlp returns only seed ID",
+				flatReply: `printf '{"id":"seedNoMix01"}\n'`,
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				tmpDir := t.TempDir()
+				binDir := filepath.Join(tmpDir, "bin")
+
+				ytdlp := writeStubBin(t, binDir, "yt-dlp", fmt.Sprintf(`
+case "$*" in
+  *--flat-playlist*)
+    %s
+    ;;
+  *)
+    printf 'https://cdn.example.com/fallback-prefetched.mp4\n'
+    ;;
+esac
+`, tc.flatReply))
+
+				var (
+					mu    sync.Mutex
+					loads [][]string
+				)
+				srv := startTestMPVServer(t, func(conn net.Conn, cmd []any, reqID int64) {
+					if len(cmd) >= 3 && fmt.Sprint(cmd[0]) == "loadfile" {
+						mu.Lock()
+						loads = append(loads, []string{fmt.Sprint(cmd[1]), fmt.Sprint(cmd[2])})
+						mu.Unlock()
+					}
+					_ = json.NewEncoder(conn).Encode(map[string]any{
+						"error":      "success",
+						"request_id": reqID,
+					})
+				})
+
+				client := NewIPCClient(
+					WithSocketPath(srv.sockPath),
+					WithCommandTimeout(2*time.Second),
+					WithLaunchDefaults(LaunchOpts{
+						SocketPath:   srv.sockPath,
+						Mode:         "window",
+						Quality:      720,
+						FastPlayback: true,
+						YtdlpBin:     ytdlp,
+					}),
+				)
+				defer client.Close()
+
+				fallback := []string{"", "  ", "seedNoMix01", "feedTrack01", "feedTrack01", "  feedTrack02  "}
+				client.SetAutoplayFallback(fallback)
+				// Mutate caller slice to verify defensive copy.
+				fallback[3] = "tampered999"
+
+				if err := client.Play(context.Background(), model.Video{ID: "seedNoMix01", Title: "No Mix Video"}, "window"); err != nil {
+					t.Fatalf("Play failed: %v", err)
+				}
+
+				deadline := time.Now().Add(3 * time.Second)
+				for time.Now().Before(deadline) {
+					mu.Lock()
+					n := len(loads)
+					mu.Unlock()
+					if n >= 3 {
+						break
+					}
+					time.Sleep(10 * time.Millisecond)
+				}
+				time.Sleep(30 * time.Millisecond)
+
+				mu.Lock()
+				gotLoads := slices.Clone(loads)
+				mu.Unlock()
+
+				wantLoads := [][]string{
+					{"https://www.youtube.com/watch?v=seedNoMix01", "replace"},
+					{"https://www.youtube.com/watch?v=feedTrack01", "append"},
+					{"https://www.youtube.com/watch?v=feedTrack02", "append"},
+				}
+				if len(gotLoads) != len(wantLoads) {
+					t.Fatalf("got loads=%v, want %v", gotLoads, wantLoads)
+				}
+				for i := range wantLoads {
+					if !slices.Equal(gotLoads[i], wantLoads[i]) {
+						t.Errorf("load[%d] = %v, want %v", i, gotLoads[i], wantLoads[i])
+					}
+				}
+			})
+		}
+	})
+
+	t.Run("SetAutoplay(false) and live streams disable automatic queuing on single videos", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		binDir := filepath.Join(tmpDir, "bin")
+		flatCallsFile := filepath.Join(tmpDir, "flat-calls.log")
+
+		ytdlp := writeStubBin(t, binDir, "yt-dlp", fmt.Sprintf(`
+case "$*" in
+  *--flat-playlist*)
+    printf 'called\n' >> %q
+    printf '{"id":"shouldNotQueue1"}\n'
+    ;;
+  *)
+    printf 'https://cdn.example.com/single.mp4\n'
+    ;;
+esac
+`, flatCallsFile))
+
+		var (
+			mu    sync.Mutex
+			loads [][]string
+		)
+		srv := startTestMPVServer(t, func(conn net.Conn, cmd []any, reqID int64) {
+			if len(cmd) >= 3 && fmt.Sprint(cmd[0]) == "loadfile" {
+				mu.Lock()
+				loads = append(loads, []string{fmt.Sprint(cmd[1]), fmt.Sprint(cmd[2])})
+				mu.Unlock()
+			}
+			_ = json.NewEncoder(conn).Encode(map[string]any{
+				"error":      "success",
+				"request_id": reqID,
+			})
+		})
+
+		client := NewIPCClient(
+			WithSocketPath(srv.sockPath),
+			WithCommandTimeout(2*time.Second),
+			WithLaunchDefaults(LaunchOpts{
+				SocketPath:   srv.sockPath,
+				Mode:         "window",
+				Quality:      720,
+				FastPlayback: true,
+				YtdlpBin:     ytdlp,
+			}),
+		)
+		defer client.Close()
+
+		client.SetAutoplayFallback([]string{"fallback001"})
+		client.SetAutoplay(false)
+
+		if err := client.Play(context.Background(), model.Video{ID: "manualVid01", Title: "Manual"}, "window"); err != nil {
+			t.Fatalf("Play manualVid01 failed: %v", err)
+		}
+
+		// Re-enable autoplay, but play a live stream: live streams must also skip autoplay queuing.
+		client.SetAutoplay(true)
+		if err := client.Play(context.Background(), model.Video{ID: "liveStream1", Title: "Live", IsLive: true}, "window"); err != nil {
+			t.Fatalf("Play liveStream1 failed: %v", err)
+		}
+
+		time.Sleep(80 * time.Millisecond)
+
+		mu.Lock()
+		gotLoads := slices.Clone(loads)
+		mu.Unlock()
+
+		wantLoads := [][]string{
+			{"https://www.youtube.com/watch?v=manualVid01", "replace"},
+			{"https://www.youtube.com/watch?v=liveStream1", "replace"},
+		}
+		if len(gotLoads) != len(wantLoads) {
+			t.Fatalf("got loads=%v, want %v", gotLoads, wantLoads)
+		}
+		for i := range wantLoads {
+			if !slices.Equal(gotLoads[i], wantLoads[i]) {
+				t.Errorf("load[%d] = %v, want %v", i, gotLoads[i], wantLoads[i])
+			}
+		}
+		if _, err := os.Stat(flatCallsFile); !os.IsNotExist(err) {
+			t.Fatalf("expected no --flat-playlist calls when autoplay disabled or live, stat err=%v", err)
+		}
+	})
+
+	t.Run("Pause sends set_property pause true and propagates IPC errors", func(t *testing.T) {
+		var (
+			mu   sync.Mutex
+			cmds [][]any
+		)
+		var failNext atomicBoolStub
+		srv := startTestMPVServer(t, func(conn net.Conn, cmd []any, reqID int64) {
+			cp := make([]any, len(cmd))
+			copy(cp, cmd)
+			mu.Lock()
+			cmds = append(cmds, cp)
+			mu.Unlock()
+
+			if failNext.get() && len(cmd) >= 2 && fmt.Sprint(cmd[0]) == "set_property" && fmt.Sprint(cmd[1]) == "pause" {
+				_ = json.NewEncoder(conn).Encode(map[string]any{
+					"error":      "property unavailable",
+					"request_id": reqID,
+				})
+				return
+			}
+			_ = json.NewEncoder(conn).Encode(map[string]any{
+				"error":      "success",
+				"request_id": reqID,
+			})
+		})
+
+		client := NewIPCClient(WithSocketPath(srv.sockPath), WithCommandTimeout(2*time.Second))
+		defer client.Close()
+
+		if err := client.Pause(context.Background()); err != nil {
+			t.Fatalf("Pause() unexpected error: %v", err)
+		}
+
+		failNext.set(true)
+		if err := client.Pause(context.Background()); err == nil {
+			t.Fatal("expected Pause() to return error on mpv IPC failure")
+		}
+
+		mu.Lock()
+		defer mu.Unlock()
+
+		found := false
+		for _, c := range cmds {
+			if len(c) == 3 && fmt.Sprint(c[0]) == "set_property" && fmt.Sprint(c[1]) == "pause" {
+				if paused, ok := c[2].(bool); ok && paused {
+					found = true
+					break
+				}
+			}
+		}
+		if !found {
+			t.Fatalf("expected set_property pause true command, got cmds=%v", cmds)
+		}
+	})
+}
+
+type atomicBoolStub struct {
+	mu sync.Mutex
+	v  bool
+}
+
+func (a *atomicBoolStub) set(v bool) {
+	a.mu.Lock()
+	a.v = v
+	a.mu.Unlock()
+}
+
+func (a *atomicBoolStub) get() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.v
+}
+
+func TestIPCClient_WaitOrGetCoalescesUpTo2200ms(t *testing.T) {
+	tmpDir := t.TempDir()
+	binDir := filepath.Join(tmpDir, "bin")
+	startedFile := filepath.Join(tmpDir, "started")
+
+	ytdlp := writeStubBin(t, binDir, "yt-dlp", fmt.Sprintf(`
+case "$*" in
+  *--flat-playlist*)
+    exit 1
+    ;;
+  *)
+    touch %q
+    sleep 1.15
+    printf 'https://cdn.example.com/coalesced-2200.mp4\n'
+    ;;
+esac
+`, startedFile))
+
+	var (
+		mu    sync.Mutex
+		loads []string
+	)
+	srv := startTestMPVServer(t, func(conn net.Conn, cmd []any, reqID int64) {
+		if len(cmd) >= 2 && fmt.Sprint(cmd[0]) == "loadfile" {
+			mu.Lock()
+			loads = append(loads, fmt.Sprint(cmd[1]))
+			mu.Unlock()
+		}
+		_ = json.NewEncoder(conn).Encode(map[string]any{
+			"error":      "success",
+			"request_id": reqID,
+		})
+	})
+
+	client := NewIPCClient(
+		WithSocketPath(srv.sockPath),
+		WithCommandTimeout(2*time.Second),
+		WithLaunchDefaults(LaunchOpts{
+			SocketPath:   srv.sockPath,
+			Mode:         "window",
+			Quality:      720,
+			FastPlayback: true,
+			YtdlpBin:     ytdlp,
+		}),
+	)
+	defer client.Close()
+
+	client.Prefetch(model.Video{ID: "warm2200vid", Title: "Warm 2200"})
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(startedFile); err == nil {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if _, err := os.Stat(startedFile); err != nil {
+		t.Fatal("prefetch did not start in time")
+	}
+
+	if err := client.Play(context.Background(), model.Video{ID: "warm2200vid", Title: "Warm 2200"}, "window"); err != nil {
+		t.Fatalf("Play failed: %v", err)
+	}
+
+	mu.Lock()
+	gotLoads := slices.Clone(loads)
+	mu.Unlock()
+	if len(gotLoads) != 1 || gotLoads[0] != "https://cdn.example.com/coalesced-2200.mp4" {
+		t.Fatalf("expected WaitOrGet 2200ms coalescing to load direct CDN URL, got loads=%v", gotLoads)
+	}
+}
