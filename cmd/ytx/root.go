@@ -15,6 +15,7 @@ import (
 	"github.com/e12jassir/ytx/internal/app"
 	"github.com/e12jassir/ytx/internal/catalog"
 	"github.com/e12jassir/ytx/internal/config"
+	"github.com/e12jassir/ytx/internal/cookies"
 	"github.com/e12jassir/ytx/internal/download"
 	"github.com/e12jassir/ytx/internal/model"
 	"github.com/e12jassir/ytx/internal/platform"
@@ -102,9 +103,47 @@ func newRootCmd() *cobra.Command {
 	return root
 }
 
+func resolveCookieJar(cfg config.Config, paths platform.Paths) string {
+	if strings.EqualFold(cfg.Cookies, "off") || cfg.Cookies == "0" || strings.EqualFold(cfg.Cookies, "false") || strings.EqualFold(cfg.Cookies, "none") {
+		return ""
+	}
+	if cfg.CookiesFile != "" {
+		if f, err := os.Open(cfg.CookiesFile); err == nil {
+			filtered, ferr := cookies.FilterNetscape(f)
+			_ = f.Close()
+			if ferr == nil && len(filtered) > 0 && paths.CacheDir != "" {
+				if err := os.MkdirAll(paths.CacheDir, 0o700); err == nil {
+					jar := filepath.Join(paths.CacheDir, "cookies.txt")
+					if err := os.WriteFile(jar, filtered, 0o600); err == nil {
+						_ = os.Chmod(jar, 0o600)
+						return jar
+					}
+				}
+			}
+		}
+	}
+	if paths.CacheDir != "" {
+		jar := filepath.Join(paths.CacheDir, "cookies.txt")
+		if info, err := os.Stat(jar); err == nil && !info.IsDir() && info.Size() > 0 {
+			return jar
+		}
+	}
+	return ""
+}
+
+func resolvePlayTarget(target string, mixFlag bool) (url string, allowPlaylist bool) {
+	trimmed := strings.TrimSpace(target)
+	if strings.HasPrefix(trimmed, "http://") || strings.HasPrefix(trimmed, "https://") {
+		return trimmed, mixFlag || strings.Contains(trimmed, "list=")
+	}
+	targetURL, allowPlaylist, _ := model.BuildTargetURL(trimmed, mixFlag)
+	return targetURL, allowPlaylist
+}
+
 func runTUI(paths platform.Paths) error {
 	cfgPath := filepath.Join(paths.ConfigDir, "config")
 	cfg, _ := config.Load(cfgPath)
+	cookieJar := resolveCookieJar(cfg, paths)
 	dlDir := cfg.DownloadDir
 	if dlDir == "" {
 		if home, err := os.UserHomeDir(); err == nil {
@@ -114,17 +153,20 @@ func runTUI(paths platform.Paths) error {
 
 	bashCat := catalog.NewBashCatalog(paths.CacheDir, paths.StateDir, "")
 	ytdlpCat := catalog.NewYTDLPCatalog(paths.CacheDir, time.Duration(cfg.CacheTTL)*time.Second, cfg.YtdlpBin)
+	ytdlpCat.CookieJarPath = cookieJar
 	cat := catalog.NewHybridCatalog(bashCat, ytdlpCat)
 
 	st := store.NewTSVStore(paths.StateDir)
 	eng := player.NewIPCClient(
 		player.WithSocketPath(paths.SocketPath),
 		player.WithLaunchDefaults(player.LaunchOpts{
-			Mode:         cfg.DefaultMode,
-			SocketPath:   paths.SocketPath,
-			Quality:      cfg.Quality,
-			Volume:       cfg.AudioVolume,
-			FastPlayback: true,
+			Mode:          cfg.DefaultMode,
+			SocketPath:    paths.SocketPath,
+			Quality:       cfg.Quality,
+			Volume:        cfg.AudioVolume,
+			CookieJarPath: cookieJar,
+			YtdlpBin:      cfg.YtdlpBin,
+			FastPlayback:  true,
 		}),
 	)
 	defer eng.Close()
@@ -155,7 +197,15 @@ func runTUI(paths platform.Paths) error {
 }
 
 func runQuickSelector(paths platform.Paths) error {
-	cat := catalog.NewBashCatalog(paths.CacheDir, paths.StateDir, "")
+	cfgPath := filepath.Join(paths.ConfigDir, "config")
+	cfg, _ := config.Load(cfgPath)
+	cookieJar := resolveCookieJar(cfg, paths)
+
+	bashCat := catalog.NewBashCatalog(paths.CacheDir, paths.StateDir, "")
+	ytdlpCat := catalog.NewYTDLPCatalog(paths.CacheDir, time.Duration(cfg.CacheTTL)*time.Second, cfg.YtdlpBin)
+	ytdlpCat.CookieJarPath = cookieJar
+	cat := catalog.NewHybridCatalog(bashCat, ytdlpCat)
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -167,20 +217,23 @@ func runQuickSelector(paths platform.Paths) error {
 	if err != nil || !ok {
 		return err
 	}
-	cfgPath := filepath.Join(paths.ConfigDir, "config")
-	cfg, _ := config.Load(cfgPath)
+	targetURL, allowPlaylist, _ := model.BuildTargetURL(chosen.ID, false)
 	return player.LaunchMPV("mpv", player.LaunchOpts{
-		VideoID:    chosen.ID,
-		URL:        "https://www.youtube.com/watch?v=" + chosen.ID,
-		Mode:       cfg.DefaultMode,
-		SocketPath: paths.SocketPath,
-		Quality:    cfg.Quality,
-		Volume:     cfg.AudioVolume,
+		VideoID:       chosen.ID,
+		URL:           targetURL,
+		AllowPlaylist: allowPlaylist,
+		Mode:          cfg.DefaultMode,
+		SocketPath:    paths.SocketPath,
+		Quality:       cfg.Quality,
+		Volume:        cfg.AudioVolume,
+		CookieJarPath: cookieJar,
+		YtdlpBin:      cfg.YtdlpBin,
+		FastPlayback:  true,
 	})
 }
 
 func newPlayCmd() *cobra.Command {
-	var audioOnly, pip, fs bool
+	var audioOnly, pip, fs, mixMode bool
 	cmd := &cobra.Command{
 		Use:   "play <video-id-or-url>",
 		Short: "Launch playback in mpv",
@@ -189,6 +242,7 @@ func newPlayCmd() *cobra.Command {
 			paths := platform.ResolvePaths()
 			cfgPath := filepath.Join(paths.ConfigDir, "config")
 			cfg, _ := config.Load(cfgPath)
+			cookieJar := resolveCookieJar(cfg, paths)
 
 			mode := cfg.DefaultMode
 			if audioOnly {
@@ -199,23 +253,25 @@ func newPlayCmd() *cobra.Command {
 				mode = "fs"
 			}
 
-			target := args[0]
-			if !strings.HasPrefix(target, "http://") && !strings.HasPrefix(target, "https://") {
-				target = "https://www.youtube.com/watch?v=" + target
-			}
+			targetURL, allowPlaylist := resolvePlayTarget(args[0], mixMode)
 
 			return player.LaunchMPV("mpv", player.LaunchOpts{
-				URL:        target,
-				Mode:       mode,
-				SocketPath: paths.SocketPath,
-				Quality:    cfg.Quality,
-				Volume:     cfg.AudioVolume,
+				URL:           targetURL,
+				AllowPlaylist: allowPlaylist,
+				Mode:          mode,
+				SocketPath:    paths.SocketPath,
+				Quality:       cfg.Quality,
+				Volume:        cfg.AudioVolume,
+				CookieJarPath: cookieJar,
+				YtdlpBin:      cfg.YtdlpBin,
+				FastPlayback:  true,
 			})
 		},
 	}
 	cmd.Flags().BoolVarP(&audioOnly, "audio", "a", false, "Audio-only playback")
 	cmd.Flags().BoolVar(&pip, "pip", false, "Picture-in-picture window")
 	cmd.Flags().BoolVar(&fs, "fs", false, "Fullscreen playback")
+	cmd.Flags().BoolVarP(&mixMode, "mix", "m", false, "Play YouTube Mix radio queue")
 	return cmd
 }
 

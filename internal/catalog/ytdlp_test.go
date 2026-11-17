@@ -3,8 +3,11 @@ package catalog
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -255,4 +258,264 @@ func TestYTDLPCatalog_SearchTSV(t *testing.T) {
 	if videos[0].ID != "vid12345" || videos[0].Title != "Go Concurrency" || videos[0].Views != "42K vistas" {
 		t.Errorf("unexpected video: %+v", videos[0])
 	}
+}
+
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+func hasArgPair(args []string, flag, val string) bool {
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == flag && args[i+1] == val {
+			return true
+		}
+	}
+	return false
+}
+
+func readRecordedArgs(t *testing.T, argsFile string) []string {
+	t.Helper()
+	raw, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("read recorded args: %v", err)
+	}
+	if len(raw) == 0 {
+		return nil
+	}
+	return strings.Split(strings.TrimSuffix(string(raw), "\x00"), "\x00")
+}
+
+func TestYTDLPCatalog_FetchArgs(t *testing.T) {
+	tests := []struct {
+		name            string
+		invoke          func(ctx context.Context, cat *YTDLPCatalog) ([]model.Video, error)
+		setupCookieJar  func(t *testing.T, dir string) string
+		quality         int
+		wantTarget      string
+		wantPlaylistEnd bool
+		wantCookies     bool
+		wantFormat      string
+	}{
+		{
+			name: "feed home bounds playlist and sets socket timeout",
+			invoke: func(ctx context.Context, cat *YTDLPCatalog) ([]model.Video, error) {
+				return cat.Feed(ctx, model.TabHome)
+			},
+			wantTarget:      "https://www.youtube.com",
+			wantPlaylistEnd: true,
+		},
+		{
+			name: "feed music bounds playlist and sets socket timeout",
+			invoke: func(ctx context.Context, cat *YTDLPCatalog) ([]model.Video, error) {
+				return cat.Feed(ctx, model.TabMusic)
+			},
+			wantTarget:      "https://www.youtube.com/channel/UC-9-kyTW8ZkZNDHQJ6FgpwQ",
+			wantPlaylistEnd: true,
+		},
+		{
+			name: "feed subscriptions bounds playlist and sets socket timeout",
+			invoke: func(ctx context.Context, cat *YTDLPCatalog) ([]model.Video, error) {
+				return cat.Feed(ctx, model.TabSubscriptions)
+			},
+			wantTarget:      "https://www.youtube.com/feed/subscriptions",
+			wantPlaylistEnd: true,
+		},
+		{
+			name: "refresh feed bounds playlist and sets socket timeout",
+			invoke: func(ctx context.Context, cat *YTDLPCatalog) ([]model.Video, error) {
+				return cat.RefreshFeed(ctx, model.TabHome)
+			},
+			wantTarget:      "https://www.youtube.com",
+			wantPlaylistEnd: true,
+		},
+		{
+			name: "search sets socket timeout without playlist end",
+			invoke: func(ctx context.Context, cat *YTDLPCatalog) ([]model.Video, error) {
+				return cat.Search(ctx, "golang")
+			},
+			wantTarget:      "ytsearch20:golang",
+			wantPlaylistEnd: false,
+		},
+		{
+			name: "search with http text does not inject playlist end",
+			invoke: func(ctx context.Context, cat *YTDLPCatalog) ([]model.Video, error) {
+				return cat.Search(ctx, "https://example.com")
+			},
+			wantTarget:      "ytsearch20:https://example.com",
+			wantPlaylistEnd: false,
+		},
+		{
+			name: "non-empty cookie jar passes --cookies on feed",
+			invoke: func(ctx context.Context, cat *YTDLPCatalog) ([]model.Video, error) {
+				return cat.Feed(ctx, model.TabHome)
+			},
+			setupCookieJar: func(t *testing.T, dir string) string {
+				t.Helper()
+				jar := filepath.Join(dir, "cookies.txt")
+				if err := os.WriteFile(jar, []byte("# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t0\tPREF\tabc\n"), 0o600); err != nil {
+					t.Fatalf("write cookie jar: %v", err)
+				}
+				return jar
+			},
+			wantTarget:      "https://www.youtube.com",
+			wantPlaylistEnd: true,
+			wantCookies:     true,
+		},
+		{
+			name: "non-empty cookie jar passes --cookies on search",
+			invoke: func(ctx context.Context, cat *YTDLPCatalog) ([]model.Video, error) {
+				return cat.Search(ctx, "golang")
+			},
+			setupCookieJar: func(t *testing.T, dir string) string {
+				t.Helper()
+				jar := filepath.Join(dir, "cookies.txt")
+				if err := os.WriteFile(jar, []byte("# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t0\tPREF\tabc\n"), 0o600); err != nil {
+					t.Fatalf("write cookie jar: %v", err)
+				}
+				return jar
+			},
+			wantTarget:      "ytsearch20:golang",
+			wantPlaylistEnd: false,
+			wantCookies:     true,
+		},
+		{
+			name: "empty cookie jar path omits --cookies",
+			invoke: func(ctx context.Context, cat *YTDLPCatalog) ([]model.Video, error) {
+				return cat.Feed(ctx, model.TabHome)
+			},
+			wantTarget:      "https://www.youtube.com",
+			wantPlaylistEnd: true,
+			wantCookies:     false,
+		},
+		{
+			name: "missing cookie jar file omits --cookies",
+			invoke: func(ctx context.Context, cat *YTDLPCatalog) ([]model.Video, error) {
+				return cat.Feed(ctx, model.TabHome)
+			},
+			setupCookieJar: func(_ *testing.T, dir string) string {
+				return filepath.Join(dir, "missing-cookies.txt")
+			},
+			wantTarget:      "https://www.youtube.com",
+			wantPlaylistEnd: true,
+			wantCookies:     false,
+		},
+		{
+			name: "zero-byte cookie jar file omits --cookies",
+			invoke: func(ctx context.Context, cat *YTDLPCatalog) ([]model.Video, error) {
+				return cat.Feed(ctx, model.TabHome)
+			},
+			setupCookieJar: func(t *testing.T, dir string) string {
+				t.Helper()
+				jar := filepath.Join(dir, "empty-cookies.txt")
+				if err := os.WriteFile(jar, nil, 0o600); err != nil {
+					t.Fatalf("write empty cookie jar: %v", err)
+				}
+				return jar
+			},
+			wantTarget:      "https://www.youtube.com",
+			wantPlaylistEnd: true,
+			wantCookies:     false,
+		},
+		{
+			name: "directory cookie jar path omits --cookies",
+			invoke: func(ctx context.Context, cat *YTDLPCatalog) ([]model.Video, error) {
+				return cat.Feed(ctx, model.TabHome)
+			},
+			setupCookieJar: func(t *testing.T, dir string) string {
+				t.Helper()
+				jarDir := filepath.Join(dir, "cookies-dir")
+				if err := os.MkdirAll(jarDir, 0o755); err != nil {
+					t.Fatalf("mkdir cookie dir: %v", err)
+				}
+				return jarDir
+			},
+			wantTarget:      "https://www.youtube.com",
+			wantPlaylistEnd: true,
+			wantCookies:     false,
+		},
+		{
+			name: "quality option preserves format selector alongside feed args",
+			invoke: func(ctx context.Context, cat *YTDLPCatalog) ([]model.Video, error) {
+				return cat.Feed(ctx, model.TabHome)
+			},
+			quality:         720,
+			wantTarget:      "https://www.youtube.com",
+			wantPlaylistEnd: true,
+			wantFormat:      BuildFormat(720),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			argsFile := filepath.Join(tmp, "args.txt")
+			script := fmt.Sprintf(
+				"args_file=%s\n: > \"$args_file\"\nfor a in \"$@\"; do\n\tprintf '%%s\\0' \"$a\" >> \"$args_file\"\ndone\nprintf '{\"id\":\"vid12345\",\"title\":\"Test Video\",\"channel\":\"Test Chan\",\"duration\":60}\\n'\n",
+				shellQuote(argsFile),
+			)
+			bin := writeFakeYTDLP(t, tmp, script)
+
+			var jarPath string
+			if tc.setupCookieJar != nil {
+				jarPath = tc.setupCookieJar(t, tmp)
+			}
+
+			cat := NewYTDLPCatalog(filepath.Join(tmp, "cache"), time.Minute, bin)
+			cat.Quality = tc.quality
+			cat.CookieJarPath = jarPath
+			defer cat.Wait()
+
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+
+			videos, err := tc.invoke(ctx, cat)
+			if err != nil {
+				t.Fatalf("invoke error: %v", err)
+			}
+			if len(videos) != 1 || videos[0].ID != "vid12345" {
+				t.Fatalf("got videos = %+v, want vid12345", videos)
+			}
+
+			args := readRecordedArgs(t, argsFile)
+			for _, baseFlag := range []string{"--flat-playlist", "--dump-json", "--no-warnings", "--ignore-errors"} {
+				if !slices.Contains(args, baseFlag) {
+					t.Errorf("args %v missing base flag %q", args, baseFlag)
+				}
+			}
+			if !hasArgPair(args, "--socket-timeout", "8") {
+				t.Errorf("args %v missing --socket-timeout 8", args)
+			}
+			if tc.wantPlaylistEnd {
+				if !hasArgPair(args, "--playlist-end", "30") {
+					t.Errorf("args %v missing --playlist-end 30", args)
+				}
+			} else if slices.Contains(args, "--playlist-end") {
+				t.Errorf("args %v unexpectedly contains --playlist-end", args)
+			}
+			if tc.wantCookies {
+				if !hasArgPair(args, "--cookies", jarPath) {
+					t.Errorf("args %v missing --cookies %q", args, jarPath)
+				}
+			} else if slices.Contains(args, "--cookies") {
+				t.Errorf("args %v unexpectedly contains --cookies", args)
+			}
+			if tc.wantFormat != "" {
+				if !hasArgPair(args, "-f", tc.wantFormat) {
+					t.Errorf("args %v missing -f %q", args, tc.wantFormat)
+				}
+			} else if slices.Contains(args, "-f") {
+				t.Errorf("args %v unexpectedly contains -f", args)
+			}
+			if len(args) == 0 || args[len(args)-1] != tc.wantTarget {
+				t.Errorf("args %v last arg = %q, want %q", args, lastArg(args), tc.wantTarget)
+			}
+		})
+	}
+}
+
+func lastArg(args []string) string {
+	if len(args) == 0 {
+		return ""
+	}
+	return args[len(args)-1]
 }

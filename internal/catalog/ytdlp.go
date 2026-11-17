@@ -112,10 +112,11 @@ type searchCacheEntry struct {
 // YTDLPCatalog implements Catalog by invoking yt-dlp with exec.CommandContext
 // and maintaining a stale-while-revalidate file cache in CacheDir.
 type YTDLPCatalog struct {
-	BinPath  string
-	CacheDir string
-	CacheTTL time.Duration
-	Quality  int
+	BinPath       string
+	CacheDir      string
+	CacheTTL      time.Duration
+	Quality       int
+	CookieJarPath string
 
 	searchMu       sync.RWMutex
 	searchCache    map[string]searchCacheEntry
@@ -281,6 +282,15 @@ func (c *YTDLPCatalog) fetchTarget(ctx context.Context, target string) ([]model.
 		"--dump-json",
 		"--no-warnings",
 		"--ignore-errors",
+		"--socket-timeout", "8",
+	}
+	if strings.HasPrefix(target, "http://") || strings.HasPrefix(target, "https://") {
+		args = append(args, "--playlist-end", "30")
+	}
+	if c.CookieJarPath != "" {
+		if info, err := os.Stat(c.CookieJarPath); err == nil && !info.IsDir() && info.Size() > 0 {
+			args = append(args, "--cookies", c.CookieJarPath)
+		}
 	}
 	if c.Quality > 0 {
 		args = append(args, "-f", BuildFormat(c.Quality))
