@@ -117,8 +117,10 @@ type YTDLPCatalog struct {
 	CacheTTL time.Duration
 	Quality  int
 
-	searchMu    sync.RWMutex
-	searchCache map[string]searchCacheEntry
+	searchMu       sync.RWMutex
+	searchCache    map[string]searchCacheEntry
+	feedMu         sync.Mutex
+	feedGeneration map[model.Tab]uint64
 
 	wg sync.WaitGroup
 }
@@ -150,6 +152,9 @@ func (c *YTDLPCatalog) Feed(ctx context.Context, tab model.Tab) ([]model.Video, 
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	c.feedMu.Lock()
+	generation := c.feedGeneration[tab]
+	c.feedMu.Unlock()
 
 	cacheFile, target, ok := ytdlpTabTarget(tab)
 	if !ok {
@@ -169,7 +174,11 @@ func (c *YTDLPCatalog) Feed(ctx context.Context, tab model.Tab) ([]model.Video, 
 				bgCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 				defer cancel()
 				if fresh, err := c.fetchTarget(bgCtx, target); err == nil && len(fresh) > 0 {
-					_ = writeCacheFile(cachePath, fresh)
+					c.feedMu.Lock()
+					if c.feedGeneration[tab] == generation {
+						_ = writeCacheFile(cachePath, fresh)
+					}
+					c.feedMu.Unlock()
 				}
 			}()
 			return videos, nil
@@ -181,7 +190,46 @@ func (c *YTDLPCatalog) Feed(ctx context.Context, tab model.Tab) ([]model.Video, 
 		return nil, err
 	}
 	if cachePath != "" && len(videos) > 0 {
-		_ = writeCacheFile(cachePath, videos)
+		c.feedMu.Lock()
+		if c.feedGeneration[tab] == generation {
+			_ = writeCacheFile(cachePath, videos)
+		}
+		c.feedMu.Unlock()
+	}
+	return videos, nil
+}
+
+// RefreshFeed bypasses cached JSON files, fetches fresh results for tab via
+// yt-dlp, writes the updated cache file when non-empty, and returns the videos.
+func (c *YTDLPCatalog) RefreshFeed(ctx context.Context, tab model.Tab) ([]model.Video, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	cacheFile, target, ok := ytdlpTabTarget(tab)
+	if !ok {
+		return nil, nil
+	}
+	c.feedMu.Lock()
+	if c.feedGeneration == nil {
+		c.feedGeneration = make(map[model.Tab]uint64)
+	}
+	c.feedGeneration[tab]++
+	generation := c.feedGeneration[tab]
+	c.feedMu.Unlock()
+
+	videos, err := c.fetchTarget(ctx, target)
+	if err != nil {
+		return nil, err
+	}
+
+	cachePath := c.cacheFilePath(cacheFile)
+	if cachePath != "" && len(videos) > 0 {
+		c.feedMu.Lock()
+		if c.feedGeneration[tab] == generation {
+			_ = writeCacheFile(cachePath, videos)
+		}
+		c.feedMu.Unlock()
 	}
 	return videos, nil
 }
@@ -353,16 +401,19 @@ func writeCacheFile(path string, videos []model.Video) error {
 }
 
 type ytdlpJSONEntry struct {
-	ID             string  `json:"id"`
-	Title          string  `json:"title"`
-	Channel        string  `json:"channel"`
-	Uploader       string  `json:"uploader"`
-	DurationString string  `json:"duration_string"`
-	Duration       float64 `json:"duration"`
-	ViewCount      int64   `json:"view_count"`
-	LiveStatus     string  `json:"live_status"`
-	IsLive         bool    `json:"is_live"`
-	Thumbnail      string  `json:"thumbnail"`
+	ID               string  `json:"id"`
+	Title            string  `json:"title"`
+	Channel          string  `json:"channel"`
+	Uploader         string  `json:"uploader"`
+	DurationString   string  `json:"duration_string"`
+	Duration         float64 `json:"duration"`
+	ViewCount        int64   `json:"view_count"`
+	UploadDate       string  `json:"upload_date"`
+	Timestamp        int64   `json:"timestamp"`
+	ReleaseTimestamp int64   `json:"release_timestamp"`
+	LiveStatus       string  `json:"live_status"`
+	IsLive           bool    `json:"is_live"`
+	Thumbnail        string  `json:"thumbnail"`
 }
 
 type ytdlpPlaylist struct {
@@ -441,15 +492,35 @@ func entryToVideo(e ytdlpJSONEntry) (model.Video, bool) {
 		views = strconv.FormatInt(e.ViewCount, 10)
 	}
 
+	published := formatEntryDate(e.UploadDate, e.Timestamp, e.ReleaseTimestamp)
+
 	return normalizeVideo(model.Video{
 		ID:        id,
 		Title:     strings.TrimSpace(e.Title),
 		Channel:   channel,
 		Duration:  dur,
 		Views:     views,
+		Published: published,
 		IsLive:    e.IsLive || e.LiveStatus == "is_live",
 		Thumbnail: strings.TrimSpace(e.Thumbnail),
 	}), true
+}
+
+func formatEntryDate(uploadDate string, ts, releaseTS int64) string {
+	d := strings.TrimSpace(uploadDate)
+	if len(d) == 8 {
+		if _, err := time.Parse("20060102", d); err == nil {
+			return d[0:4] + "-" + d[4:6] + "-" + d[6:8]
+		}
+	}
+	unixTS := ts
+	if unixTS <= 0 {
+		unixTS = releaseTS
+	}
+	if unixTS > 0 {
+		return time.Unix(unixTS, 0).UTC().Format("2006-01-02")
+	}
+	return ""
 }
 
 func formatDurationSeconds(total int) string {

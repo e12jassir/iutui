@@ -171,12 +171,12 @@ func TestParseAtomFeed(t *testing.T) {
 
 func TestFetchRSSFeed(t *testing.T) {
 	tests := []struct {
-		name       string
-		handler    http.HandlerFunc
-		timeout    time.Duration
-		wantErr    bool
-		wantCount  int
-		wantFirst  string
+		name      string
+		handler   http.HandlerFunc
+		timeout   time.Duration
+		wantErr   bool
+		wantCount int
+		wantFirst string
 	}{
 		{
 			name: "success",
