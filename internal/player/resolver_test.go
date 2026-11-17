@@ -496,6 +496,18 @@ printf 'https://cdn.example.com/seed.mp4\n'
 		}
 	})
 
+	t.Run("Prefetch normalizes RD<11char> Mix card even when IsLive is true", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		bin := writeFakeYTDLP(t, `printf 'https://cdn.example.com/live-mix-seed.mp4\n'`)
+		r := NewStreamResolver(bin, 720)
+		r.Prefetch(context.Background(), model.Video{ID: "RDliveMix1234", IsLive: true})
+		st, ok := r.WaitOrGet(context.Background(), "RDliveMix1234", 2*time.Second)
+		if !ok || st.VideoURL != "https://cdn.example.com/live-mix-seed.mp4" {
+			t.Fatalf("expected Mix card with IsLive=true to prefetch seed stream, got ok=%v st=%+v", ok, st)
+		}
+		_ = tmpDir
+	})
+
 	t.Run("WaitOrGet coalesces in-flight lookup, times out, and respects ctx cancellation", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		startedFile := filepath.Join(tmpDir, "started")

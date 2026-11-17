@@ -307,6 +307,12 @@ func normalizeVideo(v model.Video) model.Video {
 	if v.Duration == "NA" || v.Duration == "-" {
 		v.Duration = ""
 	}
+	if model.IsPlaylistID(v.ID) {
+		v.IsLive = false
+		if v.Duration == "" || strings.EqualFold(v.Duration, "live") {
+			v.Duration = "MIX"
+		}
+	}
 	return v
 }
 

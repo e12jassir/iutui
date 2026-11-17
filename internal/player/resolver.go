@@ -144,12 +144,13 @@ func (r *StreamResolver) WaitOrGet(ctx context.Context, videoID string, maxWait 
 
 // Prefetch resolves stream URLs for v in the background if not already cached or in flight.
 func (r *StreamResolver) Prefetch(ctx context.Context, v model.Video) {
-	if r == nil || v.ID == "" || v.IsLive {
+	if r == nil || v.ID == "" {
 		return
 	}
 	if seed := model.MixSeedVideoID(v.ID); seed != "" {
 		v.ID = seed
-	} else if model.IsPlaylistID(v.ID) {
+		v.IsLive = false
+	} else if v.IsLive || model.IsPlaylistID(v.ID) {
 		return
 	}
 	if _, ok := r.GetCached(v.ID); ok {

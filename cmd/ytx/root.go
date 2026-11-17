@@ -123,9 +123,24 @@ func resolveCookieJar(cfg config.Config, paths platform.Paths) string {
 		}
 	}
 	if paths.CacheDir != "" {
-		jar := filepath.Join(paths.CacheDir, "cookies.txt")
-		if info, err := os.Stat(jar); err == nil && !info.IsDir() && info.Size() > 0 {
-			return jar
+		candidates := []string{
+			filepath.Join(paths.CacheDir, "cookies.txt"),
+			filepath.Join(filepath.Dir(paths.CacheDir), "yt_terminal", "cookies.txt"),
+		}
+		var bestPath string
+		var bestMod time.Time
+		for _, candidate := range candidates {
+			info, err := os.Stat(candidate)
+			if err != nil || info.IsDir() || info.Size() <= 0 {
+				continue
+			}
+			if bestPath == "" || info.ModTime().After(bestMod) {
+				bestPath = candidate
+				bestMod = info.ModTime()
+			}
+		}
+		if bestPath != "" {
+			return bestPath
 		}
 	}
 	return ""

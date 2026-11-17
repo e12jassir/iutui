@@ -860,13 +860,17 @@ func (c *IPCClient) tryPlayViaIPC(waitCtx context.Context, seq uint64, v model.V
 		wantVid = "no"
 	}
 	_, _ = c.sendCommand(waitCtx, "set_property", "vid", wantVid)
+	_, _ = c.sendCommand(waitCtx, "set_property", "audio-files", []string{})
 	if !c.isCurrentPlay(seq) || c.ctx.Err() != nil {
 		return true
 	}
 
 	var err error
 	if plan.audioFile != "" {
-		_, err = c.sendCommand(waitCtx, "loadfile", plan.url, "replace", 0, "audio-file="+plan.audioFile)
+		_, err = c.sendCommand(waitCtx, "loadfile", plan.url, "replace", -1, map[string]any{"audio-file": plan.audioFile})
+		if err != nil && c.isCurrentPlay(seq) && c.ctx.Err() == nil && c.isConnected() {
+			_, err = c.sendCommand(waitCtx, "loadfile", plan.url, "replace", 0, "audio-file="+plan.audioFile)
+		}
 		if err != nil && c.isCurrentPlay(seq) && c.ctx.Err() == nil && c.isConnected() {
 			_, err = c.sendCommand(waitCtx, "loadfile", plan.fallbackURL, "replace")
 		}

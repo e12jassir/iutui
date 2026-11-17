@@ -635,13 +635,21 @@ func TestIPCClient_PlayStopsPreviousImmediatelyAndLatestWins(t *testing.T) {
 			cmds = append(cmds, parts)
 			mu.Unlock()
 
-			// Simulate stale cached CDN URL rejection when audio-file= is passed.
-			if len(cmd) >= 5 && fmt.Sprint(cmd[0]) == "loadfile" && strings.HasPrefix(fmt.Sprint(cmd[4]), "audio-file=") {
-				_ = json.NewEncoder(conn).Encode(map[string]any{
-					"error":      "loading failed",
-					"request_id": reqID,
-				})
-				return
+			// Simulate stale cached CDN URL rejection when audio-file option is passed.
+			if len(cmd) >= 5 && fmt.Sprint(cmd[0]) == "loadfile" {
+				hasAudioOpt := strings.HasPrefix(fmt.Sprint(cmd[4]), "audio-file=")
+				if m, ok := cmd[4].(map[string]any); ok {
+					if _, exists := m["audio-file"]; exists {
+						hasAudioOpt = true
+					}
+				}
+				if hasAudioOpt {
+					_ = json.NewEncoder(conn).Encode(map[string]any{
+						"error":      "loading failed",
+						"request_id": reqID,
+					})
+					return
+				}
 			}
 			_ = json.NewEncoder(conn).Encode(map[string]any{
 				"error":      "success",
@@ -1221,4 +1229,100 @@ printf '{"id":"plTrack0001"}\n{"id":"plTrack0002"}\n{"id":"plTrack0003"}\n'
 			}
 		}
 	})
+}
+
+func TestIPCClient_PlayClearsStickyAudioFilesBeforeLoadfile(t *testing.T) {
+	var (
+		mu   sync.Mutex
+		cmds [][]any
+	)
+	srv := startTestMPVServer(t, func(conn net.Conn, cmd []any, reqID int64) {
+		cp := make([]any, len(cmd))
+		copy(cp, cmd)
+		mu.Lock()
+		cmds = append(cmds, cp)
+		mu.Unlock()
+		_ = json.NewEncoder(conn).Encode(map[string]any{
+			"error":      "success",
+			"request_id": reqID,
+		})
+	})
+
+	client := NewIPCClient(
+		WithSocketPath(srv.sockPath),
+		WithCommandTimeout(2*time.Second),
+		WithLaunchDefaults(LaunchOpts{
+			SocketPath:   srv.sockPath,
+			Mode:         "window",
+			Quality:      720,
+			FastPlayback: true,
+		}),
+	)
+	defer client.Close()
+
+	client.resolver.mu.Lock()
+	client.resolver.cache["split123456"] = ResolvedStream{
+		VideoURL:  "https://cdn.example.com/v1.mp4",
+		AudioURL:  "https://cdn.example.com/a1.m4a",
+		ExpiresAt: time.Now().Add(5 * time.Minute),
+	}
+	client.resolver.mu.Unlock()
+
+	if err := client.Play(context.Background(), model.Video{ID: "split123456", Title: "First Split"}, "window"); err != nil {
+		t.Fatalf("first Play failed: %v", err)
+	}
+	if err := client.Play(context.Background(), model.Video{ID: "plain123456", Title: "Second Plain"}, "window"); err != nil {
+		t.Fatalf("second Play failed: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	clearCount := 0
+	var firstLoad, secondLoad []any
+	firstClearIdx, firstLoadIdx := -1, -1
+	secondClearIdx, secondLoadIdx := -1, -1
+	for i, c := range cmds {
+		if len(c) >= 3 && fmt.Sprint(c[0]) == "set_property" && fmt.Sprint(c[1]) == "audio-files" {
+			arr, ok := c[2].([]any)
+			if !ok || len(arr) != 0 {
+				t.Fatalf("expected set_property audio-files [], got %#v", c[2])
+			}
+			clearCount++
+			if firstClearIdx < 0 {
+				firstClearIdx = i
+			} else if secondClearIdx < 0 {
+				secondClearIdx = i
+			}
+		}
+		if len(c) >= 3 && fmt.Sprint(c[0]) == "loadfile" {
+			if firstLoad == nil {
+				firstLoad = c
+				firstLoadIdx = i
+			} else if secondLoad == nil {
+				secondLoad = c
+				secondLoadIdx = i
+			}
+		}
+	}
+
+	if clearCount < 2 {
+		t.Fatalf("expected audio-files [] reset before both loadfile calls (count=%d), cmds=%v", clearCount, cmds)
+	}
+	if firstClearIdx < 0 || firstLoadIdx <= firstClearIdx {
+		t.Fatalf("expected audio-files clear before first loadfile (clear=%d, load=%d)", firstClearIdx, firstLoadIdx)
+	}
+	if secondClearIdx <= firstLoadIdx || secondLoadIdx <= secondClearIdx {
+		t.Fatalf("expected audio-files clear before second loadfile (clear2=%d, load2=%d)", secondClearIdx, secondLoadIdx)
+	}
+	if len(firstLoad) < 5 {
+		t.Fatalf("expected split loadfile with per-file audio-file option map, got %v", firstLoad)
+	}
+	optsMap, ok := firstLoad[4].(map[string]any)
+	if !ok || fmt.Sprint(optsMap["audio-file"]) != "https://cdn.example.com/a1.m4a" {
+		t.Fatalf("expected loadfile option map with audio-file, got %#v", firstLoad[4])
+	}
+	if len(secondLoad) < 3 || fmt.Sprint(secondLoad[1]) != "https://www.youtube.com/watch?v=plain123456" {
+		t.Fatalf("expected second loadfile for plain123456, got %v", secondLoad)
+	}
 }

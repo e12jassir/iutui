@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -297,4 +298,30 @@ func TestFakeCatalog(t *testing.T) {
 			t.Fatalf("got %v, want %v", err, wantErr)
 		}
 	})
+}
+
+func TestNormalizeMixFeedItems(t *testing.T) {
+	input := strings.Join([]string{
+		"RDkNvTIyNpYSE\tMix - Cerati\tNA\tlive\thttps://www.youtube.com/playlist?list=RDkNvTIyNpYSE\tNA\tlive",
+		"RDdQw4w9WgXcQ\tMix - Rick\tNA\tNA\thttps://www.youtube.com/playlist?list=RDdQw4w9WgXcQ\tNA\tNA",
+		"live1234567\tReal Stream\tGamer\tNA\thttps://www.youtube.com/watch?v=live1234567\tNA\tlive",
+	}, "\n")
+	got, err := ParseTSV(strings.NewReader(input))
+	if err != nil {
+		t.Fatalf("ParseTSV failed: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("got %d rows, want 3", len(got))
+	}
+	for i := 0; i < 2; i++ {
+		if got[i].IsLive {
+			t.Errorf("row[%d] (%s) IsLive = true, want false for Mix", i, got[i].ID)
+		}
+		if got[i].Duration != "MIX" {
+			t.Errorf("row[%d] (%s) Duration = %q, want MIX", i, got[i].ID, got[i].Duration)
+		}
+	}
+	if !got[2].IsLive {
+		t.Errorf("row[2] real livestream should stay IsLive=true")
+	}
 }

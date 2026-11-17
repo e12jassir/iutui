@@ -187,6 +187,54 @@ func TestResolveCookieJar(t *testing.T) {
 			t.Fatalf("resolveCookieJar = %q, want empty for zero-byte jar", got)
 		}
 	})
+
+	t.Run("falls back to sibling yt_terminal cookies.txt when ytx jar missing", func(t *testing.T) {
+		base := t.TempDir()
+		ytxCache := filepath.Join(base, "ytx")
+		ytTermCache := filepath.Join(base, "yt_terminal")
+		if err := os.MkdirAll(ytxCache, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(ytTermCache, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		sibJar := filepath.Join(ytTermCache, "cookies.txt")
+		if err := os.WriteFile(sibJar, []byte(".youtube.com\tTRUE\t/\tTRUE\t0\tSAPISID\tsibling\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		got := resolveCookieJar(config.Config{Cookies: "auto"}, platform.Paths{CacheDir: ytxCache})
+		if got != sibJar {
+			t.Fatalf("resolveCookieJar = %q, want sibling %q", got, sibJar)
+		}
+	})
+
+	t.Run("prefers newer non-empty sibling yt_terminal cookies.txt over older ytx jar", func(t *testing.T) {
+		base := t.TempDir()
+		ytxCache := filepath.Join(base, "ytx")
+		ytTermCache := filepath.Join(base, "yt_terminal")
+		if err := os.MkdirAll(ytxCache, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(ytTermCache, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		ytxJar := filepath.Join(ytxCache, "cookies.txt")
+		sibJar := filepath.Join(ytTermCache, "cookies.txt")
+		if err := os.WriteFile(ytxJar, []byte(".youtube.com\tTRUE\t/\tTRUE\t0\tSAPISID\told\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(sibJar, []byte(".youtube.com\tTRUE\t/\tTRUE\t0\tSAPISID\tnew\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		older := time.Now().Add(-2 * time.Hour)
+		if err := os.Chtimes(ytxJar, older, older); err != nil {
+			t.Fatal(err)
+		}
+		got := resolveCookieJar(config.Config{Cookies: "auto"}, platform.Paths{CacheDir: ytxCache})
+		if got != sibJar {
+			t.Fatalf("resolveCookieJar = %q, want newer sibling %q", got, sibJar)
+		}
+	})
 }
 
 func TestResolvePlayTargetAndMixFlag(t *testing.T) {
