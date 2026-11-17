@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/e12jassir/ytx/internal/catalog"
@@ -83,7 +84,7 @@ func TestStateSearchFlowAndEscReturn(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("expected search command")
 	}
-	msg := cmd()
+	msg := runBatchForSearch(cmd)
 	s, _ = s.Update(msg)
 	if len(s.VisibleItems()) != 2 {
 		t.Fatalf("search results = %d, want 2", len(s.VisibleItems()))
@@ -399,6 +400,43 @@ func TestMouseInteractions(t *testing.T) {
 	})
 }
 
+func runBatchForSearch(cmd tea.Cmd) tea.Msg {
+	if cmd == nil {
+		return nil
+	}
+	msg := cmd()
+	batch, ok := msg.(tea.BatchMsg)
+	if !ok {
+		return msg
+	}
+	resCh := make(chan tea.Msg, len(batch))
+	count := 0
+	for _, sub := range batch {
+		if sub == nil {
+			continue
+		}
+		count++
+		go func(c tea.Cmd) {
+			resCh <- c()
+		}(sub)
+	}
+	var fallback tea.Msg
+	for i := 0; i < count; i++ {
+		m := <-resCh
+		if sd, ok := m.(SearchDoneMsg); ok {
+			return sd
+		}
+		switch m.(type) {
+		case AnimTickMsg, ToastExpiredMsg, TickMsg, nil:
+		default:
+			if fallback == nil {
+				fallback = m
+			}
+		}
+	}
+	return fallback
+}
+
 func runBatchSync(cmd tea.Cmd) {
 	if cmd == nil {
 		return
@@ -470,7 +508,7 @@ func TestMultiRoundSearchClearsPreviousAndPreventsConcat(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("expected round 1 search cmd")
 	}
-	s, _ = s.Update(cmd())
+	s, _ = s.Update(runBatchForSearch(cmd))
 	if len(s.SearchResults) != 2 {
 		t.Fatalf("round 1 results = %d, want 2", len(s.SearchResults))
 	}
@@ -505,7 +543,7 @@ func TestMultiRoundSearchClearsPreviousAndPreventsConcat(t *testing.T) {
 		t.Fatalf("expected pending=true and reset indices, got pending=%v idx=%d scroll=%d chip=%d",
 			s.SearchPending, s.ResultIdx, s.ResultScroll, s.SearchChip)
 	}
-	s, _ = s.Update(cmd())
+	s, _ = s.Update(runBatchForSearch(cmd))
 	if len(s.SearchResults) != 1 || s.SearchResults[0].ID != "pf1" {
 		t.Fatalf("round 2 results = %+v, want [pf1]", s.SearchResults)
 	}
@@ -552,7 +590,7 @@ func TestStaleAndCanceledSearchIgnoredBySeq(t *testing.T) {
 		t.Fatal("expected cmd1")
 	}
 	done1 := make(chan tea.Msg, 1)
-	go func() { done1 <- cmd1() }()
+	go func() { done1 <- runBatchForSearch(cmd1) }()
 	<-cat.started
 
 	// Restart search 2 with the exact same query "golang" while search 1 is in flight
@@ -587,7 +625,7 @@ func TestStaleAndCanceledSearchIgnoredBySeq(t *testing.T) {
 	// Now search 2 completes
 	fresh := []model.Video{{ID: "fresh", Title: "Fresh Result"}}
 	gate2 <- fresh
-	msg2 := cmd2()
+	msg2 := runBatchForSearch(cmd2)
 	<-cat.started
 	s, _ = s.Update(msg2)
 	if s.SearchPending {
@@ -736,4 +774,462 @@ func TestMixKeyTriggersMixPlayback(t *testing.T) {
 			})
 		}
 	})
+}
+
+type spyPlayerEngine struct {
+	*player.FakeEngine
+	mu               sync.Mutex
+	prefetched       []string
+	autoplayStates   []bool
+	autoplayFallback []string
+	pauseCalls       int
+}
+
+func newSpyPlayerEngine() *spyPlayerEngine {
+	return &spyPlayerEngine{FakeEngine: player.NewFakeEngine()}
+}
+
+func (e *spyPlayerEngine) Prefetch(v model.Video) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.prefetched = append(e.prefetched, v.ID)
+}
+
+func (e *spyPlayerEngine) SetAutoplay(enabled bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.autoplayStates = append(e.autoplayStates, enabled)
+}
+
+func (e *spyPlayerEngine) SetAutoplayFallback(ids []string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.autoplayFallback = append([]string(nil), ids...)
+}
+
+func (e *spyPlayerEngine) Pause(_ context.Context) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.pauseCalls++
+	return nil
+}
+
+func (e *spyPlayerEngine) snapshot() (prefetched []string, autoplayStates []bool, fallback []string, pauseCalls int) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]string(nil), e.prefetched...),
+		append([]bool(nil), e.autoplayStates...),
+		append([]string(nil), e.autoplayFallback...),
+		e.pauseCalls
+}
+
+func collectNonTickMsgs(cmd tea.Cmd, timeout time.Duration) []tea.Msg {
+	if cmd == nil {
+		return nil
+	}
+	ch := make(chan tea.Msg, 32)
+	var run func(tea.Cmd)
+	run = func(c tea.Cmd) {
+		if c == nil {
+			return
+		}
+		m := c()
+		if batch, ok := m.(tea.BatchMsg); ok {
+			var wg sync.WaitGroup
+			for _, sub := range batch {
+				if sub == nil {
+					continue
+				}
+				wg.Add(1)
+				go func(sc tea.Cmd) {
+					defer wg.Done()
+					run(sc)
+				}(sub)
+			}
+			wg.Wait()
+			return
+		}
+		if m != nil {
+			ch <- m
+		}
+	}
+	done := make(chan struct{})
+	go func() {
+		run(cmd)
+		close(done)
+	}()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	var msgs []tea.Msg
+	for {
+		select {
+		case m := <-ch:
+			switch m.(type) {
+			case AnimTickMsg, ToastExpiredMsg, TickMsg:
+				continue
+			}
+			msgs = append(msgs, m)
+		case <-done:
+			for len(ch) > 0 {
+				m := <-ch
+				switch m.(type) {
+				case AnimTickMsg, ToastExpiredMsg, TickMsg:
+					continue
+				}
+				msgs = append(msgs, m)
+			}
+			return msgs
+		case <-timer.C:
+			return msgs
+		}
+	}
+}
+
+func TestCollapsiblePlayerBarAndMouseCoords(t *testing.T) {
+	s, _, eng, _ := newTestState()
+	defer s.Close()
+	s.Width, s.Height = 120, 36
+
+	if s.HasPlayerBar() {
+		t.Fatal("expected HasPlayerBar() to be false initially")
+	}
+	if !s.Autoplay {
+		t.Fatal("expected Autoplay to default to true")
+	}
+
+	var videos []model.Video
+	for i := 0; i < 9; i++ {
+		videos = append(videos, model.Video{
+			ID:       fmt.Sprintf("v%02d", i),
+			Title:    fmt.Sprintf("Video %02d", i),
+			Channel:  "Chan",
+			Duration: "04:00",
+		})
+	}
+	s, _ = s.Update(FeedLoadedMsg{Tab: model.TabHome, Videos: videos})
+
+	// Click near the bottom (y = s.Height - 3): with collapsed player bar this must hit row 2 card 6, not player controls.
+	s, _ = s.Update(tea.MouseMsg{
+		X:      s.mainOriginX() + 2,
+		Y:      s.Height - 3,
+		Button: tea.MouseButtonLeft,
+		Action: tea.MouseActionPress,
+	})
+	if s.SelectedIdx != 6 {
+		t.Fatalf("expected click at y=%d with collapsed player bar to select idx 6, got %d", s.Height-3, s.SelectedIdx)
+	}
+	if len(eng.Calls()) != 0 {
+		t.Fatalf("expected no engine calls from main grid selection click, got %+v", eng.Calls())
+	}
+
+	// PlaySelected enters PlayLoading immediately, expanding the player bar.
+	var cmd tea.Cmd
+	s, cmd = s.PlaySelected("auto")
+	if !s.PlayLoading || s.PlayLoadingTitle != "Video 06" {
+		t.Fatalf("expected PlayLoading=true title=%q, got loading=%v title=%q", "Video 06", s.PlayLoading, s.PlayLoadingTitle)
+	}
+	if !s.HasPlayerBar() {
+		t.Fatal("expected HasPlayerBar() == true while PlayLoading")
+	}
+
+	// While player bar is visible, clicking bottom transport [▶/⏸] (x=9, y=s.Height-2) must hit player controls.
+	_, pauseCmd := s.Update(tea.MouseMsg{
+		X:      9,
+		Y:      s.Height - 2,
+		Button: tea.MouseButtonLeft,
+		Action: tea.MouseActionPress,
+	})
+	_ = collectNonTickMsgs(pauseCmd, 150*time.Millisecond)
+	_ = collectNonTickMsgs(cmd, 150*time.Millisecond)
+
+	foundTogglePause := false
+	for _, c := range eng.Calls() {
+		if c.Method == "TogglePause" {
+			foundTogglePause = true
+			break
+		}
+	}
+	if !foundTogglePause {
+		t.Fatalf("expected bottom player click while HasPlayerBar()=true to trigger TogglePause, calls=%+v", eng.Calls())
+	}
+
+	// Receiving PlayerStatusMsg{IsRunning: true} clears PlayLoading while keeping player bar visible.
+	s, _ = s.Update(PlayerStatusMsg{Status: player.Status{IsRunning: true, Title: "Video 06"}})
+	if s.PlayLoading {
+		t.Fatal("expected PlayerStatusMsg{IsRunning: true} to clear PlayLoading")
+	}
+	if !s.HasPlayerBar() {
+		t.Fatal("expected HasPlayerBar() == true when IsRunning == true")
+	}
+
+	// Stopping playback collapses player bar again.
+	s, _ = s.Update(PlayerStatusMsg{Status: player.Status{IsRunning: false}})
+	if s.HasPlayerBar() {
+		t.Fatal("expected HasPlayerBar() == false when IsRunning == false and PlayLoading == false")
+	}
+}
+
+func TestPrefetchLookaheadAndAutoplayFallback(t *testing.T) {
+	spy := newSpyPlayerEngine()
+	cat := &catalog.FakeCatalog{}
+	s := NewState(Dependencies{Catalog: cat, Engine: spy, Store: store.NewFakeStore()})
+	defer s.Close()
+
+	var videos []model.Video
+	for i := 0; i < 20; i++ {
+		v := model.Video{ID: fmt.Sprintf("id%02d", i), Title: fmt.Sprintf("Track %02d", i)}
+		if i == 2 {
+			v.IsLive = true
+		}
+		videos = append(videos, v)
+	}
+	s, _ = s.Update(FeedLoadedMsg{Tab: model.TabHome, Videos: videos})
+	prefetched, _, _, _ := spy.snapshot()
+	// FeedLoadedMsg prefetches selection (id00,id01,id02) + prefetchTop(4) (id00..id03), so id03 must be prefetched.
+	foundTop4 := false
+	for _, id := range prefetched {
+		if id == "id03" {
+			foundTop4 = true
+		}
+	}
+	if !foundTop4 {
+		t.Fatalf("expected FeedLoadedMsg prefetchTop(4) to include id03, prefetched=%v", prefetched)
+	}
+
+	spy.mu.Lock()
+	spy.prefetched = nil
+	spy.mu.Unlock()
+	s.SetSelection(5)
+	prefetched, _, _, _ = spy.snapshot()
+	if len(prefetched) != 3 || prefetched[0] != "id05" || prefetched[1] != "id06" || prefetched[2] != "id07" {
+		t.Fatalf("expected SetSelection(5) to prefetch [id05 id06 id07], got %v", prefetched)
+	}
+
+	s.SetSelection(0)
+	var cmd tea.Cmd
+	s, cmd = s.PlaySelected("auto")
+	_ = collectNonTickMsgs(cmd, 150*time.Millisecond)
+	_, autoplayStates, fallback, _ := spy.snapshot()
+	if len(autoplayStates) == 0 || !autoplayStates[len(autoplayStates)-1] {
+		t.Fatalf("expected SetAutoplay(true) on PlaySelected, got %v", autoplayStates)
+	}
+	if len(fallback) != 15 {
+		t.Fatalf("expected 15 upcoming non-live fallback IDs, got %d (%v)", len(fallback), fallback)
+	}
+	for _, id := range fallback {
+		if id == "id00" || id == "id02" {
+			t.Fatalf("fallback unexpectedly included current or live ID %q: %v", id, fallback)
+		}
+	}
+}
+
+func TestAnimTickLifecycle(t *testing.T) {
+	s, cat, _, _ := newTestState()
+	defer s.Close()
+
+	// 1. Init() with catalog starts Syncing and AnimTick lifecycle
+	initCmd := s.Init()
+	if !s.Syncing || !s.animActive || initCmd == nil {
+		t.Fatalf("expected Init() with catalog to set Syncing=true, animActive=true, non-nil cmd; got syncing=%v active=%v cmd=%v",
+			s.Syncing, s.animActive, initCmd != nil)
+	}
+	s, _ = s.Update(FeedLoadedMsg{Tab: model.TabHome, Videos: cat.Feeds[model.TabHome]})
+	s, cmd := s.Update(AnimTickMsg(time.Now()))
+	if cmd != nil || s.animActive {
+		t.Fatalf("expected AnimTickMsg to stop after initial FeedLoadedMsg, got cmd=%v active=%v", cmd != nil, s.animActive)
+	}
+
+	// 2. Syncing lifecycle via 'r'
+	s, cmd = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	if !s.Syncing || cmd == nil {
+		t.Fatalf("expected Syncing=true and non-nil cmd on 'r'")
+	}
+	s, cmd = s.Update(AnimTickMsg(time.Now()))
+	if s.AnimFrame != 1 || cmd == nil {
+		t.Fatalf("expected AnimFrame=1 and continuing tick cmd while Syncing, got frame=%d cmd=%v", s.AnimFrame, cmd != nil)
+	}
+	s, _ = s.Update(FeedLoadedMsg{Tab: model.TabHome, Videos: cat.Feeds[model.TabHome]})
+	s, cmd = s.Update(AnimTickMsg(time.Now()))
+	if cmd != nil {
+		t.Fatal("expected AnimTickMsg to stop ticking (cmd == nil) after Syncing finishes")
+	}
+
+	// 2. SearchPending lifecycle
+	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("golang")})
+	s, cmd = s.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if !s.SearchPending || cmd == nil {
+		t.Fatal("expected SearchPending=true and non-nil cmd on SubmitSearch")
+	}
+	beforeFrame := s.AnimFrame
+	s, cmd = s.Update(AnimTickMsg(time.Now()))
+	if s.AnimFrame != beforeFrame+1 || cmd == nil {
+		t.Fatalf("expected AnimFrame to advance during SearchPending")
+	}
+	s, _ = s.Update(SearchDoneMsg{Query: "golang", Seq: s.searchSeq, Videos: cat.Results["golang"]})
+	s, cmd = s.Update(AnimTickMsg(time.Now()))
+	if cmd != nil {
+		t.Fatal("expected AnimTickMsg to stop ticking after SearchDoneMsg")
+	}
+
+	// 3. PlayLoading lifecycle
+	s.View = ViewHome
+	s.SetSelection(0)
+	s, cmd = s.PlaySelected("auto")
+	if !s.PlayLoading || cmd == nil {
+		t.Fatal("expected PlayLoading=true and non-nil cmd on PlaySelected")
+	}
+	beforeFrame = s.AnimFrame
+	s, cmd = s.Update(AnimTickMsg(time.Now()))
+	if s.AnimFrame != beforeFrame+1 || cmd == nil {
+		t.Fatalf("expected AnimFrame to advance during PlayLoading")
+	}
+	s, _ = s.Update(PlayerStatusMsg{Status: player.Status{IsRunning: true, Title: "Go Concurrency"}})
+	s, cmd = s.Update(AnimTickMsg(time.Now()))
+	if cmd != nil {
+		t.Fatal("expected AnimTickMsg to stop ticking after PlayerStatusMsg{IsRunning: true}")
+	}
+}
+
+func TestStillWatchingTriggersAfterAutoplayLimitAndResumes(t *testing.T) {
+	spy := newSpyPlayerEngine()
+	cat := &catalog.FakeCatalog{
+		Feeds: map[model.Tab][]model.Video{
+			model.TabHome: {{ID: "v0", Title: "Seed Track", Duration: "03:00"}},
+		},
+	}
+	s := NewState(Dependencies{Catalog: cat, Engine: spy, Store: store.NewFakeStore()})
+	defer s.Close()
+	s, _ = s.Update(FeedLoadedMsg{Tab: model.TabHome, Videos: cat.Feeds[model.TabHome]})
+
+	// Toggle Autoplay via 'A'
+	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'A'}})
+	if s.Autoplay || s.Toast != "⏹ Autoplay: OFF" {
+		t.Fatalf("expected Autoplay=false toast=%q, got %v %q", "⏹ Autoplay: OFF", s.Autoplay, s.Toast)
+	}
+	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'A'}})
+	if !s.Autoplay || s.Toast != "🔁 Autoplay: ON" {
+		t.Fatalf("expected Autoplay=true toast=%q, got %v %q", "🔁 Autoplay: ON", s.Autoplay, s.Toast)
+	}
+
+	// Start playing Seed Track, then simulate user inactivity > 12s
+	var cmd tea.Cmd
+	s, cmd = s.PlaySelected("auto")
+	_ = collectNonTickMsgs(cmd, 150*time.Millisecond)
+	s, _ = s.Update(PlayerStatusMsg{Status: player.Status{IsRunning: true, Title: "Seed Track"}})
+	s.LastInteractionAt = time.Now().Add(-20 * time.Second)
+
+	for i := 1; i <= 7; i++ {
+		s, _ = s.Update(PlayerStatusMsg{Status: player.Status{
+			IsRunning: true,
+			Paused:    false,
+			Title:     fmt.Sprintf("Auto Track %d", i),
+		}})
+		if s.ShowStillWatching {
+			t.Fatalf("ShowStillWatching triggered early on track %d", i)
+		}
+		if s.AutoplayTracksSinceInput != i {
+			t.Fatalf("AutoplayTracksSinceInput = %d, want %d", s.AutoplayTracksSinceInput, i)
+		}
+	}
+
+	// 8th automatic track transition triggers Still Watching and deterministic Pause
+	s, cmd = s.Update(PlayerStatusMsg{Status: player.Status{
+		IsRunning: true,
+		Paused:    false,
+		Title:     "Auto Track 8",
+	}})
+	if !s.ShowStillWatching {
+		t.Fatal("expected ShowStillWatching=true on 8th automatic track transition")
+	}
+	_ = collectNonTickMsgs(cmd, 150*time.Millisecond)
+	_, _, _, pauseCalls := spy.snapshot()
+	if pauseCalls != 1 {
+		t.Fatalf("expected pauser.Pause called once, got %d", pauseCalls)
+	}
+
+	// Pressing Enter dismisses modal, resets counter, resumes playback, and sets toast
+	s, cmd = s.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if s.ShowStillWatching {
+		t.Fatal("expected ShowStillWatching=false after Enter")
+	}
+	if s.AutoplayTracksSinceInput != 0 {
+		t.Fatalf("expected AutoplayTracksSinceInput=0 after resume, got %d", s.AutoplayTracksSinceInput)
+	}
+	if s.Toast != "▶ Continuando reproducción" {
+		t.Fatalf("Toast = %q, want %q", s.Toast, "▶ Continuando reproducción")
+	}
+	_ = collectNonTickMsgs(cmd, 150*time.Millisecond)
+	resumed := false
+	for _, c := range spy.Calls() {
+		if c.Method == "TogglePause" {
+			resumed = true
+		}
+	}
+	if !resumed {
+		t.Fatalf("expected TogglePause call to resume playback, calls=%+v", spy.Calls())
+	}
+
+	// Idle >= 60 minutes with >= 1 autoplay track also triggers Still Watching; Esc keeps paused.
+	s.LastInteractionAt = time.Now().Add(-65 * time.Minute)
+	s, _ = s.Update(PlayerStatusMsg{Status: player.Status{
+		IsRunning: true,
+		Paused:    false,
+		Title:     "Auto Track 9",
+	}})
+	if !s.ShowStillWatching {
+		t.Fatal("expected ShowStillWatching=true after >=60m idle autoplay transition")
+	}
+	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if s.ShowStillWatching || s.Toast != "⏸ Reproducción en pausa" || s.AutoplayTracksSinceInput != 0 {
+		t.Fatalf("unexpected state after Esc on StillWatching: show=%v toast=%q count=%d",
+			s.ShowStillWatching, s.Toast, s.AutoplayTracksSinceInput)
+	}
+
+	// Title update within 12s grace period after user activity does NOT increment AutoplayTracksSinceInput
+	s, _ = s.Update(PlayerStatusMsg{Status: player.Status{
+		IsRunning: true,
+		Paused:    false,
+		Title:     "Normalized Title Within Grace",
+	}})
+	if s.AutoplayTracksSinceInput != 0 {
+		t.Fatalf("expected title change within 12s grace not to increment counter, got %d", s.AutoplayTracksSinceInput)
+	}
+
+	// Left mouse click dismisses StillWatching and resumes
+	s.LastInteractionAt = time.Now().Add(-65 * time.Minute)
+	s, _ = s.Update(PlayerStatusMsg{Status: player.Status{
+		IsRunning: true,
+		Paused:    false,
+		Title:     "Auto Track 10",
+	}})
+	if !s.ShowStillWatching {
+		t.Fatal("expected ShowStillWatching=true before mouse dismiss")
+	}
+	s, cmd = s.Update(tea.MouseMsg{X: 10, Y: 10, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	if s.ShowStillWatching || s.Toast != "▶ Continuando reproducción" || s.AutoplayTracksSinceInput != 0 {
+		t.Fatalf("unexpected state after mouse dismiss: show=%v toast=%q count=%d",
+			s.ShowStillWatching, s.Toast, s.AutoplayTracksSinceInput)
+	}
+	_ = collectNonTickMsgs(cmd, 150*time.Millisecond)
+
+	// Toggling 'A' inside ShowSettings flips Autoplay, and with Autoplay=false StillWatching never triggers
+	s.ShowSettings = true
+	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'A'}})
+	if s.Autoplay || !s.ShowSettings || s.Toast != "⏹ Autoplay: OFF" {
+		t.Fatalf("expected Autoplay=false inside settings modal, got autoplay=%v show=%v toast=%q",
+			s.Autoplay, s.ShowSettings, s.Toast)
+	}
+	s.ShowSettings = false
+	s.LastInteractionAt = time.Now().Add(-65 * time.Minute)
+	for i := 11; i <= 20; i++ {
+		s, _ = s.Update(PlayerStatusMsg{Status: player.Status{
+			IsRunning: true,
+			Paused:    false,
+			Title:     fmt.Sprintf("Manual Track %d", i),
+		}})
+	}
+	if s.ShowStillWatching {
+		t.Fatal("expected ShowStillWatching to remain false when Autoplay is disabled")
+	}
 }

@@ -70,7 +70,7 @@ func (s *State) handleLeftClick(x, y int) (*State, tea.Cmd) {
 			if x >= btnStart && x <= btnEnd {
 				s.Focus = FocusMain
 				s.Syncing = true
-				return s, s.loadFeedCmd(s.ActiveTab, true)
+				return s, tea.Batch(s.loadFeedCmd(s.ActiveTab, true), s.ensureAnimTick())
 			}
 			if s.Focus != FocusSearch {
 				s.Focus = FocusSearch
@@ -99,8 +99,8 @@ func (s *State) handleLeftClick(x, y int) (*State, tea.Cmd) {
 		s.Focus = FocusMain
 	}
 
-	// 2. Bottom Player panel (y == s.Height-5 .. s.Height-1)
-	if y >= s.Height-5 {
+	// 2. Bottom Player panel (y == s.Height-5 .. s.Height-1) when visible
+	if s.HasPlayerBar() && y >= s.Height-5 {
 		if y == s.Height-2 {
 			switch {
 			case x >= 2 && x <= 5:
@@ -205,7 +205,13 @@ func (s *State) handleLeftClick(x, y int) (*State, tea.Cmd) {
 	}
 
 	relY := y - 5
-	bodyH := max(1, s.Height-11)
+	bodyH := max(1, s.Height-6)
+	if s.HasPlayerBar() {
+		bodyH = max(1, s.Height-11)
+	}
+	if relY >= bodyH {
+		return s, nil
+	}
 	if s.View == ViewSearch {
 		visibleCount := max(1, bodyH/searchRowH)
 		startIdx := s.ResultScroll

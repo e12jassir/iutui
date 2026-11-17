@@ -269,3 +269,133 @@ func TestRenderHelpModalAndNilSafety(t *testing.T) {
 		}
 	})
 }
+
+func TestRenderCollapsiblePlayerBarAndToastFallback(t *testing.T) {
+	th := theme.DefaultTheme()
+	tr := thumbs.NewTextRenderer()
+
+	s := newTestState(app.ViewHome, 120, 36)
+	defer s.Close()
+	s.PlayerStatus = player.Status{IsRunning: false}
+	s.PlayLoading = false
+	s.Toast = "★ Guardado: Soda Stereo"
+
+	out := Render(s, th, tr)
+	assertBounds(t, out, 120, 36)
+	if strings.Contains(out, "Reproductor (mpv IPC") {
+		t.Fatalf("expected collapsed bottom player panel to be omitted when idle, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Guardado: Soda Stereo") {
+		t.Fatalf("expected toast to be visible on chip bar when player bar collapsed, got:\n%s", out)
+	}
+}
+
+func TestRenderLoadingAnimations(t *testing.T) {
+	th := theme.DefaultTheme()
+	tr := thumbs.NewTextRenderer()
+
+	t.Run("home_sync_animation", func(t *testing.T) {
+		s := newTestState(app.ViewHome, 120, 36)
+		defer s.Close()
+		s.PlayerStatus = player.Status{IsRunning: false}
+		s.Feeds[model.TabHome] = nil
+		s.Syncing = true
+		s.AnimFrame = 0
+		out0 := Render(s, th, tr)
+		assertBounds(t, out0, 120, 36)
+		if !strings.Contains(out0, "Conectando con YouTube...") {
+			t.Fatalf("expected loading card hint in home sync, got:\n%s", out0)
+		}
+		if !strings.Contains(out0, "[⠋]") {
+			t.Fatalf("expected animated top badge [⠋], got:\n%s", out0)
+		}
+
+		s.AnimFrame = 3
+		out3 := Render(s, th, tr)
+		assertBounds(t, out3, 120, 36)
+		if out0 == out3 {
+			t.Fatal("expected Syncing output to change across AnimFrame 0 vs 3")
+		}
+	})
+
+	t.Run("search_pending_animation", func(t *testing.T) {
+		s := newTestState(app.ViewSearch, 120, 36)
+		defer s.Close()
+		s.PlayerStatus = player.Status{IsRunning: false}
+		s.SearchResults = nil
+		s.SearchPending = true
+		s.AnimFrame = 0
+		out0 := Render(s, th, tr)
+		assertBounds(t, out0, 120, 36)
+		if !strings.Contains(out0, "Conectando con YouTube...") {
+			t.Fatalf("expected loading card hint in search pending, got:\n%s", out0)
+		}
+
+		s.AnimFrame = 3
+		out3 := Render(s, th, tr)
+		if out0 == out3 {
+			t.Fatal("expected SearchPending output to change across AnimFrame 0 vs 3")
+		}
+	})
+
+	t.Run("play_loading_player_bar", func(t *testing.T) {
+		s := newTestState(app.ViewHome, 120, 36)
+		defer s.Close()
+		s.PlayerStatus = player.Status{IsRunning: false}
+		s.PlayLoading = true
+		s.PlayLoadingTitle = "Soda Stereo - De Música Ligera"
+		s.AnimFrame = 0
+		out0 := Render(s, th, tr)
+		assertBounds(t, out0, 120, 36)
+		if !strings.Contains(out0, "Abriendo en mpv: Soda Stereo") || !strings.Contains(out0, "Abriendo...") {
+			t.Fatalf("expected instant PlayLoading player bar text, got:\n%s", out0)
+		}
+
+		s.AnimFrame = 3
+		out3 := Render(s, th, tr)
+		if out0 == out3 {
+			t.Fatal("expected PlayLoading player bar output to change across AnimFrame 0 vs 3")
+		}
+	})
+}
+
+func TestRenderStillWatchingAndSettingsAutoplay(t *testing.T) {
+	th := theme.DefaultTheme()
+	tr := thumbs.NewTextRenderer()
+
+	t.Run("still_watching_overlay", func(t *testing.T) {
+		s := newTestState(app.ViewHome, 120, 36)
+		defer s.Close()
+		s.ShowStillWatching = true
+		out := Render(s, th, tr)
+		assertBounds(t, out, 120, 36)
+		if !strings.Contains(out, "¿Todavía estás viendo?") {
+			t.Fatalf("expected Still Watching prompt in output, got:\n%s", out)
+		}
+	})
+
+	t.Run("settings_and_help_autoplay", func(t *testing.T) {
+		s := newTestState(app.ViewHome, 120, 36)
+		defer s.Close()
+		s.ShowSettings = true
+		s.Autoplay = true
+		outOn := Render(s, th, tr)
+		assertBounds(t, outOn, 120, 36)
+		if !strings.Contains(outOn, "Autoplay [A]:") || !strings.Contains(outOn, "ACTIVADO") {
+			t.Fatalf("expected Autoplay [A]: ACTIVADO in settings overlay, got:\n%s", outOn)
+		}
+		s.Autoplay = false
+		outOff := Render(s, th, tr)
+		if !strings.Contains(outOff, "DESACTIVADO") {
+			t.Fatalf("expected DESACTIVADO in settings overlay, got:\n%s", outOff)
+		}
+
+		s.ShowSettings = false
+		s.ShowHelp = true
+		outHelp := Render(s, th, tr)
+		assertBounds(t, outHelp, 120, 36)
+		if !strings.Contains(outHelp, "Activar/desactivar Autoplay") {
+			t.Fatalf("expected Autoplay shortcut in help overlay, got:\n%s", outHelp)
+		}
+	})
+}

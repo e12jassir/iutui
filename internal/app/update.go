@@ -14,10 +14,13 @@ import (
 )
 
 const (
-	searchTimeout = 45 * time.Second
-	feedTimeout   = 30 * time.Second
-	toastTTL      = 4 * time.Second
-	uiTickRate    = 250 * time.Millisecond // 4 Hz cap
+	searchTimeout           = 45 * time.Second
+	feedTimeout             = 30 * time.Second
+	toastTTL                = 4 * time.Second
+	uiTickRate              = 250 * time.Millisecond // 4 Hz cap
+	animTickRate            = 90 * time.Millisecond
+	stillWatchingTrackLimit = 8
+	stillWatchingIdleLimit  = 60 * time.Minute
 )
 
 // FeedLoadedMsg arrives when a catalog feed finishes loading.
@@ -62,6 +65,14 @@ type ToastExpiredMsg struct {
 // TickMsg drives bounded UI progress interpolation (4 Hz) when playing.
 type TickMsg time.Time
 
+// AnimTickMsg drives smooth spinner and comet loading animations while loading.
+type AnimTickMsg time.Time
+
+// PlayStartedMsg reports playback launch completion from Engine.Play.
+type PlayStartedMsg struct {
+	Err error
+}
+
 // ActionResultMsg surfaces async player or action errors/confirmations as a toast.
 type ActionResultMsg struct {
 	Info string
@@ -76,10 +87,14 @@ type DownloadDoneMsg struct {
 
 // Init starts initial feed/store loading and subscribes to player status push updates.
 func (s *State) Init() tea.Cmd {
+	if s.Deps.Catalog != nil {
+		s.Syncing = true
+	}
 	return tea.Batch(
 		s.loadFeedCmd(s.ActiveTab, false),
 		s.loadStoreCmd(),
 		s.waitPlayerStatusCmd(),
+		s.ensureAnimTick(),
 	)
 }
 
@@ -100,7 +115,7 @@ func (s *State) Update(msg tea.Msg) (*State, tea.Cmd) {
 		s.Feeds[msg.Tab] = msg.Videos
 		if msg.Tab == s.ActiveTab {
 			s.SetSelection(s.SelectedIdx)
-			s.prefetchTop(msg.Videos, 3)
+			s.prefetchTop(msg.Videos, 4)
 		}
 		return s, nil
 
@@ -119,7 +134,7 @@ func (s *State) Update(msg tea.Msg) (*State, tea.Cmd) {
 		s.ResultIdx = 0
 		s.ResultScroll = 0
 		s.SetSelection(0)
-		s.prefetchTop(msg.Videos, 3)
+		s.prefetchTop(msg.Videos, 4)
 		return s, nil
 
 	case SavedLoadedMsg:
@@ -164,10 +179,18 @@ func (s *State) Update(msg tea.Msg) (*State, tea.Cmd) {
 
 	case ActionResultMsg:
 		if msg.Err != nil {
+			s.PlayLoading = false
 			return s, s.toastCmd(fmt.Sprintf("Error: %v", msg.Err))
 		}
 		if msg.Info != "" {
 			return s, s.toastCmd(msg.Info)
+		}
+		return s, nil
+
+	case PlayStartedMsg:
+		if msg.Err != nil {
+			s.PlayLoading = false
+			return s, s.toastCmd(fmt.Sprintf("Error: %v", msg.Err))
 		}
 		return s, nil
 
@@ -185,9 +208,31 @@ func (s *State) Update(msg tea.Msg) (*State, tea.Cmd) {
 	case PlayerStatusMsg:
 		wasPlaying := s.PlayerStatus.IsRunning && !s.PlayerStatus.Paused
 		s.PlayerStatus = msg.Status
-		nowPlaying := msg.Status.IsRunning && !msg.Status.Paused
+		if msg.Status.IsRunning {
+			s.PlayLoading = false
+		}
+		if msg.Status.IsRunning && msg.Status.Title != "" && msg.Status.Title != s.lastTrackTitle {
+			if s.lastTrackTitle != "" && time.Since(s.LastInteractionAt) > 12*time.Second {
+				s.AutoplayTracksSinceInput++
+			}
+			s.lastTrackTitle = msg.Status.Title
+		}
 		cmds := []tea.Cmd{s.waitPlayerStatusCmd()}
-		if !wasPlaying && nowPlaying {
+		if s.Autoplay && !s.ShowStillWatching && msg.Status.IsRunning && !msg.Status.Paused {
+			if s.AutoplayTracksSinceInput >= stillWatchingTrackLimit ||
+				(s.AutoplayTracksSinceInput >= 1 && time.Since(s.LastInteractionAt) >= stillWatchingIdleLimit) {
+				s.ShowStillWatching = true
+				if s.Deps.Engine != nil {
+					if p, ok := s.Deps.Engine.(pauser); ok {
+						cmds = append(cmds, s.engineCmd(p.Pause, ""))
+					} else {
+						cmds = append(cmds, s.engineCmd(s.Deps.Engine.TogglePause, ""))
+					}
+				}
+			}
+		}
+		nowPlaying := msg.Status.IsRunning && !msg.Status.Paused
+		if !wasPlaying && nowPlaying && !s.ShowStillWatching {
 			cmds = append(cmds, s.tickCmd())
 		}
 		return s, tea.Batch(cmds...)
@@ -198,6 +243,14 @@ func (s *State) Update(msg tea.Msg) (*State, tea.Cmd) {
 		}
 		return s, nil
 
+	case AnimTickMsg:
+		if !s.IsAnimating() {
+			s.animActive = false
+			return s, nil
+		}
+		s.AnimFrame++
+		return s, s.animTickCmd()
+
 	case ToastExpiredMsg:
 		if msg.ID == s.ToastID {
 			s.Toast = ""
@@ -205,9 +258,24 @@ func (s *State) Update(msg tea.Msg) (*State, tea.Cmd) {
 		return s, nil
 
 	case tea.MouseMsg:
+		if s.ShowStillWatching {
+			if msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress {
+				return s.resumeStillWatching()
+			}
+			return s, nil
+		}
+		if msg.Action == tea.MouseActionPress || msg.Button == tea.MouseButtonWheelUp || msg.Button == tea.MouseButtonWheelDown {
+			s.RegisterUserActivity()
+		}
 		return s.handleMouse(msg)
 
 	case tea.KeyMsg:
+		if s.ShowStillWatching {
+			return s.handleStillWatchingKey(msg.String())
+		}
+		if k := msg.String(); k != "ctrl+c" && k != "Q" {
+			s.RegisterUserActivity()
+		}
 		return s.handleKey(msg)
 	}
 
@@ -250,6 +318,8 @@ func (s *State) handleKey(msg tea.KeyMsg) (*State, tea.Cmd) {
 			return s, nil
 		case "c", "enter", " ", "right", "l":
 			return s.CycleQuality()
+		case "A":
+			return s.ToggleAutoplay()
 		}
 		return s, nil
 	}
@@ -388,6 +458,8 @@ func (s *State) handleKey(msg tea.KeyMsg) (*State, tea.Cmd) {
 		return s.DownloadSelected(false)
 	case "c":
 		return s.CycleQuality()
+	case "A":
+		return s.ToggleAutoplay()
 	case " ":
 		return s, s.engineCmd(func(ctx context.Context) error { return s.Deps.Engine.TogglePause(ctx) }, "")
 	case "n":
@@ -404,7 +476,7 @@ func (s *State) handleKey(msg tea.KeyMsg) (*State, tea.Cmd) {
 		return s, s.engineCmd(func(ctx context.Context) error { return s.Deps.Engine.Seek(ctx, -10) }, "⏪ -10s")
 	case "r":
 		s.Syncing = true
-		return s, s.loadFeedCmd(s.ActiveTab, true)
+		return s, tea.Batch(s.loadFeedCmd(s.ActiveTab, true), s.ensureAnimTick())
 	}
 
 	return s, nil
@@ -451,7 +523,7 @@ func (s *State) SwitchTab(tab model.Tab) (*State, tea.Cmd) {
 		return s, nil
 	}
 	s.Syncing = true
-	return s, s.loadFeedCmd(tab, false)
+	return s, tea.Batch(s.loadFeedCmd(tab, false), s.ensureAnimTick())
 }
 
 func (s *State) cycleSidebarTab(delta int) (*State, tea.Cmd) {
@@ -576,13 +648,84 @@ func (s *State) SubmitSearch() (*State, tea.Cmd) {
 	ctx, cancel := context.WithTimeout(s.appCtx, searchTimeout)
 	s.searchCancel = cancel
 
-	return s, func() tea.Msg {
+	searchCmd := func() tea.Msg {
 		if s.Deps.Catalog == nil {
 			return SearchDoneMsg{Query: q, Seq: seq, Err: errors.New("catálogo no configurado")}
 		}
 		videos, err := s.Deps.Catalog.Search(ctx, q)
 		return SearchDoneMsg{Query: q, Seq: seq, Videos: videos, Err: err}
 	}
+	return s, tea.Batch(searchCmd, s.ensureAnimTick())
+}
+
+type autoplayConfigurer interface {
+	SetAutoplay(bool)
+	SetAutoplayFallback([]string)
+}
+
+type pauser interface {
+	Pause(ctx context.Context) error
+}
+
+func (s *State) upcomingFallbackIDs(limit int) []string {
+	items := s.VisibleItems()
+	if len(items) <= 1 || limit <= 0 {
+		return nil
+	}
+	cur := s.activeIdx()
+	if cur < 0 || cur >= len(items) {
+		cur = 0
+	}
+	curID := items[cur].ID
+	ids := make([]string, 0, min(limit, len(items)-1))
+	seen := map[string]bool{curID: true}
+	for off := 1; off < len(items) && len(ids) < limit; off++ {
+		cand := items[(cur+off)%len(items)]
+		if cand.IsLive || cand.ID == "" || seen[cand.ID] {
+			continue
+		}
+		seen[cand.ID] = true
+		ids = append(ids, cand.ID)
+	}
+	return ids
+}
+
+// ToggleAutoplay flips continuous autoplay mode, configures the engine if supported, and shows a toast.
+func (s *State) ToggleAutoplay() (*State, tea.Cmd) {
+	s.Autoplay = !s.Autoplay
+	if ac, ok := s.Deps.Engine.(autoplayConfigurer); ok {
+		ac.SetAutoplay(s.Autoplay)
+	}
+	msg := "⏹ Autoplay: OFF"
+	if s.Autoplay {
+		msg = "🔁 Autoplay: ON"
+	}
+	return s, s.toastCmd(msg)
+}
+
+func (s *State) resumeStillWatching() (*State, tea.Cmd) {
+	s.ShowStillWatching = false
+	s.RegisterUserActivity()
+	var resumeCmd tea.Cmd
+	if s.Deps.Engine != nil {
+		resumeCmd = s.engineCmd(func(ctx context.Context) error { return s.Deps.Engine.TogglePause(ctx) }, "")
+	}
+	return s, tea.Batch(resumeCmd, s.toastCmd("▶ Continuando reproducción"))
+}
+
+func (s *State) handleStillWatchingKey(key string) (*State, tea.Cmd) {
+	switch key {
+	case "ctrl+c":
+		s.Close()
+		return s, tea.Quit
+	case "enter", " ", "y", "s":
+		return s.resumeStillWatching()
+	case "esc", "q", "n":
+		s.ShowStillWatching = false
+		s.RegisterUserActivity()
+		return s, s.toastCmd("⏸ Reproducción en pausa")
+	}
+	return s, nil
 }
 
 // PlaySelected launches the highlighted video in the player engine and records history.
@@ -591,6 +734,17 @@ func (s *State) PlaySelected(mode string) (*State, tea.Cmd) {
 	if !ok || s.Deps.Engine == nil {
 		return s, nil
 	}
+	upcomingIDs := s.upcomingFallbackIDs(15)
+	s.PlayLoading = true
+	s.PlayLoadingTitle = v.Title
+	s.RegisterUserActivity()
+	s.lastTrackTitle = v.Title
+
+	if ac, ok := s.Deps.Engine.(autoplayConfigurer); ok {
+		ac.SetAutoplay(s.Autoplay)
+		ac.SetAutoplayFallback(upcomingIDs)
+	}
+
 	s.HistoryIDs[v.ID] = true
 	if hist, ok := s.Feeds[model.TabHistory]; ok {
 		updated := make([]model.Video, 0, len(hist)+1)
@@ -614,9 +768,9 @@ func (s *State) PlaySelected(mode string) (*State, tea.Cmd) {
 		if s.Deps.Store != nil {
 			_ = s.Deps.Store.RecordHistory(s.appCtx, v)
 		}
-		return nil
+		return PlayStartedMsg{}
 	}
-	return s, tea.Batch(toastCmd, playCmd)
+	return s, tea.Batch(toastCmd, playCmd, s.ensureAnimTick())
 }
 
 // EnqueueSelected appends the highlighted video to the player queue.
@@ -795,4 +949,18 @@ func (s *State) tickCmd() tea.Cmd {
 	return tea.Tick(uiTickRate, func(t time.Time) tea.Msg {
 		return TickMsg(t)
 	})
+}
+
+func (s *State) animTickCmd() tea.Cmd {
+	return tea.Tick(animTickRate, func(t time.Time) tea.Msg {
+		return AnimTickMsg(t)
+	})
+}
+
+func (s *State) ensureAnimTick() tea.Cmd {
+	if !s.IsAnimating() || s.animActive {
+		return nil
+	}
+	s.animActive = true
+	return s.animTickCmd()
 }

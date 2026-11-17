@@ -33,7 +33,72 @@ var (
 	spotPurple    = lipgloss.Color("#BD93F9")
 	spotDimBorder = lipgloss.Color("#374151")
 	spotDimTitle  = lipgloss.Color("#9CA3AF")
+	brailleFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 )
+
+func loadingSpinner(frame int) string {
+	if frame < 0 {
+		frame = -frame
+	}
+	return brailleFrames[frame%len(brailleFrames)]
+}
+
+func renderLoadingWave(frame, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	if frame < 0 {
+		frame = -frame
+	}
+	cometStyle := lipgloss.NewStyle().Foreground(spotPurple).Bold(true)
+	trackStyle := lipgloss.NewStyle().Foreground(spotDimBorder)
+	if width < 5 {
+		pos := frame % width
+		return trackStyle.Render(strings.Repeat("─", pos)) +
+			cometStyle.Render("●") +
+			trackStyle.Render(strings.Repeat("─", width-1-pos))
+	}
+	const cometW = 5
+	travel := width - cometW
+	if travel == 0 {
+		return cometStyle.Render("━━●━━")
+	}
+	period := 2 * travel
+	pos := frame % period
+	if pos > travel {
+		pos = period - pos
+	}
+	return trackStyle.Render(strings.Repeat("─", pos)) +
+		cometStyle.Render("━━●━━") +
+		trackStyle.Render(strings.Repeat("─", travel-pos))
+}
+
+func renderLoadingBox(title, subtitle string, frame, width, height int) string {
+	if width < 8 || height < 3 {
+		return fitBlock("", width, height)
+	}
+	boxW := min(48, max(16, width-6))
+	if boxW > width {
+		boxW = width
+	}
+	innerW := max(4, boxW-2)
+	spinner := loadingSpinner(frame)
+	header := " " + lipgloss.NewStyle().Foreground(spotPurple).Bold(true).Render(spinner+" "+truncatePlain(title, max(1, innerW-4)))
+	sub := ""
+	if strings.TrimSpace(subtitle) != "" {
+		sub = " " + lipgloss.NewStyle().Foreground(theme.Text).Render(truncatePlain(subtitle, max(1, innerW-2)))
+	}
+	wave := " " + renderLoadingWave(frame, max(4, innerW-2))
+	hint := " " + lipgloss.NewStyle().Foreground(theme.Dim).Render(truncatePlain("Conectando con YouTube...", max(1, innerW-2)))
+	content := []string{header, sub, wave, hint}
+	boxH := min(6, height)
+	if boxH < 3 {
+		boxH = 3
+	}
+	card := renderSpotatuiPanel("", content, boxW, boxH, true)
+	placed := lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, card)
+	return fitBlock(placed, width, height)
+}
 
 func renderSpotatuiPanel(title string, content []string, width, height int, focused bool) string {
 	if width < 4 {
@@ -96,9 +161,12 @@ func Render(s *app.State, th theme.Theme, tr thumbs.Renderer) string {
 	}
 
 	topBar := renderTopPanels(s, th, tr, s.Width)
-	playerBar := renderPlayerPanel(s, th, s.Width)
 
-	middleH := s.Height - 8 // top(3) + player(5)
+	hasPlayer := s.HasPlayerBar()
+	middleH := s.Height - 3 // top(3)
+	if hasPlayer {
+		middleH = s.Height - 8 // top(3) + player(5)
+	}
 	if middleH < 4 {
 		middleH = 4
 	}
@@ -119,8 +187,16 @@ func Render(s *app.State, th theme.Theme, tr thumbs.Renderer) string {
 		middle = renderMain(s, th, tr, s.Width, middleH)
 	}
 
-	frame := lipgloss.JoinVertical(lipgloss.Left, topBar, middle, playerBar)
-	if s.ShowSettings {
+	var frame string
+	if hasPlayer {
+		playerBar := renderPlayerPanel(s, th, s.Width)
+		frame = lipgloss.JoinVertical(lipgloss.Left, topBar, middle, playerBar)
+	} else {
+		frame = lipgloss.JoinVertical(lipgloss.Left, topBar, middle)
+	}
+	if s.ShowStillWatching {
+		frame = renderStillWatchingOverlay(s, s.Width, s.Height, th)
+	} else if s.ShowSettings {
 		frame = renderSettingsOverlay(s, s.Width, s.Height, th)
 	} else if s.ShowHelp {
 		frame = renderHelpOverlay(frame, s.Width, s.Height, th)
@@ -166,10 +242,12 @@ func renderTopPanels(s *app.State, th theme.Theme, tr thumbs.Renderer, width int
 	innerW := searchPanelW - 2
 
 	syncColor := theme.Muted
+	syncLabel := "[r]"
 	if s.Syncing || s.SearchPending {
-		syncColor = theme.Blue
+		syncColor = spotPurple
+		syncLabel = "[" + loadingSpinner(s.AnimFrame) + "]"
 	}
-	syncBtn := lipgloss.NewStyle().Foreground(syncColor).Render("[r]")
+	syncBtn := lipgloss.NewStyle().Foreground(syncColor).Bold(s.Syncing || s.SearchPending).Render(syncLabel)
 	textAvail := max(4, innerW-lipgloss.Width(syncBtn)-2)
 
 	var leftTxt string
@@ -242,6 +320,16 @@ func renderChips(s *app.State, th theme.Theme, width int) string {
 		}
 	}
 	line := " " + strings.Join(parts, " ")
+	if !s.HasPlayerBar() && s.Toast != "" {
+		leftW := lipgloss.Width(line)
+		avail := width - leftW - 2
+		if avail >= 8 {
+			toastTxt := truncatePlain(s.Toast, avail)
+			toastStyled := lipgloss.NewStyle().Foreground(spotPurple).Bold(true).Render(toastTxt)
+			spacer := max(1, width-leftW-lipgloss.Width(toastStyled)-1)
+			line = line + strings.Repeat(" ", spacer) + toastStyled
+		}
+	}
 	return fitBlock(line, width, 1)
 }
 
@@ -362,7 +450,7 @@ func renderMain(s *app.State, th theme.Theme, tr thumbs.Renderer, width, height 
 		title = fmt.Sprintf("%s (%d/%d)", s.ActiveTab.String(), pos, len(items))
 	}
 	if s.Syncing || s.SearchPending {
-		title += " · ⟳"
+		title += " · " + loadingSpinner(s.AnimFrame)
 	}
 
 	chips := renderChips(s, th, innerW)
@@ -380,10 +468,10 @@ func renderMain(s *app.State, th theme.Theme, tr thumbs.Renderer, width, height 
 func renderHomeGrid(s *app.State, th theme.Theme, tr thumbs.Renderer, width, height int) string {
 	items := s.VisibleItems()
 	if len(items) == 0 {
-		msg := "No hay videos en esta vista. Presiona '/' para buscar o 'r' para recargar."
 		if s.Syncing {
-			msg = "⟳ Cargando videos..."
+			return renderLoadingBox("Cargando videos...", s.ActiveTab.String(), s.AnimFrame, width, height)
 		}
+		msg := "No hay videos en esta vista. Presiona '/' para buscar o 'r' para recargar."
 		empty := lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center,
 			lipgloss.NewStyle().Foreground(theme.Muted).Render(truncatePlain(msg, max(1, width-4))))
 		return fitBlock(empty, width, height)
@@ -541,10 +629,11 @@ func channelAvatar(name string) string {
 func renderSearchList(s *app.State, th theme.Theme, tr thumbs.Renderer, width, height int) string {
 	items := s.VisibleItems()
 	if len(items) == 0 {
-		msg := fmt.Sprintf("Sin resultados para %q.", s.SearchQuery)
 		if s.SearchPending {
-			msg = fmt.Sprintf("⟳ Buscando %q...", s.SearchQuery)
-		} else if s.SearchQuery == "" {
+			return renderLoadingBox(fmt.Sprintf("Buscando %q...", s.SearchQuery), "Resultados de YouTube", s.AnimFrame, width, height)
+		}
+		msg := fmt.Sprintf("Sin resultados para %q.", s.SearchQuery)
+		if s.SearchQuery == "" {
 			msg = "Presiona '/' para buscar videos en YouTube."
 		}
 		empty := lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center,
@@ -652,6 +741,9 @@ func renderPlayerPanel(s *app.State, th theme.Theme, width int) string {
 		volStr = "75%"
 	}
 	panelTitle := fmt.Sprintf("Reproductor (mpv IPC · %s %s · Vol: %s)", icon, stateLabel, volStr)
+	if !s.PlayerStatus.IsRunning && s.PlayLoading {
+		panelTitle = "Reproductor (mpv IPC · " + loadingSpinner(s.AnimFrame) + " Abriendo...)"
+	}
 
 	// Row 1: selected/active track on the left, toast or queue count on the right.
 	rightText := s.Toast
@@ -665,7 +757,9 @@ func renderPlayerPanel(s *app.State, th theme.Theme, width int) string {
 	rightStyled := lipgloss.NewStyle().Foreground(spotPurple).Bold(s.Toast != "").Render(" " + truncatePlain(rightText, max(10, innerW/3)) + " ")
 
 	trackLabel := "Sin reproducción activa"
-	if s.PlayerStatus.Title != "" {
+	if !s.PlayerStatus.IsRunning && s.PlayLoading {
+		trackLabel = loadingSpinner(s.AnimFrame) + " Abriendo en mpv: " + s.PlayLoadingTitle
+	} else if s.PlayerStatus.Title != "" {
 		trackLabel = icon + " " + s.PlayerStatus.Title
 		if ch := findChannelForTitle(s, s.PlayerStatus.Title); ch != "" {
 			trackLabel += " · " + ch
@@ -677,7 +771,7 @@ func renderPlayerPanel(s *app.State, th theme.Theme, width int) string {
 		}
 	}
 	availLeft := max(8, innerW-lipgloss.Width(rightStyled)-1)
-	leftStyled := lipgloss.NewStyle().Foreground(theme.Text).Bold(s.PlayerStatus.IsRunning).Render(" " + truncatePlain(trackLabel, availLeft))
+	leftStyled := lipgloss.NewStyle().Foreground(theme.Text).Bold(s.PlayerStatus.IsRunning || s.PlayLoading).Render(" " + truncatePlain(trackLabel, availLeft))
 	spacer1 := max(0, innerW-lipgloss.Width(leftStyled)-lipgloss.Width(rightStyled))
 	row1 := leftStyled + strings.Repeat(" ", spacer1) + rightStyled
 
@@ -685,23 +779,28 @@ func renderPlayerPanel(s *app.State, th theme.Theme, width int) string {
 	posStr := formatClock(s.PlayerStatus.TimePos)
 	durStr := formatClock(s.PlayerStatus.Duration)
 	barW := max(8, innerW-len(posStr)-len(durStr)-6)
-	ratio := 0.0
-	if s.PlayerStatus.IsRunning && s.PlayerStatus.Duration > 0 {
-		ratio = s.PlayerStatus.TimePos / s.PlayerStatus.Duration
-		if ratio < 0 {
-			ratio = 0
+	var progBar string
+	if !s.PlayerStatus.IsRunning && s.PlayLoading {
+		progBar = renderLoadingWave(s.AnimFrame, barW)
+	} else {
+		ratio := 0.0
+		if s.PlayerStatus.IsRunning && s.PlayerStatus.Duration > 0 {
+			ratio = s.PlayerStatus.TimePos / s.PlayerStatus.Duration
+			if ratio < 0 {
+				ratio = 0
+			}
+			if ratio > 1 {
+				ratio = 1
+			}
 		}
-		if ratio > 1 {
-			ratio = 1
+		filled := int(ratio * float64(barW))
+		if filled > barW {
+			filled = barW
 		}
+		rem := barW - filled
+		progBar = lipgloss.NewStyle().Foreground(spotPurple).Render(strings.Repeat("━", filled)) +
+			lipgloss.NewStyle().Foreground(spotDimBorder).Render(strings.Repeat("─", rem))
 	}
-	filled := int(ratio * float64(barW))
-	if filled > barW {
-		filled = barW
-	}
-	rem := barW - filled
-	progBar := lipgloss.NewStyle().Foreground(spotPurple).Render(strings.Repeat("━", filled)) +
-		lipgloss.NewStyle().Foreground(spotDimBorder).Render(strings.Repeat("─", rem))
 	row2 := " " + lipgloss.NewStyle().Foreground(theme.Muted).Render(posStr) + "  " + progBar + "  " + lipgloss.NewStyle().Foreground(theme.Muted).Render(durStr)
 
 	// Row 3: minimalist transport controls + key hints (no heavy emojis).
@@ -728,15 +827,20 @@ func renderSettingsOverlay(s *app.State, width, height int, th theme.Theme) stri
 	if s.Quality > 0 {
 		qLabel = fmt.Sprintf("%dp", s.Quality)
 	}
+	autoplayLabel := "DESACTIVADO"
+	if s.Autoplay {
+		autoplayLabel = "ACTIVADO"
+	}
 	rows := []string{
 		title,
 		"",
 		fmt.Sprintf("  Calidad máxima [c]:   %s", qLabel),
+		fmt.Sprintf("  Autoplay [A]:         %s", autoplayLabel),
 		"  Config archivo:       ~/.config/yt/config",
 		"  Carpeta descargas:    ~/Videos/yt",
 		"  Reproductor:          mpv IPC + prefetch HD",
 		"",
-		"  [c / Enter] Cambiar calidad   [Esc / S] Cerrar",
+		"  [c] Calidad  [A] Autoplay  [Esc] Cerrar",
 	}
 	boxW := min(60, max(32, width-8))
 	trimmed := make([]string, 0, len(rows))
@@ -744,6 +848,35 @@ func renderSettingsOverlay(s *app.State, width, height int, th theme.Theme) stri
 		trimmed = append(trimmed, truncateStyledLine(r, boxW-4))
 	}
 	modal := th.Toast.Width(boxW - 2).Render(strings.Join(trimmed, "\n"))
+	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, modal)
+}
+
+func renderStillWatchingOverlay(s *app.State, width, height int, th theme.Theme) string {
+	title := lipgloss.NewStyle().Foreground(spotPurple).Bold(true).Render("⏸ ¿Todavía estás viendo?")
+	track := strings.TrimSpace(s.PlayerStatus.Title)
+	if track == "" {
+		track = strings.TrimSpace(s.PlayLoadingTitle)
+	}
+	rows := []string{
+		title,
+		"",
+		"  La reproducción automática lleva varios videos seguidos",
+		"  sin actividad reciente y se pausó automáticamente.",
+	}
+	if track != "" {
+		rows = append(rows, "", "  En pausa: "+truncatePlain(track, 46))
+	}
+	rows = append(rows,
+		"",
+		"  [Enter / Space] Continuar viendo",
+		"  [Esc / q]       Mantener en pausa",
+	)
+	boxW := min(62, max(34, width-8))
+	trimmed := make([]string, 0, len(rows))
+	for _, r := range rows {
+		trimmed = append(trimmed, truncateStyledLine(r, boxW-4))
+	}
+	modal := th.Toast.BorderForeground(spotPurple).Width(boxW - 2).Render(strings.Join(trimmed, "\n"))
 	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, modal)
 }
 
@@ -759,6 +892,7 @@ func renderHelpOverlay(_ string, width, height int, th theme.Theme) string {
 		"  , / . · - / +   Retroceder/Avanzar 10s · Volumen ±5%",
 		"  w / q / d       Guardar (★) · Cola · Descargar",
 		"  c               Cambiar calidad (MAX/1080/720/480)",
+		"  A               Activar/desactivar Autoplay",
 		"  [ / ] · Tab     Cambiar chip · Foco sidebar",
 		"  1..5 / / / r    Pestañas · Buscar · Recargar",
 		"  Esc · ? / Q     Volver/Cerrar · Ayuda · Salir",

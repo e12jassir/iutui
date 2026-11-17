@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"strings"
+	"time"
 
 	"github.com/e12jassir/ytx/internal/catalog"
 	"github.com/e12jassir/ytx/internal/model"
@@ -96,12 +97,23 @@ type State struct {
 	Toast   string
 	ToastID int
 
-	ShowHelp     bool
-	ShowSettings bool
-	Quality      int
-	Width        int
-	Height       int
-	Ready        bool
+	ShowHelp          bool
+	ShowSettings      bool
+	ShowStillWatching bool
+	Autoplay          bool
+	Quality           int
+	Width             int
+	Height            int
+	Ready             bool
+
+	LastInteractionAt        time.Time
+	AutoplayTracksSinceInput int
+	lastTrackTitle           string
+
+	PlayLoading      bool
+	PlayLoadingTitle string
+	AnimFrame        int
+	animActive       bool
 
 	searchCancel context.CancelFunc
 	searchSeq    uint64
@@ -114,17 +126,35 @@ type State struct {
 func NewState(deps Dependencies) *State {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &State{
-		Deps:       deps,
-		View:       ViewHome,
-		ActiveTab:  model.TabHome,
-		Focus:      FocusMain,
-		Quality:    deps.InitialQuality,
-		Feeds:      make(map[model.Tab][]model.Video),
-		SavedIDs:   make(map[string]bool),
-		HistoryIDs: make(map[string]bool),
-		appCtx:     ctx,
-		appCancel:  cancel,
+		Deps:              deps,
+		View:              ViewHome,
+		ActiveTab:         model.TabHome,
+		Focus:             FocusMain,
+		Autoplay:          true,
+		Quality:           deps.InitialQuality,
+		Feeds:             make(map[model.Tab][]model.Video),
+		SavedIDs:          make(map[string]bool),
+		HistoryIDs:        make(map[string]bool),
+		LastInteractionAt: time.Now(),
+		appCtx:            ctx,
+		appCancel:         cancel,
 	}
+}
+
+// HasPlayerBar reports whether the bottom player bar should be visible.
+func (s *State) HasPlayerBar() bool {
+	return s.PlayerStatus.IsRunning || s.PlayLoading
+}
+
+// IsAnimating reports whether any loading/syncing animation is active.
+func (s *State) IsAnimating() bool {
+	return s.Syncing || s.SearchPending || s.PlayLoading
+}
+
+// RegisterUserActivity records a user interaction and resets the idle autoplay counter.
+func (s *State) RegisterUserActivity() {
+	s.LastInteractionAt = time.Now()
+	s.AutoplayTracksSinceInput = 0
 }
 
 // Close releases background contexts and the player engine.
@@ -209,6 +239,9 @@ func (s *State) SetSelection(idx int) {
 		p.Prefetch(items[idx])
 		if idx+1 < len(items) {
 			p.Prefetch(items[idx+1])
+		}
+		if idx+2 < len(items) {
+			p.Prefetch(items[idx+2])
 		}
 	}
 }
