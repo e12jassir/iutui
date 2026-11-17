@@ -20,21 +20,24 @@ import (
 )
 
 var (
-	thumbCache       = make(map[string]string)
-	thumbCacheMu     sync.RWMutex
-	fetchingMap      = make(map[string]bool)
-	fetchingMu       sync.Mutex
-	kittyUploaded    = make(map[uint32]bool)
-	kittyUploadMu    sync.Mutex
+	thumbCache    = make(map[string]string)
+	thumbCacheMu  sync.RWMutex
+	fetchingMap   = make(map[string]bool)
+	fetchingMu    sync.Mutex
+	kittyUploaded = make(map[uint32]bool)
+	kittyUploadMu sync.Mutex
 )
 
-// kittyDiacritics maps indices 0..39 to Kitty's official row/column combining diacritics for U+10EEEE placeholders.
+// kittyDiacritics maps indices 0..63 to Kitty's official row/column combining diacritics for U+10EEEE placeholders.
 var kittyDiacritics = []rune{
 	0x0305, 0x030D, 0x030E, 0x0310, 0x0312, 0x033D, 0x033E, 0x033F,
 	0x0346, 0x034A, 0x034B, 0x034C, 0x0350, 0x0351, 0x0352, 0x0357,
 	0x035B, 0x0363, 0x0364, 0x0365, 0x0366, 0x0367, 0x0368, 0x0369,
 	0x036A, 0x036B, 0x036C, 0x036D, 0x036E, 0x036F, 0x0483, 0x0484,
 	0x0485, 0x0486, 0x0487, 0x0592, 0x0593, 0x0594, 0x0595, 0x0597,
+	0x0598, 0x0599, 0x059A, 0x059B, 0x059C, 0x059D, 0x059E, 0x059F,
+	0x05A0, 0x05A1, 0x05A3, 0x05A4, 0x05A5, 0x05A6, 0x05A7, 0x05A8,
+	0x05A9, 0x05AA, 0x05AB, 0x05AC, 0x05AD, 0x05AE, 0x05AF, 0x05C4,
 }
 
 // isKittyGraphicsSupported returns true when running inside Kitty or Ghostty terminal.
@@ -187,6 +190,10 @@ func renderKittyPlaceholder(id, path string, cols, rows int) (string, error) {
 		kittyUploadMu.Unlock()
 	}
 
+	return formatKittyPlaceholders(imgID, cols, rows), nil
+}
+
+func formatKittyPlaceholders(imgID uint32, cols, rows int) string {
 	rColor := (imgID >> 16) & 0xFF
 	gColor := (imgID >> 8) & 0xFF
 	bColor := imgID & 0xFF
@@ -207,7 +214,76 @@ func renderKittyPlaceholder(id, path string, cols, rows int) (string, error) {
 		lines = append(lines, sb.String())
 	}
 
-	return strings.Join(lines, "\n"), nil
+	return strings.Join(lines, "\n")
+}
+
+// RenderBrandLogo renders a crisp antialiased YouTube play-badge + wordmark PNG
+// via Kitty Unicode placeholders for Ghostty/Kitty, or returns "" when unsupported.
+func RenderBrandLogo(cols, rows int) string {
+	if !isKittyGraphicsSupported() || cols <= 0 || rows <= 0 || cols > len(kittyDiacritics) || rows > len(kittyDiacritics) {
+		return ""
+	}
+	cacheKey := fmt.Sprintf("__brand_logo_%dx%d", cols, rows)
+	thumbCacheMu.RLock()
+	cached, ok := thumbCache[cacheKey]
+	thumbCacheMu.RUnlock()
+	if ok {
+		return cached
+	}
+
+	const brandImgID uint32 = 0x595458 // "YTX"
+	kittyUploadMu.Lock()
+	uploaded := kittyUploaded[brandImgID]
+	kittyUploadMu.Unlock()
+
+	if !uploaded {
+		pngBytes, err := renderYouTubeBrandPNG()
+		if err != nil {
+			return ""
+		}
+		if err := transmitKittyPNG(brandImgID, pngBytes, cols, rows); err != nil {
+			return ""
+		}
+		kittyUploadMu.Lock()
+		kittyUploaded[brandImgID] = true
+		kittyUploadMu.Unlock()
+	}
+
+	out := formatKittyPlaceholders(brandImgID, cols, rows)
+	thumbCacheMu.Lock()
+	thumbCache[cacheKey] = out
+	thumbCacheMu.Unlock()
+	return out
+}
+
+func renderYouTubeBrandPNG() ([]byte, error) {
+	if _, err := exec.LookPath("rsvg-convert"); err != nil {
+		return nil, err
+	}
+	const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="260" height="60" viewBox="0 0 260 60">
+  <defs>
+    <linearGradient id="ytxGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#BD93F9"/>
+      <stop offset="100%" stop-color="#FF2E63"/>
+    </linearGradient>
+  </defs>
+  <rect x="4" y="6" width="50" height="48" rx="13" fill="#181825" stroke="url(#ytxGrad)" stroke-width="3"/>
+  <path d="M21 19 L43 30 L21 41 L26 30 Z" fill="url(#ytxGrad)"/>
+  <text x="68" y="47" font-family="Noto Sans, Inter, sans-serif" font-weight="800" font-size="50" letter-spacing="-1" fill="#F8F8F2">yt<tspan fill="#BD93F9">x</tspan></text>
+  <rect x="176" y="15" width="76" height="30" rx="8" fill="#1E1E2E" stroke="#374151" stroke-width="1.8"/>
+  <text x="214" y="37" text-anchor="middle" font-family="Noto Sans, Inter, sans-serif" font-weight="700" font-size="19" letter-spacing="3" fill="#9CA3AF">TUI</text>
+</svg>`
+	cmd := exec.Command("rsvg-convert", "-w", "520", "-h", "120", "-f", "png")
+	cmd.Stdin = strings.NewReader(svg)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	if err := cmd.Run(); err != nil {
+		return nil, err
+	}
+	if out.Len() == 0 {
+		return nil, fmt.Errorf("empty svg render")
+	}
+	return out.Bytes(), nil
 }
 
 // uploadKittyImage decodes the JPEG, scales it cleanly to 320x180 PNG in memory, and sends it to /dev/tty
@@ -230,8 +306,8 @@ func uploadKittyImage(imgID uint32, path string, cols, rows int) error {
 		return err
 	}
 
-	// Scale to 320x180 (16:9 HD thumbnail) so PNG is small and crisp
-	const dstW, dstH = 320, 180
+	// Scale to 480x270 (16:9 HD thumbnail) with bilinear filtering so cards look crisp in Ghostty/Kitty.
+	const dstW, dstH = 480, 270
 	bounds := srcImg.Bounds()
 	srcW := bounds.Dx()
 	srcH := bounds.Dy()
@@ -251,10 +327,38 @@ func uploadKittyImage(imgID uint32, path string, cols, rows int) error {
 
 	dst := image.NewRGBA(image.Rect(0, 0, dstW, dstH))
 	for y := 0; y < dstH; y++ {
-		sy := cropY0 + (y*cropH)/dstH
+		fy := float64(y) * float64(cropH-1) / float64(dstH-1)
+		y0 := cropY0 + int(fy)
+		y1 := y0 + 1
+		if y1 >= cropY0+cropH {
+			y1 = y0
+		}
+		wy := fy - float64(int(fy))
 		for x := 0; x < dstW; x++ {
-			sx := bounds.Min.X + (x*srcW)/dstW
-			dst.Set(x, y, srcImg.At(sx, sy))
+			fx := float64(x) * float64(srcW-1) / float64(dstW-1)
+			x0 := bounds.Min.X + int(fx)
+			x1 := x0 + 1
+			if x1 >= bounds.Max.X {
+				x1 = x0
+			}
+			wx := fx - float64(int(fx))
+
+			r00, g00, b00, a00 := srcImg.At(x0, y0).RGBA()
+			r10, g10, b10, a10 := srcImg.At(x1, y0).RGBA()
+			r01, g01, b01, a01 := srcImg.At(x0, y1).RGBA()
+			r11, g11, b11, a11 := srcImg.At(x1, y1).RGBA()
+
+			bilerp := func(c00, c10, c01, c11 uint32) uint8 {
+				top := float64(c00)*(1-wx) + float64(c10)*wx
+				bot := float64(c01)*(1-wx) + float64(c11)*wx
+				return uint8((top*(1-wy) + bot*wy) / 257.0)
+			}
+			dst.SetRGBA(x, y, color.RGBA{
+				R: bilerp(r00, r10, r01, r11),
+				G: bilerp(g00, g10, g01, g11),
+				B: bilerp(b00, b10, b01, b11),
+				A: bilerp(a00, a10, a01, a11),
+			})
 		}
 	}
 
@@ -262,8 +366,17 @@ func uploadKittyImage(imgID uint32, path string, cols, rows int) error {
 	if err := png.Encode(&pngBuf, dst); err != nil {
 		return err
 	}
+	return transmitKittyPNG(imgID, pngBuf.Bytes(), cols, rows)
+}
 
-	b64 := base64.StdEncoding.EncodeToString(pngBuf.Bytes())
+func transmitKittyPNG(imgID uint32, pngBytes []byte, cols, rows int) error {
+	tty, err := os.OpenFile("/dev/tty", os.O_WRONLY, 0)
+	if err != nil {
+		return err
+	}
+	defer tty.Close()
+
+	b64 := base64.StdEncoding.EncodeToString(pngBytes)
 
 	var out bytes.Buffer
 	const chunkSize = 4096

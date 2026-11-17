@@ -66,14 +66,13 @@ func DefaultTheme() Theme {
 			Bold(true).
 			Padding(0, 1),
 		Card: lipgloss.NewStyle().
-			Border(lipgloss.HiddenBorder()).
-			Background(Bg).
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("#374151")).
 			Foreground(Text).
 			Padding(0, 1),
 		CardSelected: lipgloss.NewStyle().
-			Border(lipgloss.NormalBorder()).
-			BorderForeground(Text).
-			Background(Bg).
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("#BD93F9")).
 			Foreground(White).
 			Padding(0, 1),
 		BadgeLive: lipgloss.NewStyle().

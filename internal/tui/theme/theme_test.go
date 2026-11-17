@@ -43,8 +43,8 @@ func TestDefaultTheme(t *testing.T) {
 	th := DefaultTheme()
 
 	styles := []struct {
-		name  string
-		style lipgloss.Style
+		name   string
+		style  lipgloss.Style
 		sample string
 	}{
 		{name: "HeaderLogo", style: th.HeaderLogo, sample: "ytx"},

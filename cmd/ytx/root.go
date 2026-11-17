@@ -60,6 +60,13 @@ func (n nativeThumbs) Backend() thumbs.Backend {
 	return n.backend
 }
 
+func (n nativeThumbs) RenderBrand(width, height int) string {
+	if n.backend != thumbs.BackendKitty {
+		return ""
+	}
+	return tui.RenderBrandLogo(width, height)
+}
+
 func newRootCmd() *cobra.Command {
 	var quickMode bool
 
@@ -96,7 +103,8 @@ func newRootCmd() *cobra.Command {
 }
 
 func runTUI(paths platform.Paths) error {
-	cfg, _ := config.Load(filepath.Join(paths.ConfigDir, "config"))
+	cfgPath := filepath.Join(paths.ConfigDir, "config")
+	cfg, _ := config.Load(cfgPath)
 	dlDir := cfg.DownloadDir
 	if dlDir == "" {
 		if home, err := os.UserHomeDir(); err == nil {
@@ -123,10 +131,14 @@ func runTUI(paths platform.Paths) error {
 	dl := download.NewManager(paths.StateDir, dlDir, cfg.YtdlpBin)
 
 	state := app.NewState(app.Dependencies{
-		Catalog:    cat,
-		Engine:     eng,
-		Store:      st,
-		Downloader: dl,
+		Catalog:        cat,
+		Engine:         eng,
+		Store:          st,
+		Downloader:     dl,
+		InitialQuality: cfg.Quality,
+		OnQualityChange: func(q int) error {
+			return config.SaveVal(cfgPath, "YT_QUALITY", strconv.Itoa(q))
+		},
 	})
 
 	p := tea.NewProgram(
@@ -155,7 +167,8 @@ func runQuickSelector(paths platform.Paths) error {
 	if err != nil || !ok {
 		return err
 	}
-	cfg, _ := config.Load(filepath.Join(paths.ConfigDir, "config"))
+	cfgPath := filepath.Join(paths.ConfigDir, "config")
+	cfg, _ := config.Load(cfgPath)
 	return player.LaunchMPV("mpv", player.LaunchOpts{
 		VideoID:    chosen.ID,
 		URL:        "https://www.youtube.com/watch?v=" + chosen.ID,
@@ -174,7 +187,8 @@ func newPlayCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			paths := platform.ResolvePaths()
-			cfg, _ := config.Load(filepath.Join(paths.ConfigDir, "config"))
+			cfgPath := filepath.Join(paths.ConfigDir, "config")
+			cfg, _ := config.Load(cfgPath)
 
 			mode := cfg.DefaultMode
 			if audioOnly {
@@ -329,7 +343,8 @@ func newQueueCmd() *cobra.Command {
 		Short: "Show download queue and saved downloads",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			paths := platform.ResolvePaths()
-			cfg, _ := config.Load(filepath.Join(paths.ConfigDir, "config"))
+			cfgPath := filepath.Join(paths.ConfigDir, "config")
+			cfg, _ := config.Load(cfgPath)
 			mgr := download.NewManager(paths.StateDir, cfg.DownloadDir, cfg.YtdlpBin)
 			items, err := mgr.List()
 			if err != nil {

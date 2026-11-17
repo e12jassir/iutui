@@ -95,7 +95,6 @@ func TestRenderTableContent(t *testing.T) {
 	}
 }
 
-
 func TestModelViewSpotatuiLayout(t *testing.T) {
 	feeds := map[model.Tab][]model.Video{
 		model.TabHome: {

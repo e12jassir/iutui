@@ -28,11 +28,11 @@ func fixedVideos() []model.Video {
 			Published: "hace 5 años",
 		},
 		{
-			ID:        "vid002",
-			Title:     "Lofi Hip Hop Radio - Beats to Relax/Study to",
-			Channel:   "Lofi Girl",
-			Views:     "38K viendo",
-			IsLive:    true,
+			ID:      "vid002",
+			Title:   "Lofi Hip Hop Radio - Beats to Relax/Study to",
+			Channel: "Lofi Girl",
+			Views:   "38K viendo",
+			IsLive:  true,
 		},
 		{
 			ID:        "vid003",
@@ -176,7 +176,7 @@ func TestRenderResponsiveSidebarRules(t *testing.T) {
 		defer s.Close()
 		out := Render(s, th, tr)
 		assertBounds(t, out, 140, 36)
-		for _, want := range []string{"PRINCIPAL", "TÚ", "SUSCRIPCIONES"} {
+		for _, want := range []string{"PRINCIPAL", "BIBLIOTECA", "SUSCRIPCIONES"} {
 			if !strings.Contains(out, want) {
 				t.Errorf("expected full sidebar section %q in output", want)
 			}

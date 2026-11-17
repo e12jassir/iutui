@@ -5,6 +5,7 @@ package views
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/e12jassir/ytx/internal/app"
@@ -19,14 +20,67 @@ const (
 	minHeight       = 24
 	fullSidebarMinW = 140
 	miniGuideMinW   = 100
-	fullSidebarW    = 22
-	miniGuideW      = 8
+	fullSidebarW    = 26
+	miniGuideW      = 10
 	cardWidth       = 30
 	cardGap         = 2
 	homeThumbH      = 7
 	searchThumbW    = 34
 	searchThumbH    = 7
 )
+
+var (
+	spotPurple    = lipgloss.Color("#BD93F9")
+	spotDimBorder = lipgloss.Color("#374151")
+	spotDimTitle  = lipgloss.Color("#9CA3AF")
+)
+
+func renderSpotatuiPanel(title string, content []string, width, height int, focused bool) string {
+	if width < 4 {
+		width = 4
+	}
+	if height < 3 {
+		height = 3
+	}
+	borderStyle := lipgloss.NewStyle().Foreground(spotDimBorder)
+	titleStyle := lipgloss.NewStyle().Foreground(spotDimTitle)
+	if focused {
+		borderStyle = lipgloss.NewStyle().Foreground(spotPurple).Bold(true)
+		titleStyle = lipgloss.NewStyle().Foreground(spotPurple).Bold(true)
+	}
+
+	innerW := width - 2
+	var top strings.Builder
+	top.WriteString(borderStyle.Render("╭"))
+	if title != "" {
+		t := truncatePlain(title, max(1, innerW-1))
+		tw := runewidth.StringWidth(t)
+		top.WriteString(titleStyle.Render(t))
+		if rem := innerW - tw; rem > 0 {
+			top.WriteString(borderStyle.Render(strings.Repeat("─", rem)))
+		}
+	} else {
+		top.WriteString(borderStyle.Render(strings.Repeat("─", innerW)))
+	}
+	top.WriteString(borderStyle.Render("╮"))
+
+	bodyH := height - 2
+	lines := make([]string, 0, height)
+	lines = append(lines, top.String())
+	for i := 0; i < bodyH; i++ {
+		row := ""
+		if i < len(content) {
+			row = content[i]
+		}
+		if lipgloss.Width(row) > innerW {
+			row = truncateStyledLine(row, innerW)
+		}
+		pad := max(0, innerW-lipgloss.Width(row))
+		lines = append(lines, borderStyle.Render("│")+row+strings.Repeat(" ", pad)+borderStyle.Render("│"))
+	}
+	lines = append(lines, borderStyle.Render("╰"+strings.Repeat("─", innerW)+"╯"))
+	return strings.Join(lines, "\n")
+}
 
 // Render produces the full terminal UI frame for the given application state,
 // theme, and thumbnail renderer, strictly bounded to s.Width x s.Height.
@@ -41,36 +95,34 @@ func Render(s *app.State, th theme.Theme, tr thumbs.Renderer) string {
 		return renderTooSmall(s.Width, s.Height, th)
 	}
 
-	header := renderHeader(s, th, s.Width)
-	playerBar := renderPlayerBar(s, th, s.Width)
-	statusBar := renderStatusBar(s, th, s.Width)
+	topBar := renderTopPanels(s, th, tr, s.Width)
+	playerBar := renderPlayerPanel(s, th, s.Width)
 
-	middleH := s.Height - 5 // header(2) + player(2) + status(1)
-	if middleH < 1 {
-		middleH = 1
+	middleH := s.Height - 8 // top(3) + player(5)
+	if middleH < 4 {
+		middleH = 4
 	}
 
 	var middle string
 	switch {
 	case s.Width >= fullSidebarMinW:
 		side := renderSidebarFull(s, th, fullSidebarW, middleH)
-		sep := renderVerticalSep(middleH)
-		mainW := s.Width - fullSidebarW - 1
+		mainW := s.Width - fullSidebarW
 		main := renderMain(s, th, tr, mainW, middleH)
-		middle = lipgloss.JoinHorizontal(lipgloss.Top, side, sep, main)
+		middle = lipgloss.JoinHorizontal(lipgloss.Top, side, main)
 	case s.Width >= miniGuideMinW:
 		side := renderMiniGuide(s, th, miniGuideW, middleH)
-		sep := renderVerticalSep(middleH)
-		mainW := s.Width - miniGuideW - 1
+		mainW := s.Width - miniGuideW
 		main := renderMain(s, th, tr, mainW, middleH)
-		middle = lipgloss.JoinHorizontal(lipgloss.Top, side, sep, main)
+		middle = lipgloss.JoinHorizontal(lipgloss.Top, side, main)
 	default:
-		// Width < 100: no sidebar (compact tabs/nav rendered in header).
 		middle = renderMain(s, th, tr, s.Width, middleH)
 	}
 
-	frame := lipgloss.JoinVertical(lipgloss.Left, header, middle, playerBar, statusBar)
-	if s.ShowHelp {
+	frame := lipgloss.JoinVertical(lipgloss.Left, topBar, middle, playerBar)
+	if s.ShowSettings {
+		frame = renderSettingsOverlay(s, s.Width, s.Height, th)
+	} else if s.ShowHelp {
 		frame = renderHelpOverlay(frame, s.Width, s.Height, th)
 	}
 	return fitBlock(frame, s.Width, s.Height)
@@ -95,61 +147,77 @@ func renderTooSmall(w, h int, th theme.Theme) string {
 	return fitBlock(placed, w, h)
 }
 
-func renderHeader(s *app.State, th theme.Theme, width int) string {
-	logo := " " + th.HeaderLogo.Render("▶") + " " + lipgloss.NewStyle().Foreground(theme.White).Bold(true).Render("ytx")
-
-	var navStr string
-	if width < miniGuideMinW {
-		tabs := []model.Tab{model.TabHome, model.TabMusic, model.TabSubscriptions, model.TabHistory, model.TabDownloads}
-		parts := make([]string, 0, len(tabs))
-		for _, t := range tabs {
-			label := shortTabLabel(t)
-			if t == s.ActiveTab && s.View == app.ViewHome {
-				parts = append(parts, lipgloss.NewStyle().Foreground(theme.White).Bold(true).Underline(true).Render(label))
-			} else {
-				parts = append(parts, lipgloss.NewStyle().Foreground(theme.Muted).Render(label))
-			}
-		}
-		navStr = "  " + strings.Join(parts, " ")
+func sidebarWidthFor(totalW int) int {
+	switch {
+	case totalW >= fullSidebarMinW:
+		return fullSidebarW
+	case totalW >= miniGuideMinW:
+		return miniGuideW
+	default:
+		return 0
 	}
+}
 
-	syncBadge := lipgloss.NewStyle().Background(theme.Surf).Foreground(theme.Text).Padding(0, 1).Render("⟳")
-	if s.Syncing || s.SearchPending {
-		syncBadge = lipgloss.NewStyle().Background(theme.Surf).Foreground(theme.Blue).Bold(true).Padding(0, 1).Render("⟳")
-	}
-	helpBtn := lipgloss.NewStyle().Background(theme.Surf).Foreground(theme.Muted).Padding(0, 1).Render("?")
-	userBadge := lipgloss.NewStyle().Background(lipgloss.Color("#7b3fe4")).Foreground(theme.White).Bold(true).Padding(0, 1).Render("E")
-
-	leftBlock := logo + navStr
-	rightBlock := syncBadge + " " + helpBtn + " " + userBadge + " "
-
-	leftW := lipgloss.Width(leftBlock)
-	rightW := lipgloss.Width(rightBlock)
-	searchBtn := lipgloss.NewStyle().Background(theme.SurfHi).Foreground(theme.Text).Padding(0, 1).Render("Buscar")
-	searchBtnW := lipgloss.Width(searchBtn)
-	searchW := min(54, max(14, width-leftW-rightW-searchBtnW-6))
+func renderTopPanels(s *app.State, th theme.Theme, tr thumbs.Renderer, width int) string {
+	sideW := sidebarWidthFor(width)
+	remW := width - sideW
+	actionsW := 15
+	searchPanelW := max(24, remW-actionsW)
+	innerW := searchPanelW - 2
 
 	var searchText string
 	if s.Focus == app.FocusSearch {
-		searchText = "⌕ " + s.SearchDraft + "█"
+		searchText = s.SearchDraft + "█"
 	} else if s.SearchQuery != "" {
-		searchText = "⌕ " + s.SearchQuery
+		searchText = s.SearchQuery
 	} else {
-		searchText = "⌕ Buscar en YouTube   /"
+		searchText = "Search"
 	}
-	searchText = truncatePlain(searchText, max(4, searchW-2))
 
-	searchStyle := th.SearchBox
-	if s.Focus == app.FocusSearch {
-		searchStyle = th.SearchBoxFocused
+	syncColor := theme.Muted
+	if s.Syncing || s.SearchPending {
+		syncColor = theme.Blue
 	}
-	searchBar := searchStyle.Width(searchW).Render(searchText) + searchBtn
+	syncBtn := lipgloss.NewStyle().Foreground(syncColor).Render("[r]")
+	textAvail := max(4, innerW-lipgloss.Width(syncBtn)-2)
+	textStyle := lipgloss.NewStyle().Foreground(theme.Muted)
+	if s.Focus == app.FocusSearch || s.SearchQuery != "" {
+		textStyle = lipgloss.NewStyle().Foreground(theme.White)
+	}
+	leftTxt := textStyle.Render(" " + truncatePlain(searchText, textAvail))
+	gap := max(1, innerW-lipgloss.Width(leftTxt)-lipgloss.Width(syncBtn)-1)
+	searchRow := leftTxt + strings.Repeat(" ", gap) + syncBtn + " "
+	searchPanel := renderSpotatuiPanel("", []string{searchRow}, searchPanelW, 3, s.Focus == app.FocusSearch)
 
-	padW := max(1, (width-leftW-lipgloss.Width(searchBar)-rightW)/2)
-	rightPad := max(1, width-leftW-padW-lipgloss.Width(searchBar)-rightW)
-	topLine := leftBlock + strings.Repeat(" ", padW) + searchBar + strings.Repeat(" ", rightPad) + rightBlock
-	ruleLine := lipgloss.NewStyle().Foreground(theme.Rule).Render(strings.Repeat("─", width))
-	return fitBlock(topLine+"\n"+ruleLine, width, 2)
+	actStyle := lipgloss.NewStyle().Foreground(theme.Text)
+	actionsRow := " " + actStyle.Render("[?]") + " " + actStyle.Render("[S]") + " " + actStyle.Render("[Q]") + " "
+	actionsPanel := renderSpotatuiPanel("", []string{actionsRow}, actionsW, 3, s.ShowHelp || s.ShowSettings)
+
+	right := lipgloss.JoinHorizontal(lipgloss.Top, searchPanel, actionsPanel)
+	if sideW == 0 {
+		return right
+	}
+
+	var brand string
+	red := lipgloss.NewStyle().Foreground(theme.Red).Bold(true)
+	white := lipgloss.NewStyle().Foreground(theme.White).Bold(true)
+	if sideW >= fullSidebarW {
+		if br, ok := tr.(thumbs.BrandRenderer); ok {
+			brand = br.RenderBrand(sideW, 3)
+		}
+		if brand == "" {
+			brand = red.Render("▶") + white.Render("  ytx")
+		}
+	} else {
+		brand = red.Render("▶") + white.Render(" ytx")
+	}
+	brandBox := lipgloss.NewStyle().
+		Width(sideW).
+		Height(3).
+		Align(lipgloss.Center, lipgloss.Center).
+		Render(brand)
+
+	return lipgloss.JoinHorizontal(lipgloss.Top, brandBox, right)
 }
 
 func renderChips(s *app.State, th theme.Theme, width int) string {
@@ -173,19 +241,20 @@ func renderChips(s *app.State, th theme.Theme, width int) string {
 }
 
 func renderSidebarFull(s *app.State, th theme.Theme, width, height int) string {
+	innerW := max(4, width-2)
 	sectionStyle := lipgloss.NewStyle().Foreground(theme.Dim).Bold(true)
-	divider := lipgloss.NewStyle().Foreground(theme.Rule).Render(strings.Repeat("─", max(1, width-2)))
+	divider := lipgloss.NewStyle().Foreground(spotDimBorder).Render(strings.Repeat("─", max(1, innerW-2)))
 
 	var lines []string
 	lines = append(lines, sectionStyle.Render(" PRINCIPAL"))
 	for _, t := range []model.Tab{model.TabHome, model.TabMusic, model.TabSubscriptions} {
-		lines = append(lines, renderSidebarTabLine(t, t == s.ActiveTab, s.Focus == app.FocusSidebar, th, width))
+		lines = append(lines, renderSidebarTabLine(t, t == s.ActiveTab, s.Focus == app.FocusSidebar, th, innerW))
 	}
 
 	lines = append(lines, " "+divider)
-	lines = append(lines, sectionStyle.Render(" TÚ"))
-	for _, t := range []model.Tab{model.TabHistory, model.TabDownloads} {
-		lines = append(lines, renderSidebarTabLine(t, t == s.ActiveTab, s.Focus == app.FocusSidebar, th, width))
+	lines = append(lines, sectionStyle.Render(" BIBLIOTECA"))
+	for _, t := range []model.Tab{model.TabHistory, model.TabWatchLater, model.TabPlaylists, model.TabLiked, model.TabDownloads} {
+		lines = append(lines, renderSidebarTabLine(t, t == s.ActiveTab, s.Focus == app.FocusSidebar, th, innerW))
 	}
 
 	lines = append(lines, " "+divider)
@@ -193,17 +262,22 @@ func renderSidebarFull(s *app.State, th theme.Theme, width, height int) string {
 	if len(s.Subscriptions) == 0 {
 		lines = append(lines, lipgloss.NewStyle().Foreground(theme.Dim).Render("  (sin canales)"))
 	} else {
-		for _, sub := range s.Subscriptions {
-			if len(lines) >= height {
+		maxSubs := min(len(s.Subscriptions), 4)
+		for i := 0; i < maxSubs; i++ {
+			if len(lines) >= height-3 {
 				break
 			}
+			sub := s.Subscriptions[i]
 			av := channelAvatar(sub)
-			name := truncatePlain(sub, max(1, width-5))
+			name := truncatePlain(sub, max(1, innerW-5))
 			lines = append(lines, " "+av+" "+lipgloss.NewStyle().Foreground(theme.Text).Render(name))
+		}
+		if len(s.Subscriptions) > maxSubs && len(lines) < height-2 {
+			lines = append(lines, lipgloss.NewStyle().Foreground(theme.Dim).Render(fmt.Sprintf("  +%d canales más", len(s.Subscriptions)-maxSubs)))
 		}
 	}
 
-	return padBlock(strings.Join(lines, "\n"), width, height)
+	return renderSpotatuiPanel("YouTube", lines, width, height, s.Focus == app.FocusSidebar)
 }
 
 func monoTabIcon(t model.Tab) string {
@@ -216,6 +290,12 @@ func monoTabIcon(t model.Tab) string {
 		return "▤"
 	case model.TabHistory:
 		return "↺"
+	case model.TabWatchLater:
+		return "◷"
+	case model.TabPlaylists:
+		return "☰"
+	case model.TabLiked:
+		return "♥"
 	case model.TabDownloads:
 		return "↓"
 	default:
@@ -240,41 +320,56 @@ func renderSidebarTabLine(t model.Tab, active, focused bool, th theme.Theme, wid
 }
 
 func renderMiniGuide(s *app.State, th theme.Theme, width, height int) string {
+	innerW := max(4, width-2)
 	tabs := []model.Tab{model.TabHome, model.TabMusic, model.TabSubscriptions, model.TabHistory, model.TabDownloads}
 	lines := make([]string, 0, len(tabs)*3)
 	for _, t := range tabs {
 		icon := monoTabIcon(t)
 		lbl := shortTabLabel(t)
-		icStyle := lipgloss.NewStyle().Foreground(theme.Muted).Width(width).Align(lipgloss.Center)
-		lbStyle := lipgloss.NewStyle().Foreground(theme.Dim).Width(width).Align(lipgloss.Center)
+		icStyle := lipgloss.NewStyle().Foreground(theme.Muted).Width(innerW).Align(lipgloss.Center)
+		lbStyle := lipgloss.NewStyle().Foreground(theme.Dim).Width(innerW).Align(lipgloss.Center)
 		if t == s.ActiveTab && s.View == app.ViewHome {
 			icStyle = icStyle.Foreground(theme.White).Background(theme.Surf).Bold(true)
 			lbStyle = lbStyle.Foreground(theme.White).Background(theme.Surf).Bold(true)
 		}
 		lines = append(lines, icStyle.Render(icon), lbStyle.Render(lbl), "")
 	}
-	return padBlock(strings.Join(lines, "\n"), width, height)
-}
-
-func renderVerticalSep(height int) string {
-	sepStyle := lipgloss.NewStyle().Foreground(theme.Rule)
-	lines := make([]string, height)
-	for i := 0; i < height; i++ {
-		lines[i] = sepStyle.Render("│")
-	}
-	return strings.Join(lines, "\n")
+	return renderSpotatuiPanel("Menu", lines, width, height, s.Focus == app.FocusSidebar)
 }
 
 func renderMain(s *app.State, th theme.Theme, tr thumbs.Renderer, width, height int) string {
-	chips := renderChips(s, th, width)
-	bodyH := max(1, height-1)
+	innerW := max(10, width-2)
+	innerH := max(2, height-2)
+
+	items := s.VisibleItems()
+	var title string
+	if s.View == app.ViewSearch {
+		pos := 0
+		if len(items) > 0 {
+			pos = s.ResultIdx + 1
+		}
+		title = fmt.Sprintf("Búsqueda: %s (%d/%d)", s.SearchQuery, pos, len(items))
+	} else {
+		pos := 0
+		if len(items) > 0 {
+			pos = s.SelectedIdx + 1
+		}
+		title = fmt.Sprintf("%s (%d/%d)", s.ActiveTab.String(), pos, len(items))
+	}
+	if s.Syncing || s.SearchPending {
+		title += " · ⟳"
+	}
+
+	chips := renderChips(s, th, innerW)
+	bodyH := max(1, innerH-1)
 	var body string
 	if s.View == app.ViewSearch {
-		body = renderSearchList(s, th, tr, width, bodyH)
+		body = renderSearchList(s, th, tr, innerW, bodyH)
 	} else {
-		body = renderHomeGrid(s, th, tr, width, bodyH)
+		body = renderHomeGrid(s, th, tr, innerW, bodyH)
 	}
-	return padBlock(chips+"\n"+body, width, height)
+	content := append([]string{chips}, strings.Split(body, "\n")...)
+	return renderSpotatuiPanel(title, content, width, height, s.Focus == app.FocusMain)
 }
 
 func renderHomeGrid(s *app.State, th theme.Theme, tr thumbs.Renderer, width, height int) string {
@@ -354,9 +449,10 @@ func renderHomeGrid(s *app.State, th theme.Theme, tr thumbs.Renderer, width, hei
 
 func renderCard(v model.Video, selected, saved, playing bool, th theme.Theme, tr thumbs.Renderer, cardW int) string {
 	innerW := max(4, cardW-4) // border(2) + padding(2)
+	thumbH := max(homeThumbH, min(11, innerW*9/32))
 
 	// 1. Thumbnail block (isolated on its own rows, never overlapped).
-	thumbStr := tr.Render(v.ID, innerW, homeThumbH)
+	thumbStr := tr.Render(v.ID, innerW, thumbH)
 
 	// 2. Meta badges row IMMEDIATELY BELOW the thumbnail.
 	var badgeParts []string
@@ -377,26 +473,41 @@ func renderCard(v model.Video, selected, saved, playing bool, th theme.Theme, tr
 	}
 	metaRow := truncateStyledLine(strings.Join(badgeParts, " "), innerW)
 
-	// 3. Avatar + 2-line title + channel + views (YouTube Web card layout).
-	titleLines := wrapTwoLines(v.Title, max(4, innerW-3))
+	// 3. Symmetric 2-line title + clean channel + views (no avatar box).
+	titleLines := wrapTwoLines(v.Title, innerW)
 	titleStyle := lipgloss.NewStyle().Foreground(theme.Text).Bold(true)
 	if selected {
 		titleStyle = titleStyle.Foreground(theme.White)
 	}
-	av := channelAvatar(v.Channel)
-	t1 := av + " " + titleStyle.Render(titleLines[0])
-	t2 := "   " + titleStyle.Render(titleLines[1])
+	line1 := titleLines[0]
+	if line1 == "" {
+		line1 = " "
+	}
+	line2 := titleLines[1]
+	if line2 == "" {
+		line2 = " "
+	}
+	t1 := titleStyle.Render(line1)
+	t2 := titleStyle.Render(line2)
 
 	// 4. Channel & views.
-	ch := "   " + lipgloss.NewStyle().Foreground(theme.Muted).Render(truncatePlain(v.Channel, max(4, innerW-3)))
-	vw := "   " + lipgloss.NewStyle().Foreground(theme.Dim).Render(truncatePlain(formatViewsLine(v), max(4, innerW-3)))
+	chName := strings.TrimSpace(v.Channel)
+	if chName == "" {
+		chName = "-"
+	}
+	ch := lipgloss.NewStyle().Foreground(theme.Muted).Render(truncatePlain(chName, innerW))
+	vwText := strings.TrimSpace(formatViewsLine(v))
+	if vwText == "" {
+		vwText = " "
+	}
+	vw := lipgloss.NewStyle().Foreground(theme.Dim).Render(truncatePlain(vwText, innerW))
 
 	body := strings.Join([]string{thumbStr, metaRow, t1, t2, ch, vw}, "\n")
 	style := th.Card
 	if selected {
 		style = th.CardSelected
 	}
-	return style.Width(max(1, cardW-2)).Render(body)
+	return style.Width(max(1, cardW-2)).Height(thumbH + 5).Render(body)
 }
 
 var avatarColors = []lipgloss.Color{
@@ -483,7 +594,11 @@ func renderSearchRow(v model.Video, selected, saved, playing bool, th theme.Them
 	t1 := titleStyle.Render(titleLines[0])
 	t2 := titleStyle.Render(titleLines[1])
 	views := lipgloss.NewStyle().Foreground(theme.Dim).Render(truncatePlain(formatViewsLine(v), infoW))
-	chLine := channelAvatar(v.Channel) + " " + lipgloss.NewStyle().Foreground(theme.Muted).Render(truncatePlain(v.Channel, max(4, infoW-3)))
+	chName := strings.TrimSpace(v.Channel)
+	if chName == "" {
+		chName = "-"
+	}
+	chLine := lipgloss.NewStyle().Foreground(theme.Muted).Render(truncatePlain(chName, infoW))
 
 	var badges []string
 	if v.IsLive {
@@ -513,8 +628,58 @@ func renderSearchRow(v model.Video, selected, saved, playing bool, th theme.Them
 	return style.Width(max(1, rowW-2)).Render(joined)
 }
 
-func renderPlayerBar(s *app.State, th theme.Theme, width int) string {
-	// Line 1: full-width red/track progress bar.
+func renderPlayerPanel(s *app.State, th theme.Theme, width int) string {
+	innerW := max(10, width-2)
+
+	stateLabel := "Detenido"
+	icon := "⏹"
+	if s.PlayerStatus.IsRunning {
+		if s.PlayerStatus.Paused {
+			stateLabel = "En pausa"
+			icon = "⏸"
+		} else {
+			stateLabel = "Reproduciendo"
+			icon = "▶"
+		}
+	}
+	volStr := fmt.Sprintf("%.0f%%", s.PlayerStatus.Volume)
+	if s.PlayerStatus.Volume <= 0 {
+		volStr = "75%"
+	}
+	panelTitle := fmt.Sprintf("Reproductor (mpv IPC · %s %s · Vol: %s)", icon, stateLabel, volStr)
+
+	// Row 1: selected/active track on the left, toast or queue count on the right.
+	rightText := s.Toast
+	if rightText == "" {
+		queueCount := len(s.Queue)
+		if s.PlayerStatus.PlaylistCount > queueCount {
+			queueCount = s.PlayerStatus.PlaylistCount
+		}
+		rightText = fmt.Sprintf("%s · Cola: %d", s.QualityLabel(), queueCount)
+	}
+	rightStyled := lipgloss.NewStyle().Foreground(spotPurple).Bold(s.Toast != "").Render(" " + truncatePlain(rightText, max(10, innerW/3)) + " ")
+
+	trackLabel := "Sin reproducción activa"
+	if s.PlayerStatus.Title != "" {
+		trackLabel = icon + " " + s.PlayerStatus.Title
+		if ch := findChannelForTitle(s, s.PlayerStatus.Title); ch != "" {
+			trackLabel += " · " + ch
+		}
+	} else if v, ok := s.SelectedVideo(); ok {
+		trackLabel = "Seleccionado: " + v.Title
+		if v.Channel != "" {
+			trackLabel += " (" + v.Channel + ")"
+		}
+	}
+	availLeft := max(8, innerW-lipgloss.Width(rightStyled)-1)
+	leftStyled := lipgloss.NewStyle().Foreground(theme.Text).Bold(s.PlayerStatus.IsRunning).Render(" " + truncatePlain(trackLabel, availLeft))
+	spacer1 := max(0, innerW-lipgloss.Width(leftStyled)-lipgloss.Width(rightStyled))
+	row1 := leftStyled + strings.Repeat(" ", spacer1) + rightStyled
+
+	// Row 2: clock + progress bar + duration.
+	posStr := formatClock(s.PlayerStatus.TimePos)
+	durStr := formatClock(s.PlayerStatus.Duration)
+	barW := max(8, innerW-len(posStr)-len(durStr)-6)
 	ratio := 0.0
 	if s.PlayerStatus.IsRunning && s.PlayerStatus.Duration > 0 {
 		ratio = s.PlayerStatus.TimePos / s.PlayerStatus.Duration
@@ -525,78 +690,56 @@ func renderPlayerBar(s *app.State, th theme.Theme, width int) string {
 			ratio = 1
 		}
 	}
-	filled := int(ratio * float64(width))
-	if filled > width {
-		filled = width
+	filled := int(ratio * float64(barW))
+	if filled > barW {
+		filled = barW
 	}
-	remaining := width - filled
-	progLine := lipgloss.NewStyle().Foreground(theme.Red).Render(strings.Repeat("━", filled)) +
-		lipgloss.NewStyle().Foreground(theme.Track).Render(strings.Repeat("─", remaining))
+	rem := barW - filled
+	progBar := lipgloss.NewStyle().Foreground(spotPurple).Render(strings.Repeat("━", filled)) +
+		lipgloss.NewStyle().Foreground(spotDimBorder).Render(strings.Repeat("─", rem))
+	row2 := " " + lipgloss.NewStyle().Foreground(theme.Muted).Render(posStr) + "  " + progBar + "  " + lipgloss.NewStyle().Foreground(theme.Muted).Render(durStr)
 
-	// Line 2: play/pause icon, title · channel, pos / dur, queue count.
-	icon := "⏹"
-	if s.PlayerStatus.IsRunning {
-		if s.PlayerStatus.Paused {
-			icon = "⏸"
-		} else {
-			icon = "▶"
-		}
-	}
+	// Row 3: minimalist transport controls + key hints (no heavy emojis).
+	btnStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#38BDF8")).Bold(true)
+	btns := strings.Join([]string{
+		btnStyle.Render("[|<]"),
+		btnStyle.Render("[▶/⏸]"),
+		btnStyle.Render("[>|]"),
+		btnStyle.Render("[-10s]"),
+		btnStyle.Render("[+10s]"),
+		btnStyle.Render("[Vol-]"),
+		btnStyle.Render("[Vol+]"),
+		btnStyle.Render("[★]"),
+	}, " ")
+	hints := lipgloss.NewStyle().Foreground(theme.Dim).Render("   Enter: Play · a: Audio · /: Buscar · S: Config")
+	row3 := " " + truncateStyledLine(btns+hints, max(10, innerW-2))
 
-	posStr := formatClock(s.PlayerStatus.TimePos)
-	durStr := formatClock(s.PlayerStatus.Duration)
-	queueCount := len(s.Queue)
-	if s.PlayerStatus.PlaylistCount > queueCount {
-		queueCount = s.PlayerStatus.PlaylistCount
-	}
-	rightMeta := fmt.Sprintf(" %s / %s  ·  Cola: %d ", posStr, durStr, queueCount)
-	rightStyled := lipgloss.NewStyle().Foreground(theme.Muted).Render(rightMeta)
-
-	availLeft := max(10, width-lipgloss.Width(rightStyled)-1)
-	trackLabel := "Sin reproducción activa"
-	if s.PlayerStatus.Title != "" {
-		trackLabel = s.PlayerStatus.Title
-		if ch := findChannelForTitle(s, s.PlayerStatus.Title); ch != "" {
-			trackLabel += " · " + ch
-		}
-	}
-	leftPlain := truncatePlain(fmt.Sprintf(" %s %s", icon, trackLabel), availLeft)
-	leftStyled := lipgloss.NewStyle().Foreground(theme.Text).Bold(s.PlayerStatus.IsRunning).Render(leftPlain)
-
-	spacerW := max(0, width-lipgloss.Width(leftStyled)-lipgloss.Width(rightStyled))
-	infoLine := leftStyled + strings.Repeat(" ", spacerW) + rightStyled
-
-	return fitBlock(progLine+"\n"+infoLine, width, 2)
+	return renderSpotatuiPanel(panelTitle, []string{row1, row2, row3}, width, 5, s.Focus == app.FocusPlayer)
 }
 
-func renderStatusBar(s *app.State, th theme.Theme, width int) string {
-	modeLabel := strings.ToUpper(s.ActiveTab.String())
-	if s.Focus == app.FocusSearch {
-		modeLabel = "BUSCAR"
-	} else if s.View == app.ViewSearch {
-		modeLabel = "BÚSQUEDA"
+func renderSettingsOverlay(s *app.State, width, height int, th theme.Theme) string {
+	title := lipgloss.NewStyle().Foreground(spotPurple).Bold(true).Render("Configuración (ytx)")
+	qLabel := "Máxima (best)"
+	if s.Quality > 0 {
+		qLabel = fmt.Sprintf("%dp", s.Quality)
 	}
-	badge := lipgloss.NewStyle().
-		Background(theme.Red).
-		Foreground(theme.White).
-		Bold(true).
-		Padding(0, 1).
-		Render(modeLabel)
-
-	rightText := s.Toast
-	if rightText == "" {
-		items := s.VisibleItems()
-		rightText = fmt.Sprintf("%d videos", len(items))
+	rows := []string{
+		title,
+		"",
+		fmt.Sprintf("  Calidad máxima [c]:   %s", qLabel),
+		"  Config archivo:       ~/.config/yt/config",
+		"  Carpeta descargas:    ~/Videos/yt",
+		"  Reproductor:          mpv IPC + prefetch HD",
+		"",
+		"  [c / Enter] Cambiar calidad   [Esc / S] Cerrar",
 	}
-	rightStyled := th.StatusBadge.Render(truncatePlain(rightText, max(10, width/3)))
-
-	availHintW := max(0, width-lipgloss.Width(badge)-lipgloss.Width(rightStyled)-2)
-	hints := truncatePlain(" j/k nav · Enter play · a audio · d desc · w ★ · q cola · / buscar · ? ayuda", availHintW)
-	hintStyled := lipgloss.NewStyle().Foreground(theme.Dim).Render(hints)
-
-	spacerW := max(0, width-lipgloss.Width(badge)-lipgloss.Width(hintStyled)-lipgloss.Width(rightStyled))
-	line := badge + hintStyled + strings.Repeat(" ", spacerW) + rightStyled
-	return fitBlock(line, width, 1)
+	boxW := min(60, max(32, width-8))
+	trimmed := make([]string, 0, len(rows))
+	for _, r := range rows {
+		trimmed = append(trimmed, truncateStyledLine(r, boxW-4))
+	}
+	modal := th.Toast.Width(boxW - 2).Render(strings.Join(trimmed, "\n"))
+	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, modal)
 }
 
 func renderHelpOverlay(_ string, width, height int, th theme.Theme) string {
@@ -609,6 +752,7 @@ func renderHelpOverlay(_ string, width, height int, th theme.Theme) string {
 		"  Space / n / p   Pausar · Siguiente · Anterior",
 		"  , / . · - / +   Retroceder/Avanzar 10s · Volumen ±5%",
 		"  w / q / d       Guardar (★) · Cola · Descargar",
+		"  c               Cambiar calidad (MAX/1080/720/480)",
 		"  [ / ] · Tab     Cambiar chip · Foco sidebar",
 		"  1..5 / / / r    Pestañas · Buscar · Recargar",
 		"  Esc · ? / Q     Volver/Cerrar · Ayuda · Salir",
@@ -706,16 +850,49 @@ func truncateStyledLine(s string, maxW int) string {
 }
 
 func formatViewsLine(v model.Video) string {
+	views := strings.TrimSpace(v.Views)
+	pub := formatRelativeDate(strings.TrimSpace(v.Published))
 	switch {
-	case v.Views != "" && v.Published != "":
-		return v.Views + " · " + v.Published
-	case v.Views != "":
-		return v.Views
-	case v.Published != "":
-		return v.Published
+	case views != "" && pub != "":
+		return views + " · " + pub
+	case views != "":
+		return views
+	case pub != "":
+		return pub
 	default:
 		return ""
 	}
+}
+
+func formatRelativeDate(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	layouts := []string{time.RFC3339, "2006-01-02", "20060102"}
+	for _, layout := range layouts {
+		if t, err := time.Parse(layout, raw); err == nil {
+			days := int(time.Since(t).Hours() / 24)
+			switch {
+			case days <= 0:
+				hours := int(time.Since(t).Hours())
+				if hours <= 1 {
+					return "hoy"
+				}
+				return fmt.Sprintf("hace %d h", hours)
+			case days == 1:
+				return "ayer"
+			case days < 7:
+				return fmt.Sprintf("hace %d d", days)
+			case days < 30:
+				return fmt.Sprintf("hace %d sem", days/7)
+			case days < 365:
+				return fmt.Sprintf("hace %d m", days/30)
+			default:
+				return fmt.Sprintf("hace %d a", days/365)
+			}
+		}
+	}
+	return raw
 }
 
 func formatClock(seconds float64) string {
