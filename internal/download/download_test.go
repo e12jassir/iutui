@@ -14,9 +14,9 @@ import (
 
 func TestNewManager(t *testing.T) {
 	tests := []struct {
-		name        string
-		ytdlpBin    string
-		wantYtdlp   string
+		name      string
+		ytdlpBin  string
+		wantYtdlp string
 	}{
 		{
 			name:      "default binary when empty",

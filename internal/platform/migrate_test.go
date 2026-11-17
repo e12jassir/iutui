@@ -8,11 +8,11 @@ import (
 
 func TestMigrateFromYT(t *testing.T) {
 	tests := []struct {
-		name            string
-		setup           func(t *testing.T, home string, p Paths)
-		wantMigrated    bool
-		wantSecondRun   bool
-		checkPostState  func(t *testing.T, home string, p Paths)
+		name           string
+		setup          func(t *testing.T, home string, p Paths)
+		wantMigrated   bool
+		wantSecondRun  bool
+		checkPostState func(t *testing.T, home string, p Paths)
 	}{
 		{
 			name: "no legacy directories exist",

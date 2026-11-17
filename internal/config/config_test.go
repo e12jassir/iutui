@@ -142,9 +142,9 @@ YT_LANG="${UNSET_LANG_VAR:-es}"
 		{
 			name: "env var overrides config file",
 			env: map[string]string{
-				"YT_QUALITY":    "720",
+				"YT_QUALITY":     "720",
 				"YT_HIDE_SHORTS": "0",
-				"YT_YTDLP_ARGS": "--no-playlist --geo-bypass",
+				"YT_YTDLP_ARGS":  "--no-playlist --geo-bypass",
 			},
 			content: `
 YT_QUALITY=2160

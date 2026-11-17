@@ -21,7 +21,7 @@ func TestFilterNetscape(t *testing.T) {
 		wantErr bool
 	}{
 		{
-			name:  "blocks non-google and non-youtube domains",
+			name: "blocks non-google and non-youtube domains",
 			input: strings.Join([]string{
 				cookieLine("evil.com", "SESSION", "steal"),
 				cookieLine("notyoutube.com", "LOGIN_INFO", "spoof"),
