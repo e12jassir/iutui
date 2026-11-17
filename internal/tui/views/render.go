@@ -165,26 +165,31 @@ func renderTopPanels(s *app.State, th theme.Theme, tr thumbs.Renderer, width int
 	searchPanelW := max(24, remW-actionsW)
 	innerW := searchPanelW - 2
 
-	var searchText string
-	if s.Focus == app.FocusSearch {
-		searchText = s.SearchDraft + "█"
-	} else if s.SearchQuery != "" {
-		searchText = s.SearchQuery
-	} else {
-		searchText = "Search"
-	}
-
 	syncColor := theme.Muted
 	if s.Syncing || s.SearchPending {
 		syncColor = theme.Blue
 	}
 	syncBtn := lipgloss.NewStyle().Foreground(syncColor).Render("[r]")
 	textAvail := max(4, innerW-lipgloss.Width(syncBtn)-2)
-	textStyle := lipgloss.NewStyle().Foreground(theme.Muted)
-	if s.Focus == app.FocusSearch || s.SearchQuery != "" {
-		textStyle = lipgloss.NewStyle().Foreground(theme.White)
+
+	var leftTxt string
+	if s.Focus == app.FocusSearch {
+		whiteStyle := lipgloss.NewStyle().Foreground(theme.White)
+		if s.SearchDraft == "" && s.SearchQuery != "" {
+			queryHint := truncatePlain(s.SearchQuery, max(0, textAvail-2))
+			leftTxt = whiteStyle.Render(" █ ") + lipgloss.NewStyle().Foreground(theme.Muted).Render(queryHint)
+		} else {
+			leftTxt = whiteStyle.Render(" " + truncatePlain(s.SearchDraft+"█", textAvail))
+		}
+	} else {
+		searchText := "Search"
+		textStyle := lipgloss.NewStyle().Foreground(theme.Muted)
+		if s.SearchQuery != "" {
+			searchText = s.SearchQuery
+			textStyle = lipgloss.NewStyle().Foreground(theme.White)
+		}
+		leftTxt = textStyle.Render(" " + truncatePlain(searchText, textAvail))
 	}
-	leftTxt := textStyle.Render(" " + truncatePlain(searchText, textAvail))
 	gap := max(1, innerW-lipgloss.Width(leftTxt)-lipgloss.Width(syncBtn)-1)
 	searchRow := leftTxt + strings.Repeat(" ", gap) + syncBtn + " "
 	searchPanel := renderSpotatuiPanel("", []string{searchRow}, searchPanelW, 3, s.Focus == app.FocusSearch)
@@ -749,6 +754,7 @@ func renderHelpOverlay(_ string, width, height int, th theme.Theme) string {
 		"",
 		"  j / k / ↑ / ↓   Mover selección",
 		"  Enter / a / v   Reproducir (auto / audio / video)",
+		"  m               [m] Mix Radio desde el video",
 		"  Space / n / p   Pausar · Siguiente · Anterior",
 		"  , / . · - / +   Retroceder/Avanzar 10s · Volumen ±5%",
 		"  w / q / d       Guardar (★) · Cola · Descargar",

@@ -104,6 +104,7 @@ type State struct {
 	Ready        bool
 
 	searchCancel context.CancelFunc
+	searchSeq    uint64
 	statusCh     <-chan player.Status
 	appCtx       context.Context
 	appCancel    context.CancelFunc

@@ -72,7 +72,10 @@ func (s *State) handleLeftClick(x, y int) (*State, tea.Cmd) {
 				s.Syncing = true
 				return s, s.loadFeedCmd(s.ActiveTab, true)
 			}
-			s.Focus = FocusSearch
+			if s.Focus != FocusSearch {
+				s.Focus = FocusSearch
+				s.SearchDraft = ""
+			}
 			return s, nil
 		}
 

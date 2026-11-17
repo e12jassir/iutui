@@ -2,9 +2,11 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/e12jassir/ytx/internal/model"
@@ -28,6 +30,7 @@ type FeedLoadedMsg struct {
 // SearchDoneMsg arrives when an asynchronous search finishes.
 type SearchDoneMsg struct {
 	Query  string
+	Seq    uint64
 	Videos []model.Video
 	Err    error
 }
@@ -102,11 +105,14 @@ func (s *State) Update(msg tea.Msg) (*State, tea.Cmd) {
 		return s, nil
 
 	case SearchDoneMsg:
-		if msg.Query != s.SearchQuery {
+		if (msg.Seq != 0 && msg.Seq != s.searchSeq) || msg.Query != s.SearchQuery {
 			return s, nil // stale search result
 		}
 		s.SearchPending = false
 		if msg.Err != nil {
+			if errors.Is(msg.Err, context.Canceled) {
+				return s, nil
+			}
 			return s, s.toastCmd(fmt.Sprintf("Error buscando: %v", msg.Err))
 		}
 		s.SearchResults = msg.Videos
@@ -252,10 +258,17 @@ func (s *State) handleKey(msg tea.KeyMsg) (*State, tea.Cmd) {
 		switch key {
 		case "esc":
 			s.Focus = FocusMain
+			s.SearchDraft = ""
 			return s, nil
 		case "enter":
 			return s.SubmitSearch()
-		case "backspace":
+		case "ctrl+u":
+			s.SearchDraft = ""
+			return s, nil
+		case "ctrl+w", "alt+backspace":
+			s.SearchDraft = deleteLastWord(s.SearchDraft)
+			return s, nil
+		case "backspace", "ctrl+h", "delete":
 			r := []rune(s.SearchDraft)
 			if len(r) > 0 {
 				s.SearchDraft = string(r[:len(r)-1])
@@ -268,7 +281,7 @@ func (s *State) handleKey(msg tea.KeyMsg) (*State, tea.Cmd) {
 			if msg.Type == tea.KeySpace {
 				s.SearchDraft += " "
 			} else if msg.Type == tea.KeyRunes {
-				s.SearchDraft += string(msg.Runes)
+				s.SearchDraft += sanitizeSearchRunes(msg.Runes)
 			}
 			return s, nil
 		}
@@ -286,7 +299,7 @@ func (s *State) handleKey(msg tea.KeyMsg) (*State, tea.Cmd) {
 		return s, nil
 	case "/":
 		s.Focus = FocusSearch
-		s.SearchDraft = s.SearchQuery
+		s.SearchDraft = ""
 		return s, nil
 	case "tab":
 		if s.Width >= miniGuideMinW {
@@ -365,6 +378,8 @@ func (s *State) handleKey(msg tea.KeyMsg) (*State, tea.Cmd) {
 		return s.PlaySelected("audio")
 	case "v":
 		return s.PlaySelected("video")
+	case "m":
+		return s.PlaySelected("mix")
 	case "w":
 		return s.ToggleSaveSelected()
 	case "q":
@@ -496,29 +511,77 @@ func (s *State) CycleChip(delta int) *State {
 	return s
 }
 
+func deleteLastWord(s string) string {
+	r := []rune(s)
+	for len(r) > 0 && unicode.IsSpace(r[len(r)-1]) {
+		r = r[:len(r)-1]
+	}
+	for len(r) > 0 && !unicode.IsSpace(r[len(r)-1]) {
+		r = r[:len(r)-1]
+	}
+	return string(r)
+}
+
+func sanitizeSearchRunes(runes []rune) string {
+	if len(runes) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.Grow(len(runes))
+	for _, r := range runes {
+		switch r {
+		case '\r', '\n', '\t':
+			b.WriteByte(' ')
+		default:
+			if r < 32 || r == 127 {
+				continue
+			}
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+func isMixTarget(id, mode string) bool {
+	return mode == "mix" ||
+		strings.HasPrefix(id, "RD") ||
+		strings.HasPrefix(id, "PL") ||
+		strings.HasPrefix(id, "OLAK5uy_")
+}
+
 // SubmitSearch cancels any in-flight search and starts a new one.
 func (s *State) SubmitSearch() (*State, tea.Cmd) {
 	q := strings.TrimSpace(s.SearchDraft)
 	if q == "" {
 		s.Focus = FocusMain
+		s.SearchDraft = ""
 		return s, nil
 	}
 	if s.searchCancel != nil {
 		s.searchCancel()
 	}
+	s.searchSeq++
+	seq := s.searchSeq
+
 	s.SearchQuery = q
+	s.SearchDraft = ""
+	s.SearchResults = nil
 	s.View = ViewSearch
 	s.Focus = FocusMain
 	s.SearchPending = true
 	s.SearchChip = 0
 	s.ResultIdx = 0
+	s.ResultScroll = 0
 
 	ctx, cancel := context.WithTimeout(s.appCtx, searchTimeout)
 	s.searchCancel = cancel
 
 	return s, func() tea.Msg {
+		if s.Deps.Catalog == nil {
+			return SearchDoneMsg{Query: q, Seq: seq, Err: errors.New("catálogo no configurado")}
+		}
 		videos, err := s.Deps.Catalog.Search(ctx, q)
-		return SearchDoneMsg{Query: q, Videos: videos, Err: err}
+		return SearchDoneMsg{Query: q, Seq: seq, Videos: videos, Err: err}
 	}
 }
 
@@ -539,7 +602,11 @@ func (s *State) PlaySelected(mode string) (*State, tea.Cmd) {
 		}
 		s.Feeds[model.TabHistory] = updated
 	}
-	toastCmd := s.toastCmd("▶ Abriendo en mpv: " + v.Title)
+	toastPrefix := "▶ Abriendo en mpv: "
+	if isMixTarget(v.ID, mode) {
+		toastPrefix = "📻 Abriendo Mix: "
+	}
+	toastCmd := s.toastCmd(toastPrefix + v.Title)
 	playCmd := func() tea.Msg {
 		if err := s.Deps.Engine.Play(s.appCtx, v, mode); err != nil {
 			return ActionResultMsg{Err: err}

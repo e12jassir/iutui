@@ -24,8 +24,12 @@ var (
 	thumbCacheMu  sync.RWMutex
 	fetchingMap   = make(map[string]bool)
 	fetchingMu    sync.Mutex
+	preparingMap  = make(map[string]bool)
+	prepareMu     sync.Mutex
+	prepareSem    = make(chan struct{}, 4)
 	kittyUploaded = make(map[uint32]bool)
 	kittyUploadMu sync.Mutex
+	ttyWriteMu    sync.Mutex
 )
 
 // kittyDiacritics maps indices 0..63 to Kitty's official row/column combining diacritics for U+10EEEE placeholders.
@@ -124,6 +128,9 @@ func isFileTooSmall(path string, minBytes int64) bool {
 // RenderThumbnailANSI renders real pixel HD images inside cards via Kitty Unicode Placeholders (when running
 // in Kitty/Ghostty), or falls back to truecolor subpixel quadrant blocks for other terminals.
 func RenderThumbnailANSI(id string, width, height int) string {
+	if width <= 0 || height <= 0 {
+		return ""
+	}
 	useKitty := isKittyGraphicsSupported()
 	cacheKey := fmt.Sprintf("%s_%dx%d_k=%v", id, width, height, useKitty)
 
@@ -141,12 +148,8 @@ func RenderThumbnailANSI(id string, width, height int) string {
 	}
 
 	if useKitty && width <= len(kittyDiacritics) && height <= len(kittyDiacritics) {
-		if kittyStr, err := renderKittyPlaceholder(id, file, width, height); err == nil && kittyStr != "" {
-			thumbCacheMu.Lock()
-			thumbCache[cacheKey] = kittyStr
-			thumbCacheMu.Unlock()
-			return kittyStr
-		}
+		prepareKittyAsync(cacheKey, id, file, width, height)
+		return renderEmptyThumb(width, height)
 	}
 
 	ansiStr, err := renderHighDefBlocks(file, width, height)
@@ -161,9 +164,35 @@ func RenderThumbnailANSI(id string, width, height int) string {
 	return ansiStr
 }
 
-func videoImageID(id string) uint32 {
+func prepareKittyAsync(cacheKey, id, file string, width, height int) {
+	prepareMu.Lock()
+	if preparingMap[cacheKey] {
+		prepareMu.Unlock()
+		return
+	}
+	preparingMap[cacheKey] = true
+	prepareMu.Unlock()
+
+	go func() {
+		prepareSem <- struct{}{}
+		defer func() {
+			<-prepareSem
+			prepareMu.Lock()
+			delete(preparingMap, cacheKey)
+			prepareMu.Unlock()
+		}()
+
+		if kittyStr, err := renderKittyPlaceholder(id, file, width, height); err == nil && kittyStr != "" {
+			thumbCacheMu.Lock()
+			thumbCache[cacheKey] = kittyStr
+			thumbCacheMu.Unlock()
+		}
+	}()
+}
+
+func videoImageID(id string, cols, rows int) uint32 {
 	h := fnv.New32a()
-	_, _ = h.Write([]byte(cleanThumbID(id)))
+	_, _ = h.Write([]byte(fmt.Sprintf("%s_%dx%d", cleanThumbID(id), cols, rows)))
 	// 24-bit non-zero ID (1 .. 16,777,215) so it fits in 24-bit RGB foreground color
 	val := h.Sum32() & 0xFFFFFF
 	if val == 0 {
@@ -175,7 +204,10 @@ func videoImageID(id string) uint32 {
 // renderKittyPlaceholder uploads the downscaled PNG (320x180) once to /dev/tty using Kitty Graphics Protocol
 // and returns a grid of U+10EEEE Unicode placeholder cells that Lipgloss can safely wrap with borders.
 func renderKittyPlaceholder(id, path string, cols, rows int) (string, error) {
-	imgID := videoImageID(id)
+	if cols <= 0 || rows <= 0 || cols > len(kittyDiacritics) || rows > len(kittyDiacritics) {
+		return "", fmt.Errorf("invalid kitty dimensions %dx%d", cols, rows)
+	}
+	imgID := videoImageID(id, cols, rows)
 
 	kittyUploadMu.Lock()
 	uploaded := kittyUploaded[imgID]
@@ -293,7 +325,7 @@ func uploadKittyImage(imgID uint32, path string, cols, rows int) error {
 	if err != nil {
 		return err
 	}
-	defer tty.Close()
+	_ = tty.Close()
 
 	f, err := os.Open(path)
 	if err != nil {
@@ -370,12 +402,6 @@ func uploadKittyImage(imgID uint32, path string, cols, rows int) error {
 }
 
 func transmitKittyPNG(imgID uint32, pngBytes []byte, cols, rows int) error {
-	tty, err := os.OpenFile("/dev/tty", os.O_WRONLY, 0)
-	if err != nil {
-		return err
-	}
-	defer tty.Close()
-
 	b64 := base64.StdEncoding.EncodeToString(pngBytes)
 
 	var out bytes.Buffer
@@ -396,6 +422,15 @@ func transmitKittyPNG(imgID uint32, pngBytes []byte, cols, rows int) error {
 			fmt.Fprintf(&out, "\x1b_Gm=%d;%s\x1b\\", more, chunk)
 		}
 	}
+
+	ttyWriteMu.Lock()
+	defer ttyWriteMu.Unlock()
+
+	tty, err := os.OpenFile("/dev/tty", os.O_WRONLY, 0)
+	if err != nil {
+		return err
+	}
+	defer tty.Close()
 
 	_, err = tty.Write(out.Bytes())
 	return err

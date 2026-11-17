@@ -2,6 +2,10 @@ package app
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"strings"
+	"sync"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -391,6 +395,345 @@ func TestMouseInteractions(t *testing.T) {
 		}
 		if len(got) != 1 || got[0] != 1080 {
 			t.Fatalf("expected OnQualityChange [1080], got %v", got)
+		}
+	})
+}
+
+func runBatchSync(cmd tea.Cmd) {
+	if cmd == nil {
+		return
+	}
+	msg := cmd()
+	if batch, ok := msg.(tea.BatchMsg); ok {
+		for _, c := range batch {
+			if c != nil {
+				c()
+			}
+		}
+	}
+}
+
+type controlledSearchCatalog struct {
+	mu      sync.Mutex
+	calls   int
+	started chan int
+	release []chan []model.Video
+}
+
+func newControlledSearchCatalog(gates ...chan []model.Video) *controlledSearchCatalog {
+	return &controlledSearchCatalog{
+		started: make(chan int, len(gates)+4),
+		release: gates,
+	}
+}
+
+func (c *controlledSearchCatalog) Feed(context.Context, model.Tab) ([]model.Video, error) {
+	return nil, nil
+}
+
+func (c *controlledSearchCatalog) Search(ctx context.Context, _ string) ([]model.Video, error) {
+	c.mu.Lock()
+	idx := c.calls
+	c.calls++
+	c.mu.Unlock()
+
+	c.started <- idx
+	if idx < len(c.release) {
+		select {
+		case res := <-c.release[idx]:
+			return res, nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	return nil, ctx.Err()
+}
+
+func TestMultiRoundSearchClearsPreviousAndPreventsConcat(t *testing.T) {
+	s, cat, _, _ := newTestState()
+	defer s.Close()
+	s.Width, s.Height = 120, 36
+	cat.Results["pink floyd"] = []model.Video{
+		{ID: "pf1", Title: "Pink Floyd - Time", Channel: "Pink Floyd", Duration: "07:05"},
+	}
+
+	// Round 1 via '/'
+	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	if s.Focus != FocusSearch || s.SearchDraft != "" {
+		t.Fatalf("round 1 focus/draft = (%v, %q), want (FocusSearch, \"\")", s.Focus, s.SearchDraft)
+	}
+	for _, r := range "golang" {
+		s, _ = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	var cmd tea.Cmd
+	s, cmd = s.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("expected round 1 search cmd")
+	}
+	s, _ = s.Update(cmd())
+	if len(s.SearchResults) != 2 {
+		t.Fatalf("round 1 results = %d, want 2", len(s.SearchResults))
+	}
+	s.SetSelection(1)
+	s.ResultScroll = 1
+	s.SearchChip = 1
+
+	// Round 2 via '/': draft must start empty so typing does not concatenate onto "golang"
+	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	if s.Focus != FocusSearch {
+		t.Fatalf("round 2 Focus = %v, want FocusSearch", s.Focus)
+	}
+	if s.SearchDraft != "" {
+		t.Fatalf("round 2 SearchDraft = %q, want empty string (no concat)", s.SearchDraft)
+	}
+	if s.SearchQuery != "golang" || len(s.SearchResults) != 2 {
+		t.Fatalf("expected prior SearchQuery/SearchResults intact while typing, got query=%q len=%d", s.SearchQuery, len(s.SearchResults))
+	}
+
+	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("pink floyd")})
+	s, cmd = s.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if s.SearchQuery != "pink floyd" {
+		t.Fatalf("round 2 SearchQuery = %q, want %q", s.SearchQuery, "pink floyd")
+	}
+	if s.SearchDraft != "" {
+		t.Fatalf("SearchDraft after submit = %q, want empty", s.SearchDraft)
+	}
+	if len(s.SearchResults) != 0 {
+		t.Fatalf("expected previous SearchResults cleared immediately on submit, got %d", len(s.SearchResults))
+	}
+	if !s.SearchPending || s.ResultIdx != 0 || s.ResultScroll != 0 || s.SearchChip != 0 {
+		t.Fatalf("expected pending=true and reset indices, got pending=%v idx=%d scroll=%d chip=%d",
+			s.SearchPending, s.ResultIdx, s.ResultScroll, s.SearchChip)
+	}
+	s, _ = s.Update(cmd())
+	if len(s.SearchResults) != 1 || s.SearchResults[0].ID != "pf1" {
+		t.Fatalf("round 2 results = %+v, want [pf1]", s.SearchResults)
+	}
+
+	// Round 3 via mouse click on search bar when unfocused clears stale draft
+	s.SearchDraft = "leftover"
+	_, _, barStart := s.headerSearchBounds()
+	s, _ = s.Update(tea.MouseMsg{
+		X:      barStart + 2,
+		Y:      1,
+		Button: tea.MouseButtonLeft,
+		Action: tea.MouseActionPress,
+	})
+	if s.Focus != FocusSearch || s.SearchDraft != "" {
+		t.Fatalf("mouse focus search = (%v, %q), want (FocusSearch, \"\")", s.Focus, s.SearchDraft)
+	}
+
+	// Clicking inside search bar while already focused preserves current draft
+	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("abc")})
+	s, _ = s.Update(tea.MouseMsg{
+		X:      barStart + 2,
+		Y:      1,
+		Button: tea.MouseButtonLeft,
+		Action: tea.MouseActionPress,
+	})
+	if s.SearchDraft != "abc" {
+		t.Fatalf("re-clicking focused search bar altered draft to %q, want %q", s.SearchDraft, "abc")
+	}
+}
+
+func TestStaleAndCanceledSearchIgnoredBySeq(t *testing.T) {
+	gate1 := make(chan []model.Video)
+	gate2 := make(chan []model.Video, 1)
+	cat := newControlledSearchCatalog(gate1, gate2)
+	s := NewState(Dependencies{Catalog: cat})
+	defer s.Close()
+
+	// Start search 1 ("golang")
+	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("golang")})
+	var cmd1 tea.Cmd
+	s, cmd1 = s.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd1 == nil {
+		t.Fatal("expected cmd1")
+	}
+	done1 := make(chan tea.Msg, 1)
+	go func() { done1 <- cmd1() }()
+	<-cat.started
+
+	// Restart search 2 with the exact same query "golang" while search 1 is in flight
+	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("golang")})
+	var cmd2 tea.Cmd
+	s, cmd2 = s.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd2 == nil {
+		t.Fatal("expected cmd2")
+	}
+
+	// Search 1 was canceled by SubmitSearch; its SearchDoneMsg must be ignored without clearing SearchPending or setting Toast
+	msg1 := <-done1
+	s, _ = s.Update(msg1)
+	if !s.SearchPending {
+		t.Fatal("expected SearchPending to remain true after stale canceled search 1 returned")
+	}
+	if s.Toast != "" {
+		t.Fatalf("expected no error toast on canceled search, got %q", s.Toast)
+	}
+
+	// Even if a stale seq=1 message arrives with non-empty results for the same query, it must be ignored
+	s, _ = s.Update(SearchDoneMsg{
+		Query:  "golang",
+		Seq:    1,
+		Videos: []model.Video{{ID: "stale", Title: "Stale"}},
+	})
+	if len(s.SearchResults) != 0 || !s.SearchPending {
+		t.Fatalf("stale seq=1 payload leaked into state: results=%+v pending=%v", s.SearchResults, s.SearchPending)
+	}
+
+	// Now search 2 completes
+	fresh := []model.Video{{ID: "fresh", Title: "Fresh Result"}}
+	gate2 <- fresh
+	msg2 := cmd2()
+	<-cat.started
+	s, _ = s.Update(msg2)
+	if s.SearchPending {
+		t.Fatal("expected SearchPending=false after current search 2 finished")
+	}
+	if len(s.SearchResults) != 1 || s.SearchResults[0].ID != "fresh" {
+		t.Fatalf("expected fresh results, got %+v", s.SearchResults)
+	}
+
+	// A context.Canceled error matching current seq (or wrapped) clears SearchPending with no toast
+	s.SearchPending = true
+	s.Toast = ""
+	s, _ = s.Update(SearchDoneMsg{
+		Query: "golang",
+		Seq:   s.searchSeq,
+		Err:   fmt.Errorf("search aborted: %w", context.Canceled),
+	})
+	if s.SearchPending {
+		t.Fatal("expected SearchPending=false on canceled current search")
+	}
+	if s.Toast != "" {
+		t.Fatalf("expected no toast for context.Canceled, got %q", s.Toast)
+	}
+
+	// Non-cancellation errors still show toast
+	s.SearchPending = true
+	s, _ = s.Update(SearchDoneMsg{
+		Query: "golang",
+		Seq:   s.searchSeq,
+		Err:   errors.New("network failure"),
+	})
+	if s.Toast == "" || !strings.Contains(s.Toast, "Error buscando") {
+		t.Fatalf("expected error toast for non-cancel error, got %q", s.Toast)
+	}
+}
+
+func TestSearchInputEditingShortcutsAndPaste(t *testing.T) {
+	s, _, _, _ := newTestState()
+	defer s.Close()
+	s.SearchQuery = "previous query"
+	s.SearchResults = []model.Video{{ID: "keep1", Title: "Keep"}}
+	s.Focus = FocusSearch
+
+	// Pasted runes sanitize \r, \n, \t -> ' ' and drop control chars < 32
+	s, _ = s.Update(tea.KeyMsg{
+		Type:  tea.KeyRunes,
+		Runes: []rune("soda\nstereo\t\r\x07live"),
+		Paste: true,
+	})
+	if s.SearchDraft != "soda stereo  live" {
+		t.Fatalf("after sanitized paste got %q, want %q", s.SearchDraft, "soda stereo  live")
+	}
+
+	// delete, ctrl+h, backspace delete last rune cleanly (including multibyte UTF-8)
+	s.SearchDraft = "café"
+	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyDelete})
+	if s.SearchDraft != "caf" {
+		t.Fatalf("after delete got %q, want %q", s.SearchDraft, "caf")
+	}
+	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyCtrlH})
+	if s.SearchDraft != "ca" {
+		t.Fatalf("after ctrl+h got %q, want %q", s.SearchDraft, "ca")
+	}
+	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+	if s.SearchDraft != "c" {
+		t.Fatalf("after backspace got %q, want %q", s.SearchDraft, "c")
+	}
+
+	// ctrl+w and alt+backspace delete last word (trim trailing spaces first, then up to previous space)
+	s.SearchDraft = "pink floyd   "
+	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyCtrlW})
+	if s.SearchDraft != "pink " {
+		t.Fatalf("after ctrl+w got %q, want %q", s.SearchDraft, "pink ")
+	}
+	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyBackspace, Alt: true})
+	if s.SearchDraft != "" {
+		t.Fatalf("after alt+backspace got %q, want %q", s.SearchDraft, "")
+	}
+
+	// ctrl+u clears entire draft
+	s.SearchDraft = "clear everything"
+	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyCtrlU})
+	if s.SearchDraft != "" {
+		t.Fatalf("after ctrl+u got %q, want %q", s.SearchDraft, "")
+	}
+
+	// esc blurs search and clears draft while keeping previous SearchQuery & SearchResults
+	s.SearchDraft = "aborted"
+	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if s.Focus != FocusMain || s.SearchDraft != "" {
+		t.Fatalf("after esc got focus=%v draft=%q, want FocusMain & empty", s.Focus, s.SearchDraft)
+	}
+	if s.SearchQuery != "previous query" || len(s.SearchResults) != 1 {
+		t.Fatalf("esc clobbered prior search state: query=%q len=%d", s.SearchQuery, len(s.SearchResults))
+	}
+}
+
+func TestMixKeyTriggersMixPlayback(t *testing.T) {
+	t.Run("m key invokes Engine.Play with mix mode and mix toast", func(t *testing.T) {
+		t.Parallel()
+		s, cat, eng, _ := newTestState()
+		defer s.Close()
+		s, _ = s.Update(FeedLoadedMsg{Tab: model.TabHome, Videos: cat.Feeds[model.TabHome]})
+
+		var cmd tea.Cmd
+		s, cmd = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'m'}})
+		wantToast := "📻 Abriendo Mix: Go Concurrency"
+		if s.Toast != wantToast {
+			t.Fatalf("Toast = %q, want %q", s.Toast, wantToast)
+		}
+		runBatchSync(cmd)
+
+		calls := eng.Calls()
+		if len(calls) != 1 || calls[0].Method != "Play" || calls[0].Mode != "mix" || calls[0].Video.ID != "vid01" {
+			t.Fatalf("unexpected Engine calls: %+v", calls)
+		}
+	})
+
+	t.Run("mix and playlist prefixes use Mix toast on Enter", func(t *testing.T) {
+		t.Parallel()
+		cases := []struct {
+			id        string
+			wantToast string
+		}{
+			{id: "RDOgeR2oqZGTs", wantToast: "📻 Abriendo Mix: Track"},
+			{id: "PLabc123", wantToast: "📻 Abriendo Mix: Track"},
+			{id: "OLAK5uy_xyz", wantToast: "📻 Abriendo Mix: Track"},
+			{id: "dQw4w9WgXcQ", wantToast: "▶ Abriendo en mpv: Track"},
+		}
+		for _, tc := range cases {
+			tc := tc
+			t.Run(tc.id, func(t *testing.T) {
+				t.Parallel()
+				s, _, _, _ := newTestState()
+				defer s.Close()
+				s, _ = s.Update(FeedLoadedMsg{
+					Tab:    model.TabHome,
+					Videos: []model.Video{{ID: tc.id, Title: "Track"}},
+				})
+				var cmd tea.Cmd
+				s, cmd = s.Update(tea.KeyMsg{Type: tea.KeyEnter})
+				if s.Toast != tc.wantToast {
+					t.Fatalf("Toast = %q, want %q", s.Toast, tc.wantToast)
+				}
+				runBatchSync(cmd)
+			})
 		}
 	})
 }
