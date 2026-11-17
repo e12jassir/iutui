@@ -9,6 +9,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/e12jassir/ytx/internal/app"
+	"github.com/e12jassir/ytx/internal/lyrics"
 	"github.com/e12jassir/ytx/internal/model"
 	"github.com/e12jassir/ytx/internal/player"
 	"github.com/e12jassir/ytx/internal/tui/theme"
@@ -397,5 +398,82 @@ func TestRenderStillWatchingAndSettingsAutoplay(t *testing.T) {
 		if !strings.Contains(outHelp, "Activar/desactivar Autoplay") {
 			t.Fatalf("expected Autoplay shortcut in help overlay, got:\n%s", outHelp)
 		}
+	})
+}
+
+func TestRenderChannelChaptersLyricsAndThemes(t *testing.T) {
+	th := theme.DefaultTheme()
+	tr := thumbs.NewTextRenderer()
+
+	t.Run("channel_view_and_loading", func(t *testing.T) {
+		s := newTestState(app.ViewChannel, 120, 36)
+		defer s.Close()
+		s.ChannelTitle = "Soda Stereo"
+		s.ChannelVideos = fixedVideos()[:2]
+		out := Render(s, th, tr)
+		assertBounds(t, out, 120, 36)
+		if !strings.Contains(out, "Canal: Soda Stereo") || !strings.Contains(out, "De Música Ligera") {
+			t.Fatalf("expected channel title and videos in output, got:\n%s", out)
+		}
+
+		s.ChannelVideos = nil
+		s.ChannelPending = true
+		outLoad := Render(s, th, tr)
+		assertBounds(t, outLoad, 120, 36)
+		if !strings.Contains(outLoad, "Cargando canal...") {
+			t.Fatalf("expected channel loading box, got:\n%s", outLoad)
+		}
+	})
+
+	t.Run("chapters_overlay", func(t *testing.T) {
+		s := newTestState(app.ViewHome, 120, 36)
+		defer s.Close()
+		s.ShowChapters = true
+		s.Chapters = []player.Chapter{
+			{Title: "Intro acústica", Time: 0},
+			{Title: "Solo de guitarra", Time: 135},
+		}
+		s.ChapterIdx = 1
+		out := Render(s, th, tr)
+		assertBounds(t, out, 120, 36)
+		if !strings.Contains(out, "Capítulos del video") || !strings.Contains(out, "▶ 02:15  Solo de guitarra") {
+			t.Fatalf("expected active chapter highlight, got:\n%s", out)
+		}
+	})
+
+	t.Run("lyrics_panel_and_overlay_synced_line", func(t *testing.T) {
+		for _, w := range []int{120, 88} {
+			s := newTestState(app.ViewHome, w, 36)
+			s.ShowLyrics = true
+			s.LyricsTrack = "De Música Ligera"
+			s.PlayerStatus.TimePos = 15
+			s.Lyrics = lyrics.TrackLyrics{
+				TrackName:  "De Música Ligera",
+				ArtistName: "Soda Stereo",
+				Synced: []lyrics.Line{
+					{Time: 5, Text: "Ella durmió"},
+					{Time: 12, Text: "Al calor de las masas"},
+					{Time: 22, Text: "Y yo desperté"},
+				},
+			}
+			out := Render(s, th, tr)
+			s.Close()
+			assertBounds(t, out, w, 36)
+			if !strings.Contains(out, "Letras") || !strings.Contains(out, "▶ Al calor de las masas") {
+				t.Fatalf("width=%d expected active synced lyric line, got:\n%s", w, out)
+			}
+		}
+	})
+
+	t.Run("catppuccin_and_no_color_bounds", func(t *testing.T) {
+		s := newTestState(app.ViewHome, 120, 36)
+		defer s.Close()
+		s.ThemeName = "catppuccin"
+		outCat := Render(s, th, tr)
+		assertBounds(t, outCat, 120, 36)
+
+		t.Setenv("NO_COLOR", "1")
+		outNoColor := Render(s, th, tr)
+		assertBounds(t, outNoColor, 120, 36)
 	})
 }

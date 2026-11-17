@@ -9,12 +9,16 @@ import (
 	"unicode"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/e12jassir/ytx/internal/lyrics"
 	"github.com/e12jassir/ytx/internal/model"
 	"github.com/e12jassir/ytx/internal/player"
+	"github.com/e12jassir/ytx/internal/tui/theme"
 )
 
 const (
 	searchTimeout           = 45 * time.Second
+	channelTimeout          = 20 * time.Second
+	lyricsTimeout           = 6 * time.Second
 	feedTimeout             = 30 * time.Second
 	toastTTL                = 4 * time.Second
 	uiTickRate              = 250 * time.Millisecond // 4 Hz cap
@@ -83,6 +87,42 @@ type ActionResultMsg struct {
 type DownloadDoneMsg struct {
 	Video model.Video
 	Err   error
+}
+
+// VideoModeToggledMsg reports completion of hot Audio/Video toggling on mpv.
+type VideoModeToggledMsg struct {
+	VideoOn bool
+	Err     error
+}
+
+// ChannelLoadedMsg arrives when an asynchronous channel video fetch completes.
+type ChannelLoadedMsg struct {
+	Channel string
+	Seq     uint64
+	Videos  []model.Video
+	Err     error
+}
+
+// SubscriptionToggledMsg arrives when Store toggles a channel subscription.
+type SubscriptionToggledMsg struct {
+	Channel    string
+	Subscribed bool
+	Subs       []string
+	Err        error
+}
+
+// ChaptersLoadedMsg arrives after querying chapter-list from mpv.
+type ChaptersLoadedMsg struct {
+	Chapters []player.Chapter
+	Err      error
+}
+
+// LyricsLoadedMsg arrives when a lyrics lookup completes.
+type LyricsLoadedMsg struct {
+	Seq    uint64
+	Track  string
+	Lyrics lyrics.TrackLyrics
+	Err    error
 }
 
 // Init starts initial feed/store loading and subscribes to player status push updates.
@@ -205,6 +245,87 @@ func (s *State) Update(msg tea.Msg) (*State, tea.Cmd) {
 		}
 		return s, tea.Batch(s.toastCmd("✓ Descargado: "+msg.Video.Title), reload)
 
+	case VideoModeToggledMsg:
+		if msg.Err != nil {
+			return s, s.toastCmd(fmt.Sprintf("Error alternando video: %v", msg.Err))
+		}
+		if msg.VideoOn {
+			return s, s.toastCmd("🎬 Video activado")
+		}
+		return s, s.toastCmd("🎧 Solo audio (en caliente)")
+
+	case ChannelLoadedMsg:
+		if msg.Seq != 0 && msg.Seq != s.channelSeq {
+			return s, nil
+		}
+		s.ChannelPending = false
+		if msg.Err != nil {
+			if errors.Is(msg.Err, context.Canceled) {
+				return s, nil
+			}
+			return s, s.toastCmd(fmt.Sprintf("Error cargando canal: %v", msg.Err))
+		}
+		s.ChannelVideos = msg.Videos
+		s.ChannelIdx = 0
+		s.ChannelScroll = 0
+		s.SetSelection(0)
+		s.prefetchTop(msg.Videos, 4)
+		return s, nil
+
+	case SubscriptionToggledMsg:
+		if msg.Err != nil {
+			return s, s.toastCmd(fmt.Sprintf("Error de suscripción: %v", msg.Err))
+		}
+		if msg.Subs != nil {
+			s.Subscriptions = msg.Subs
+		} else {
+			s.Subscriptions = toggleLocalSub(s.Subscriptions, msg.Channel, msg.Subscribed)
+		}
+		delete(s.Feeds, model.TabSubscriptions)
+		var reload tea.Cmd
+		if s.ActiveTab == model.TabSubscriptions {
+			s.Syncing = true
+			reload = tea.Batch(s.loadFeedCmd(model.TabSubscriptions, true), s.ensureAnimTick())
+		}
+		if msg.Subscribed {
+			return s, tea.Batch(s.toastCmd("★ Suscrito: "+msg.Channel), reload)
+		}
+		return s, tea.Batch(s.toastCmd("Suscripción quitada: "+msg.Channel), reload)
+
+	case ChaptersLoadedMsg:
+		if msg.Err != nil {
+			return s, s.toastCmd(fmt.Sprintf("Error leyendo capítulos: %v", msg.Err))
+		}
+		if len(msg.Chapters) == 0 {
+			return s, s.toastCmd("Sin capítulos disponibles")
+		}
+		s.Chapters = msg.Chapters
+		s.ChapterIdx = activeChapterIndex(msg.Chapters, s.PlayerStatus.TimePos)
+		s.ShowChapters = true
+		return s, nil
+
+	case LyricsLoadedMsg:
+		if msg.Seq != 0 && msg.Seq != s.lyricsSeq {
+			return s, nil
+		}
+		s.LyricsLoading = false
+		s.LyricsTrack = msg.Track
+		if msg.Err != nil {
+			if errors.Is(msg.Err, context.Canceled) {
+				return s, nil
+			}
+			s.Lyrics = lyrics.TrackLyrics{}
+			if errors.Is(msg.Err, lyrics.ErrNotFound) {
+				s.LyricsErr = "Sin letra encontrada"
+			} else {
+				s.LyricsErr = fmt.Sprintf("Error de letra: %v", msg.Err)
+			}
+			return s, nil
+		}
+		s.Lyrics = msg.Lyrics
+		s.LyricsErr = ""
+		return s, nil
+
 	case PlayerStatusMsg:
 		wasPlaying := s.PlayerStatus.IsRunning && !s.PlayerStatus.Paused
 		s.PlayerStatus = msg.Status
@@ -218,6 +339,12 @@ func (s *State) Update(msg tea.Msg) (*State, tea.Cmd) {
 			s.lastTrackTitle = msg.Status.Title
 		}
 		cmds := []tea.Cmd{s.waitPlayerStatusCmd()}
+		if s.ShowLyrics && msg.Status.IsRunning && strings.TrimSpace(msg.Status.Title) != "" && msg.Status.Title != s.LyricsTrack {
+			v := s.findVideoForTitle(msg.Status.Title)
+			if cmd := s.startLyricsFetch(v.ID, msg.Status.Title, v.Channel); cmd != nil {
+				cmds = append(cmds, cmd, s.ensureAnimTick())
+			}
+		}
 		if s.Autoplay && !s.ShowStillWatching && msg.Status.IsRunning && !msg.Status.Paused {
 			if s.AutoplayTracksSinceInput >= stillWatchingTrackLimit ||
 				(s.AutoplayTracksSinceInput >= 1 && time.Since(s.LastInteractionAt) >= stillWatchingIdleLimit) {
@@ -311,6 +438,37 @@ func (s *State) handleKey(msg tea.KeyMsg) (*State, tea.Cmd) {
 		return s, nil
 	}
 
+	if s.ShowChapters {
+		switch key {
+		case "esc", "C", "q":
+			s.ShowChapters = false
+			return s, nil
+		case "j", "down":
+			if len(s.Chapters) > 0 && s.ChapterIdx < len(s.Chapters)-1 {
+				s.ChapterIdx++
+			}
+			return s, nil
+		case "k", "up":
+			if s.ChapterIdx > 0 {
+				s.ChapterIdx--
+			}
+			return s, nil
+		case "enter", " ":
+			if s.ChapterIdx >= 0 && s.ChapterIdx < len(s.Chapters) && s.Deps.Engine != nil {
+				ch := s.Chapters[s.ChapterIdx]
+				s.ShowChapters = false
+				if cp, ok := s.Deps.Engine.(chaptersProvider); ok {
+					return s, s.engineCmd(func(ctx context.Context) error {
+						return cp.SeekAbsolute(ctx, ch.Time)
+					}, "⏩ Capítulo: "+ch.Title)
+				}
+			}
+			s.ShowChapters = false
+			return s, nil
+		}
+		return s, nil
+	}
+
 	if s.ShowSettings {
 		switch key {
 		case "esc", "S", "q":
@@ -320,6 +478,10 @@ func (s *State) handleKey(msg tea.KeyMsg) (*State, tea.Cmd) {
 			return s.CycleQuality()
 		case "A":
 			return s.ToggleAutoplay()
+		case "B":
+			return s.ToggleSponsorBlock()
+		case "t":
+			return s.CycleTheme()
 		}
 		return s, nil
 	}
@@ -385,9 +547,21 @@ func (s *State) handleKey(msg tea.KeyMsg) (*State, tea.Cmd) {
 			s.Focus = FocusMain
 			return s, nil
 		}
+		if s.View == ViewChannel {
+			s.View = s.PrevView
+			if s.View == ViewChannel {
+				s.View = ViewHome
+			}
+			s.Focus = FocusMain
+			return s, nil
+		}
 		if s.View == ViewSearch {
 			s.View = ViewHome
 			s.Focus = FocusMain
+			return s, nil
+		}
+		if s.ShowLyrics {
+			s.ShowLyrics = false
 		}
 		return s, nil
 	case "j", "down":
@@ -448,16 +622,30 @@ func (s *State) handleKey(msg tea.KeyMsg) (*State, tea.Cmd) {
 		return s.PlaySelected("audio")
 	case "v":
 		return s.PlaySelected("video")
+	case "V":
+		return s.ToggleVideoMode()
 	case "m":
 		return s.PlaySelected("mix")
 	case "w":
 		return s.ToggleSaveSelected()
+	case "s":
+		return s.ToggleSubscribeSelected()
+	case "g":
+		return s.OpenSelectedChannel()
 	case "q":
 		return s.EnqueueSelected()
 	case "d":
 		return s.DownloadSelected(false)
 	case "c":
 		return s.CycleQuality()
+	case "C":
+		return s.OpenChapters()
+	case "L":
+		return s.ToggleLyrics()
+	case "B":
+		return s.ToggleSponsorBlock()
+	case "t":
+		return s.CycleTheme()
 	case "A":
 		return s.ToggleAutoplay()
 	case " ":
@@ -493,15 +681,14 @@ func (s *State) prefetchTop(videos []model.Video, n int) {
 }
 
 func (s *State) activeIdx() int {
-	if s.View == ViewSearch {
-		return s.ResultIdx
-	}
-	return s.SelectedIdx
+	return s.ActiveListIndex()
 }
 
 // SwitchTab changes the active sidebar tab and loads its feed if needed.
 func (s *State) SwitchTab(tab model.Tab) (*State, tea.Cmd) {
 	s.View = ViewHome
+	s.PrevView = ViewHome
+	s.ShowChapters = false
 	s.ActiveTab = tab
 	s.SelectedIdx = 0
 	s.ScrollOffset = 0
@@ -963,4 +1150,267 @@ func (s *State) ensureAnimTick() tea.Cmd {
 	}
 	s.animActive = true
 	return s.animTickCmd()
+}
+
+type videoModeToggler interface {
+	ToggleVideoMode(ctx context.Context) (bool, error)
+}
+
+type sponsorBlockController interface {
+	SetSponsorBlock(enabled bool)
+	SponsorBlockEnabled() bool
+}
+
+type chaptersProvider interface {
+	Chapters(ctx context.Context) ([]player.Chapter, error)
+	SeekAbsolute(ctx context.Context, seconds float64) error
+}
+
+type channelCatalog interface {
+	ChannelVideos(ctx context.Context, v model.Video, limit int) ([]model.Video, error)
+}
+
+type subscriptionToggler interface {
+	ToggleSubscription(ctx context.Context, channelRef string) (bool, error)
+}
+
+// ToggleVideoMode switches audio-only vs video mode live on the active mpv instance.
+func (s *State) ToggleVideoMode() (*State, tea.Cmd) {
+	vt, ok := s.Deps.Engine.(videoModeToggler)
+	if !ok {
+		return s, s.toastCmd("Cambio de video en caliente no disponible")
+	}
+	return s, func() tea.Msg {
+		videoOn, err := vt.ToggleVideoMode(s.appCtx)
+		return VideoModeToggledMsg{VideoOn: videoOn, Err: err}
+	}
+}
+
+// ToggleSponsorBlock flips automatic SponsorBlock segment skipping, configures the engine,
+// persists configuration if wired, and displays a confirmation toast.
+func (s *State) ToggleSponsorBlock() (*State, tea.Cmd) {
+	s.SponsorBlock = !s.SponsorBlock
+	if sc, ok := s.Deps.Engine.(sponsorBlockController); ok {
+		sc.SetSponsorBlock(s.SponsorBlock)
+	}
+	var saveCmd tea.Cmd
+	if s.Deps.OnSponsorBlockChange != nil {
+		fn := s.Deps.OnSponsorBlockChange
+		enabled := s.SponsorBlock
+		saveCmd = func() tea.Msg {
+			if err := fn(enabled); err != nil {
+				return ActionResultMsg{Err: err}
+			}
+			return nil
+		}
+	}
+	msg := "🛡 SponsorBlock: OFF"
+	if s.SponsorBlock {
+		msg = "🛡 SponsorBlock: ON"
+	}
+	return s, tea.Batch(s.toastCmd(msg), saveCmd)
+}
+
+// CycleTheme rotates through built-in color palettes, persists YT_THEME, and shows a toast.
+func (s *State) CycleTheme() (*State, tea.Cmd) {
+	next := theme.NextTheme(s.ThemeName)
+	s.ThemeName = next
+	var saveCmd tea.Cmd
+	if s.Deps.OnThemeChange != nil {
+		fn := s.Deps.OnThemeChange
+		saveCmd = func() tea.Msg {
+			if err := fn(next); err != nil {
+				return ActionResultMsg{Err: err}
+			}
+			return nil
+		}
+	}
+	return s, tea.Batch(s.toastCmd("🎨 Tema: "+next), saveCmd)
+}
+
+// OpenSelectedChannel navigates into the highlighted video's creator channel view.
+func (s *State) OpenSelectedChannel() (*State, tea.Cmd) {
+	v, ok := s.SelectedVideo()
+	if !ok {
+		return s, nil
+	}
+	chName := strings.TrimSpace(v.Channel)
+	if chName == "" {
+		return s, s.toastCmd("Este video no tiene canal visible")
+	}
+	cc, ok := s.Deps.Catalog.(channelCatalog)
+	if !ok {
+		return s, s.toastCmd("Vista de canal no disponible")
+	}
+	if s.channelCancel != nil {
+		s.channelCancel()
+	}
+	s.channelSeq++
+	seq := s.channelSeq
+
+	if s.View != ViewChannel {
+		s.PrevView = s.View
+	}
+	s.View = ViewChannel
+	s.Focus = FocusMain
+	s.ChannelTitle = chName
+	s.ChannelVideos = nil
+	s.ChannelIdx = 0
+	s.ChannelScroll = 0
+	s.ChannelPending = true
+
+	ctx, cancel := context.WithTimeout(s.appCtx, channelTimeout)
+	s.channelCancel = cancel
+
+	cmd := func() tea.Msg {
+		videos, err := cc.ChannelVideos(ctx, v, 24)
+		return ChannelLoadedMsg{Channel: chName, Seq: seq, Videos: videos, Err: err}
+	}
+	return s, tea.Batch(cmd, s.ensureAnimTick())
+}
+
+// ToggleSubscribeSelected subscribes or unsubscribes from the highlighted video's channel.
+func (s *State) ToggleSubscribeSelected() (*State, tea.Cmd) {
+	v, ok := s.SelectedVideo()
+	if !ok || s.Deps.Store == nil {
+		return s, nil
+	}
+	ch := strings.TrimSpace(v.Channel)
+	if ch == "" {
+		return s, s.toastCmd("Este video no tiene canal para suscribirse")
+	}
+	st, ok := s.Deps.Store.(subscriptionToggler)
+	if !ok {
+		return s, s.toastCmd("Suscripciones rápidas no disponibles")
+	}
+	return s, func() tea.Msg {
+		subscribed, err := st.ToggleSubscription(s.appCtx, ch)
+		if err != nil {
+			return SubscriptionToggledMsg{Channel: ch, Err: err}
+		}
+		subs, _ := s.Deps.Store.Subscriptions(s.appCtx)
+		return SubscriptionToggledMsg{Channel: ch, Subscribed: subscribed, Subs: subs}
+	}
+}
+
+// OpenChapters queries mpv's active chapter-list and opens the chapters picker modal.
+func (s *State) OpenChapters() (*State, tea.Cmd) {
+	cp, ok := s.Deps.Engine.(chaptersProvider)
+	if !ok {
+		return s, s.toastCmd("Sin capítulos disponibles")
+	}
+	return s, func() tea.Msg {
+		ctx, cancel := context.WithTimeout(s.appCtx, 3*time.Second)
+		defer cancel()
+		chapters, err := cp.Chapters(ctx)
+		return ChaptersLoadedMsg{Chapters: chapters, Err: err}
+	}
+}
+
+// ToggleLyrics toggles the synced lyrics panel and fetches lyrics for the active or selected track.
+func (s *State) ToggleLyrics() (*State, tea.Cmd) {
+	if s.ShowLyrics {
+		s.ShowLyrics = false
+		return s, nil
+	}
+	var videoID, title, channel string
+	if s.PlayerStatus.IsRunning && strings.TrimSpace(s.PlayerStatus.Title) != "" {
+		title = strings.TrimSpace(s.PlayerStatus.Title)
+		if matched := s.findVideoForTitle(title); matched.Title != "" {
+			videoID = matched.ID
+			channel = matched.Channel
+		}
+	} else if v, ok := s.SelectedVideo(); ok {
+		videoID = v.ID
+		title = strings.TrimSpace(v.Title)
+		channel = strings.TrimSpace(v.Channel)
+	}
+	if title == "" {
+		return s, s.toastCmd("Selecciona o reproduce un tema primero")
+	}
+	s.ShowLyrics = true
+	if title == s.LyricsTrack && !s.LyricsLoading && (len(s.Lyrics.Synced) > 0 || len(s.Lyrics.Plain) > 0) {
+		return s, nil
+	}
+	cmd := s.startLyricsFetch(videoID, title, channel)
+	return s, tea.Batch(cmd, s.ensureAnimTick())
+}
+
+func (s *State) startLyricsFetch(videoID, title, channel string) tea.Cmd {
+	if strings.TrimSpace(title) == "" {
+		return nil
+	}
+	if s.lyricsCancel != nil {
+		s.lyricsCancel()
+	}
+	s.lyricsSeq++
+	seq := s.lyricsSeq
+	s.LyricsLoading = true
+	s.LyricsTrack = title
+	s.LyricsErr = ""
+	s.Lyrics = lyrics.TrackLyrics{}
+
+	client := s.Deps.LyricsClient
+	if client == nil {
+		client = lyrics.NewClient()
+		s.Deps.LyricsClient = client
+	}
+	ctx, cancel := context.WithTimeout(s.appCtx, lyricsTimeout)
+	s.lyricsCancel = cancel
+
+	return func() tea.Msg {
+		tl, err := client.Fetch(ctx, videoID, title, channel)
+		return LyricsLoadedMsg{Seq: seq, Track: title, Lyrics: tl, Err: err}
+	}
+}
+
+func (s *State) findVideoForTitle(title string) model.Video {
+	if title == "" {
+		return model.Video{}
+	}
+	searchLists := [][]model.Video{
+		s.Feeds[s.ActiveTab],
+		s.SearchResults,
+		s.ChannelVideos,
+		s.Queue,
+	}
+	for _, list := range searchLists {
+		for _, v := range list {
+			if v.Title == title {
+				return v
+			}
+		}
+	}
+	for _, t := range []model.Tab{model.TabHome, model.TabMusic, model.TabSubscriptions, model.TabHistory, model.TabWatchLater, model.TabLiked, model.TabDownloads} {
+		for _, v := range s.Feeds[t] {
+			if v.Title == title {
+				return v
+			}
+		}
+	}
+	return model.Video{}
+}
+
+func toggleLocalSub(subs []string, channel string, add bool) []string {
+	out := make([]string, 0, len(subs)+1)
+	for _, sub := range subs {
+		if strings.EqualFold(strings.TrimSpace(sub), strings.TrimSpace(channel)) {
+			continue
+		}
+		out = append(out, sub)
+	}
+	if add && strings.TrimSpace(channel) != "" {
+		out = append(out, strings.TrimSpace(channel))
+	}
+	return out
+}
+
+func activeChapterIndex(chapters []player.Chapter, pos float64) int {
+	idx := 0
+	for i, ch := range chapters {
+		if ch.Time <= pos+0.5 {
+			idx = i
+		}
+	}
+	return idx
 }

@@ -17,6 +17,7 @@ import (
 	"github.com/e12jassir/ytx/internal/config"
 	"github.com/e12jassir/ytx/internal/cookies"
 	"github.com/e12jassir/ytx/internal/download"
+	"github.com/e12jassir/ytx/internal/lyrics"
 	"github.com/e12jassir/ytx/internal/model"
 	"github.com/e12jassir/ytx/internal/platform"
 	"github.com/e12jassir/ytx/internal/player"
@@ -237,23 +238,43 @@ func runTUI(paths platform.Paths) error {
 		}),
 	)
 	defer eng.Close()
+	eng.SetSponsorBlock(cfg.SponsorBlock)
 	dl := download.NewManager(paths.StateDir, dlDir, cfg.YtdlpBin)
 
+	sbEnabled := cfg.SponsorBlock
 	state := app.NewState(app.Dependencies{
-		Catalog:        cat,
-		Engine:         eng,
-		Store:          st,
-		Downloader:     dl,
-		InitialQuality: cfg.Quality,
+		Catalog:             cat,
+		Engine:              eng,
+		Store:               st,
+		Downloader:          dl,
+		LyricsClient:        lyrics.NewClient(),
+		InitialQuality:      cfg.Quality,
+		InitialTheme:        cfg.Theme,
+		InitialSponsorBlock: &sbEnabled,
 		OnQualityChange: func(q int) error {
 			return config.SaveVal(cfgPath, "YT_QUALITY", strconv.Itoa(q))
 		},
+		OnThemeChange: func(name string) error {
+			return config.SaveVal(cfgPath, "YT_THEME", name)
+		},
+		OnSponsorBlockChange: func(enabled bool) error {
+			val := "0"
+			if enabled {
+				val = "1"
+			}
+			return config.SaveVal(cfgPath, "YT_SPONSORBLOCK", val)
+		},
 	})
+
+	initTheme := theme.DefaultTheme()
+	if cfg.Theme != "" && !strings.EqualFold(cfg.Theme, "youtube-dark") {
+		initTheme = theme.ThemeFromPalette(theme.ByName(cfg.Theme))
+	}
 
 	p := tea.NewProgram(
 		teaModel{
 			state:  state,
-			theme:  theme.DefaultTheme(),
+			theme:  initTheme,
 			thumbs: newNativeThumbs(),
 		},
 		tea.WithAltScreen(),

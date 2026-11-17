@@ -250,3 +250,48 @@ func TestFakeStore(t *testing.T) {
 		t.Fatalf("Subscriptions = (%v, %v)", subs, err)
 	}
 }
+
+func TestToggleSubscription(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	s := NewTSVStore(dir)
+
+	if _, err := s.ToggleSubscription(ctx, "   "); err == nil {
+		t.Fatal("expected error for empty channel reference")
+	}
+
+	subscribed, err := s.ToggleSubscription(ctx, "Soda Stereo")
+	if err != nil || !subscribed {
+		t.Fatalf("first ToggleSubscription = (%v, %v), want (true, nil)", subscribed, err)
+	}
+	subscribed, err = s.ToggleSubscription(ctx, "@gopher")
+	if err != nil || !subscribed {
+		t.Fatalf("second ToggleSubscription = (%v, %v), want (true, nil)", subscribed, err)
+	}
+
+	subs, err := s.Subscriptions(ctx)
+	if err != nil || !slices.Equal(subs, []string{"Soda Stereo", "@gopher"}) {
+		t.Fatalf("Subscriptions = (%v, %v), want [Soda Stereo @gopher]", subs, err)
+	}
+
+	// Case-insensitive removal
+	subscribed, err = s.ToggleSubscription(ctx, "soda stereo")
+	if err != nil || subscribed {
+		t.Fatalf("unsubscribe ToggleSubscription = (%v, %v), want (false, nil)", subscribed, err)
+	}
+	subs, err = s.Subscriptions(ctx)
+	if err != nil || !slices.Equal(subs, []string{"@gopher"}) {
+		t.Fatalf("Subscriptions after unsubscribe = (%v, %v), want [@gopher]", subs, err)
+	}
+
+	// FakeStore toggle
+	fs := NewFakeStore()
+	subscribed, err = fs.ToggleSubscription(ctx, "Soda Stereo")
+	if err != nil || !subscribed {
+		t.Fatalf("FakeStore add = (%v, %v), want (true, nil)", subscribed, err)
+	}
+	subscribed, err = fs.ToggleSubscription(ctx, "SODA STEREO")
+	if err != nil || subscribed {
+		t.Fatalf("FakeStore remove = (%v, %v), want (false, nil)", subscribed, err)
+	}
+}

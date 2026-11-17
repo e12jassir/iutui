@@ -144,7 +144,55 @@ func (s *TSVStore) Subscriptions(ctx context.Context) ([]string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	return s.readSubscriptions(filepath.Join(s.StateDir, subscriptionsFile))
+}
+
+// ToggleSubscription adds channelRef to subscriptions.tsv if absent (returning true)
+// or removes matching entries case-insensitively if already present (returning false).
+func (s *TSVStore) ToggleSubscription(ctx context.Context, channelRef string) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	ref := sanitizeField(channelRef)
+	if ref == "" {
+		return false, errors.New("channel reference is required")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	path := filepath.Join(s.StateDir, subscriptionsFile)
+	existing, err := s.readSubscriptions(path)
+	if err != nil {
+		return false, err
+	}
+
+	found := false
+	updated := make([]string, 0, len(existing)+1)
+	for _, sub := range existing {
+		if strings.EqualFold(strings.TrimSpace(sub), ref) {
+			found = true
+			continue
+		}
+		updated = append(updated, sub)
+	}
+
+	subscribed := !found
+	if subscribed {
+		updated = append(updated, ref)
+	}
+
+	var buf bytes.Buffer
+	for _, sub := range updated {
+		fmt.Fprintf(&buf, "%s\n", sanitizeField(sub))
+	}
+	if err := writeBytesAtomic(path, buf.Bytes()); err != nil {
+		return false, err
+	}
+	return subscribed, nil
+}
+
+func (s *TSVStore) readSubscriptions(path string) ([]string, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -247,11 +295,6 @@ func normalizeNA(s string) string {
 }
 
 func writeVideosAtomic(path string, videos []model.Video) error {
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
-	}
-
 	var buf bytes.Buffer
 	ts := strconv.FormatInt(time.Now().Unix(), 10)
 	for _, v := range videos {
@@ -283,6 +326,14 @@ func writeVideosAtomic(path string, videos []model.Video) error {
 			ts,
 		)
 	}
+	return writeBytesAtomic(path, buf.Bytes())
+}
+
+func writeBytesAtomic(path string, data []byte) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
 
 	tmp, err := os.CreateTemp(dir, ".tmp-*.tsv")
 	if err != nil {
@@ -295,7 +346,7 @@ func writeVideosAtomic(path string, videos []model.Video) error {
 		_ = os.Remove(tmpPath)
 	}
 
-	if _, err := tmp.Write(buf.Bytes()); err != nil {
+	if _, err := tmp.Write(data); err != nil {
 		cleanup()
 		return err
 	}

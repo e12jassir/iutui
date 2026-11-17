@@ -9,8 +9,14 @@ import (
 	"testing"
 	"time"
 
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"slices"
+
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/e12jassir/ytx/internal/catalog"
+	"github.com/e12jassir/ytx/internal/lyrics"
 	"github.com/e12jassir/ytx/internal/model"
 	"github.com/e12jassir/ytx/internal/player"
 	"github.com/e12jassir/ytx/internal/store"
@@ -1231,5 +1237,196 @@ func TestStillWatchingTriggersAfterAutoplayLimitAndResumes(t *testing.T) {
 	}
 	if s.ShowStillWatching {
 		t.Fatal("expected ShowStillWatching to remain false when Autoplay is disabled")
+	}
+}
+
+type channelSpyCatalog struct {
+	*catalog.FakeCatalog
+	channelVideos []model.Video
+	lastChannel   string
+}
+
+func (c *channelSpyCatalog) ChannelVideos(_ context.Context, v model.Video, _ int) ([]model.Video, error) {
+	c.lastChannel = v.Channel
+	return c.channelVideos, nil
+}
+
+func TestV040ShortcutsVideoSponsorThemeChannelSubsChaptersLyrics(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode([]map[string]string{
+			{
+				"trackName":    "De Música Ligera",
+				"artistName":   "Soda Stereo",
+				"syncedLyrics": "[00:05.00] Ella durmió\n[00:12.00] Al calor de las masas",
+			},
+		})
+	}))
+	defer srv.Close()
+
+	lrc := lyrics.NewClient()
+	lrc.BaseURL = srv.URL
+
+	cat := &channelSpyCatalog{
+		FakeCatalog: &catalog.FakeCatalog{
+			Feeds: map[model.Tab][]model.Video{
+				model.TabHome: {
+					{ID: "vid11111111", Title: "De Música Ligera (Official Video)", Channel: "Soda Stereo", Duration: "04:50"},
+					{ID: "vid22222222", Title: "Persiana Americana", Channel: "Soda Stereo", Duration: "05:00"},
+				},
+			},
+		},
+		channelVideos: []model.Video{
+			{ID: "chan001", Title: "En la Ciudad de la Furia", Channel: "Soda Stereo", Duration: "05:40"},
+			{ID: "chan002", Title: "Prófugos", Channel: "Soda Stereo", Duration: "05:20"},
+		},
+	}
+	eng := player.NewFakeEngine()
+	eng.SetChapters([]player.Chapter{
+		{Title: "Intro", Time: 0},
+		{Title: "Estribillo", Time: 62},
+	})
+	st := store.NewFakeStore()
+
+	var cbMu sync.Mutex
+	var savedThemes []string
+	var savedSB []bool
+	sbInit := true
+	s := NewState(Dependencies{
+		Catalog:             cat,
+		Engine:              eng,
+		Store:               st,
+		LyricsClient:        lrc,
+		InitialSponsorBlock: &sbInit,
+		OnThemeChange: func(name string) error {
+			cbMu.Lock()
+			savedThemes = append(savedThemes, name)
+			cbMu.Unlock()
+			return nil
+		},
+		OnSponsorBlockChange: func(enabled bool) error {
+			cbMu.Lock()
+			savedSB = append(savedSB, enabled)
+			cbMu.Unlock()
+			return nil
+		},
+	})
+	defer s.Close()
+	s.Width = 120
+	s.Height = 36
+	s, _ = s.Update(FeedLoadedMsg{Tab: model.TabHome, Videos: cat.Feeds[model.TabHome]})
+
+	// 1. Hot Audio/Video toggle via 'V'
+	var cmd tea.Cmd
+	s, cmd = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'V'}})
+	for _, msg := range collectNonTickMsgs(cmd, 150*time.Millisecond) {
+		s, _ = s.Update(msg)
+	}
+	if !strings.Contains(s.Toast, "Solo audio") {
+		t.Fatalf("expected Solo audio toast after V, got %q", s.Toast)
+	}
+	s, cmd = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'V'}})
+	for _, msg := range collectNonTickMsgs(cmd, 150*time.Millisecond) {
+		s, _ = s.Update(msg)
+	}
+	if !strings.Contains(s.Toast, "Video activado") {
+		t.Fatalf("expected Video activado toast after second V, got %q", s.Toast)
+	}
+
+	// 2. SponsorBlock toggle via 'B'
+	s, cmd = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'B'}})
+	_ = collectNonTickMsgs(cmd, 150*time.Millisecond)
+	if s.SponsorBlock || eng.SponsorBlockEnabled() || s.Toast != "🛡 SponsorBlock: OFF" {
+		t.Fatalf("expected SponsorBlock OFF, state=%v engine=%v toast=%q", s.SponsorBlock, eng.SponsorBlockEnabled(), s.Toast)
+	}
+	cbMu.Lock()
+	gotSB := slices.Clone(savedSB)
+	cbMu.Unlock()
+	if !slices.Equal(gotSB, []bool{false}) {
+		t.Fatalf("OnSponsorBlockChange = %v, want [false]", gotSB)
+	}
+
+	// 3. Theme cycling via 't'
+	s, cmd = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
+	_ = collectNonTickMsgs(cmd, 150*time.Millisecond)
+	cbMu.Lock()
+	gotThemes := slices.Clone(savedThemes)
+	cbMu.Unlock()
+	if s.ThemeName != "catppuccin" || !slices.Equal(gotThemes, []string{"catppuccin"}) {
+		t.Fatalf("ThemeName=%q savedThemes=%v, want catppuccin", s.ThemeName, gotThemes)
+	}
+
+	// 4. Subscribe toggle via 's'
+	s, cmd = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	for _, msg := range collectNonTickMsgs(cmd, 150*time.Millisecond) {
+		s, _ = s.Update(msg)
+	}
+	if !slices.Equal(s.Subscriptions, []string{"Soda Stereo"}) {
+		t.Fatalf("Subscriptions = %v, want [Soda Stereo]", s.Subscriptions)
+	}
+	s, cmd = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	for _, msg := range collectNonTickMsgs(cmd, 150*time.Millisecond) {
+		s, _ = s.Update(msg)
+	}
+	if len(s.Subscriptions) != 0 {
+		t.Fatalf("expected empty subscriptions after toggle off, got %v", s.Subscriptions)
+	}
+
+	// 5. Channel drill-down via 'g' and Esc back to ViewHome
+	s, cmd = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
+	if s.View != ViewChannel || !s.ChannelPending {
+		t.Fatalf("expected ViewChannel & ChannelPending after g, got view=%v pending=%v", s.View, s.ChannelPending)
+	}
+	for _, msg := range collectNonTickMsgs(cmd, 150*time.Millisecond) {
+		s, _ = s.Update(msg)
+	}
+	if s.ChannelPending || len(s.VisibleItems()) != 2 || s.VisibleItems()[0].ID != "chan001" {
+		t.Fatalf("unexpected channel view items=%+v pending=%v", s.VisibleItems(), s.ChannelPending)
+	}
+	if cat.lastChannel != "Soda Stereo" {
+		t.Fatalf("expected channel fetch for Soda Stereo, got %q", cat.lastChannel)
+	}
+	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if s.View != ViewHome {
+		t.Fatalf("expected Esc from ViewChannel to return to ViewHome, got %v", s.View)
+	}
+
+	// 6. Chapters modal via 'C', navigate with 'j', seek with Enter
+	s, cmd = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'C'}})
+	for _, msg := range collectNonTickMsgs(cmd, 150*time.Millisecond) {
+		s, _ = s.Update(msg)
+	}
+	if !s.ShowChapters || len(s.Chapters) != 2 {
+		t.Fatalf("expected ShowChapters=true with 2 chapters, got show=%v len=%d", s.ShowChapters, len(s.Chapters))
+	}
+	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	s, cmd = s.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	_ = collectNonTickMsgs(cmd, 150*time.Millisecond)
+	if s.ShowChapters || !strings.Contains(s.Toast, "Estribillo") {
+		t.Fatalf("expected chapter seek & close, show=%v toast=%q", s.ShowChapters, s.Toast)
+	}
+	foundSeekAbs := false
+	for _, c := range eng.Calls() {
+		if c.Method == "SeekAbsolute" && c.Delta == 62 {
+			foundSeekAbs = true
+		}
+	}
+	if !foundSeekAbs {
+		t.Fatalf("expected FakeEngine SeekAbsolute(62), calls=%+v", eng.Calls())
+	}
+
+	// 7. Synced lyrics via 'L'
+	s.PlayerStatus = player.Status{IsRunning: true, Title: "De Música Ligera (Official Video)", TimePos: 14}
+	s, cmd = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'L'}})
+	if !s.ShowLyrics || !s.LyricsLoading {
+		t.Fatalf("expected ShowLyrics=true LyricsLoading=true after L, got show=%v loading=%v", s.ShowLyrics, s.LyricsLoading)
+	}
+	for _, msg := range collectNonTickMsgs(cmd, 250*time.Millisecond) {
+		s, _ = s.Update(msg)
+	}
+	if s.LyricsLoading || len(s.Lyrics.Synced) != 2 || s.LyricsErr != "" {
+		t.Fatalf("unexpected lyrics result: loading=%v synced=%v err=%q", s.LyricsLoading, s.Lyrics.Synced, s.LyricsErr)
+	}
+	if idx := lyrics.ActiveLineIndex(s.Lyrics.Synced, s.PlayerStatus.TimePos); idx != 1 {
+		t.Fatalf("ActiveLineIndex at 14s = %d, want 1", idx)
 	}
 }

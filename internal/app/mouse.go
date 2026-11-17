@@ -52,6 +52,10 @@ func (s *State) handleLeftClick(x, y int) (*State, tea.Cmd) {
 		s.ShowSettings = false
 		return s, nil
 	}
+	if s.ShowChapters {
+		s.ShowChapters = false
+		return s, nil
+	}
 
 	// 1. Top Spotatui panels (y == 0..2)
 	if y >= 0 && y <= 2 {
@@ -212,18 +216,19 @@ func (s *State) handleLeftClick(x, y int) (*State, tea.Cmd) {
 	if relY >= bodyH {
 		return s, nil
 	}
-	if s.View == ViewSearch {
+	if s.View == ViewSearch || s.View == ViewChannel {
 		visibleCount := max(1, bodyH/searchRowH)
-		startIdx := s.ResultScroll
-		if s.ResultIdx < startIdx {
-			startIdx = s.ResultIdx
+		curIdx := s.ActiveListIndex()
+		startIdx := s.ActiveListScroll()
+		if curIdx < startIdx {
+			startIdx = curIdx
 		}
-		if s.ResultIdx >= startIdx+visibleCount {
-			startIdx = s.ResultIdx - visibleCount + 1
+		if curIdx >= startIdx+visibleCount {
+			startIdx = curIdx - visibleCount + 1
 		}
 		idx := startIdx + relY/searchRowH
 		if idx >= 0 && idx < len(items) {
-			if idx == s.ResultIdx {
+			if idx == curIdx {
 				return s.PlaySelected("auto")
 			}
 			s.SetSelection(idx)

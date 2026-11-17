@@ -2,7 +2,9 @@ package store
 
 import (
 	"context"
+	"errors"
 	"slices"
+	"strings"
 	"sync"
 
 	"github.com/e12jassir/ytx/internal/model"
@@ -102,4 +104,31 @@ func (f *FakeStore) Subscriptions(ctx context.Context) ([]string, error) {
 		return nil, f.Err
 	}
 	return slices.Clone(f.Subs), nil
+}
+
+// ToggleSubscription adds or removes channelRef from Subs case-insensitively and reports
+// whether it is now subscribed.
+func (f *FakeStore) ToggleSubscription(ctx context.Context, channelRef string) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	ref := strings.TrimSpace(channelRef)
+	if ref == "" {
+		return false, errors.New("channel reference is required")
+	}
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.Err != nil {
+		return false, f.Err
+	}
+
+	for i, existing := range f.Subs {
+		if strings.EqualFold(strings.TrimSpace(existing), ref) {
+			f.Subs = append(f.Subs[:i], f.Subs[i+1:]...)
+			return false, nil
+		}
+	}
+	f.Subs = append(f.Subs, ref)
+	return true, nil
 }

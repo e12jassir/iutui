@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/e12jassir/ytx/internal/catalog"
+	"github.com/e12jassir/ytx/internal/lyrics"
 	"github.com/e12jassir/ytx/internal/model"
 	"github.com/e12jassir/ytx/internal/player"
 	"github.com/e12jassir/ytx/internal/store"
@@ -17,6 +18,7 @@ type ViewMode int
 const (
 	ViewHome ViewMode = iota
 	ViewSearch
+	ViewChannel
 )
 
 // FocusArea identifies which region currently receives keyboard input.
@@ -58,12 +60,17 @@ type Downloader interface {
 
 // Dependencies holds the injected application ports.
 type Dependencies struct {
-	Catalog         catalog.Catalog
-	Engine          player.Engine
-	Store           store.Store
-	Downloader      Downloader
-	InitialQuality  int
-	OnQualityChange func(int) error
+	Catalog              catalog.Catalog
+	Engine               player.Engine
+	Store                store.Store
+	Downloader           Downloader
+	LyricsClient         *lyrics.Client
+	InitialQuality       int
+	InitialTheme         string
+	InitialSponsorBlock  *bool
+	OnQualityChange      func(int) error
+	OnThemeChange        func(string) error
+	OnSponsorBlockChange func(bool) error
 }
 
 // State holds the pure application state decoupled from terminal rendering.
@@ -71,17 +78,23 @@ type State struct {
 	Deps Dependencies
 
 	View       ViewMode
+	PrevView   ViewMode
 	ActiveTab  model.Tab
 	Focus      FocusArea
 	HomeChip   int
 	SearchChip int
 
-	Feeds         map[model.Tab][]model.Video
-	SearchResults []model.Video
-	SearchQuery   string
-	SearchDraft   string
-	SearchPending bool
-	Syncing       bool
+	Feeds          map[model.Tab][]model.Video
+	SearchResults  []model.Video
+	SearchQuery    string
+	SearchDraft    string
+	SearchPending  bool
+	ChannelTitle   string
+	ChannelVideos  []model.Video
+	ChannelIdx     int
+	ChannelScroll  int
+	ChannelPending bool
+	Syncing        bool
 
 	SelectedIdx  int
 	ScrollOffset int
@@ -100,11 +113,22 @@ type State struct {
 	ShowHelp          bool
 	ShowSettings      bool
 	ShowStillWatching bool
-	Autoplay          bool
-	Quality           int
-	Width             int
-	Height            int
-	Ready             bool
+	ShowChapters      bool
+	Chapters          []player.Chapter
+	ChapterIdx        int
+	ShowLyrics        bool
+	LyricsLoading     bool
+	Lyrics            lyrics.TrackLyrics
+	LyricsErr         string
+	LyricsTrack       string
+
+	Autoplay     bool
+	SponsorBlock bool
+	ThemeName    string
+	Quality      int
+	Width        int
+	Height       int
+	Ready        bool
 
 	LastInteractionAt        time.Time
 	AutoplayTracksSinceInput int
@@ -115,22 +139,37 @@ type State struct {
 	AnimFrame        int
 	animActive       bool
 
-	searchCancel context.CancelFunc
-	searchSeq    uint64
-	statusCh     <-chan player.Status
-	appCtx       context.Context
-	appCancel    context.CancelFunc
+	searchCancel  context.CancelFunc
+	searchSeq     uint64
+	channelCancel context.CancelFunc
+	channelSeq    uint64
+	lyricsCancel  context.CancelFunc
+	lyricsSeq     uint64
+	statusCh      <-chan player.Status
+	appCtx        context.Context
+	appCancel     context.CancelFunc
 }
 
 // NewState constructs an initialized application State with injected ports.
 func NewState(deps Dependencies) *State {
 	ctx, cancel := context.WithCancel(context.Background())
+	themeName := strings.TrimSpace(deps.InitialTheme)
+	if themeName == "" {
+		themeName = "youtube-dark"
+	}
+	sponsorBlock := true
+	if deps.InitialSponsorBlock != nil {
+		sponsorBlock = *deps.InitialSponsorBlock
+	}
 	return &State{
 		Deps:              deps,
 		View:              ViewHome,
+		PrevView:          ViewHome,
 		ActiveTab:         model.TabHome,
 		Focus:             FocusMain,
 		Autoplay:          true,
+		SponsorBlock:      sponsorBlock,
+		ThemeName:         themeName,
 		Quality:           deps.InitialQuality,
 		Feeds:             make(map[model.Tab][]model.Video),
 		SavedIDs:          make(map[string]bool),
@@ -148,7 +187,7 @@ func (s *State) HasPlayerBar() bool {
 
 // IsAnimating reports whether any loading/syncing animation is active.
 func (s *State) IsAnimating() bool {
-	return s.Syncing || s.SearchPending || s.PlayLoading
+	return s.Syncing || s.SearchPending || s.PlayLoading || s.ChannelPending || s.LyricsLoading
 }
 
 // RegisterUserActivity records a user interaction and resets the idle autoplay counter.
@@ -162,6 +201,12 @@ func (s *State) Close() {
 	if s.searchCancel != nil {
 		s.searchCancel()
 	}
+	if s.channelCancel != nil {
+		s.channelCancel()
+	}
+	if s.lyricsCancel != nil {
+		s.lyricsCancel()
+	}
 	if s.appCancel != nil {
 		s.appCancel()
 	}
@@ -174,6 +219,9 @@ func (s *State) Close() {
 func (s *State) VisibleItems() []model.Video {
 	if s.View == ViewSearch {
 		return filterByChip(s.SearchResults, SearchChips, s.SearchChip, s)
+	}
+	if s.View == ViewChannel {
+		return s.ChannelVideos
 	}
 	raw := s.Feeds[s.ActiveTab]
 	if s.ActiveTab == model.TabHome || s.ActiveTab == model.TabMusic {
@@ -196,13 +244,34 @@ func filterByChip(items []model.Video, chips []Chip, idx int, s *State) []model.
 	return out
 }
 
+// ActiveListIndex returns the cursor index for the active view.
+func (s *State) ActiveListIndex() int {
+	switch s.View {
+	case ViewSearch:
+		return s.ResultIdx
+	case ViewChannel:
+		return s.ChannelIdx
+	default:
+		return s.SelectedIdx
+	}
+}
+
+// ActiveListScroll returns the scroll offset for the active view.
+func (s *State) ActiveListScroll() int {
+	switch s.View {
+	case ViewSearch:
+		return s.ResultScroll
+	case ViewChannel:
+		return s.ChannelScroll
+	default:
+		return s.ScrollOffset
+	}
+}
+
 // SelectedVideo returns the currently highlighted video in the active view.
 func (s *State) SelectedVideo() (model.Video, bool) {
 	items := s.VisibleItems()
-	idx := s.SelectedIdx
-	if s.View == ViewSearch {
-		idx = s.ResultIdx
-	}
+	idx := s.ActiveListIndex()
 	if idx < 0 || idx >= len(items) {
 		return model.Video{}, false
 	}
@@ -217,9 +286,12 @@ type streamPrefetcher interface {
 func (s *State) SetSelection(idx int) {
 	items := s.VisibleItems()
 	if len(items) == 0 {
-		if s.View == ViewSearch {
+		switch s.View {
+		case ViewSearch:
 			s.ResultIdx = 0
-		} else {
+		case ViewChannel:
+			s.ChannelIdx = 0
+		default:
 			s.SelectedIdx = 0
 		}
 		return
@@ -230,9 +302,12 @@ func (s *State) SetSelection(idx int) {
 	if idx >= len(items) {
 		idx = len(items) - 1
 	}
-	if s.View == ViewSearch {
+	switch s.View {
+	case ViewSearch:
 		s.ResultIdx = idx
-	} else {
+	case ViewChannel:
+		s.ChannelIdx = idx
+	default:
 		s.SelectedIdx = idx
 	}
 	if p, ok := s.Deps.Engine.(streamPrefetcher); ok {
