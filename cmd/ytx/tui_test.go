@@ -237,6 +237,62 @@ func TestResolveCookieJar(t *testing.T) {
 	})
 }
 
+func TestShouldRefreshCookies(t *testing.T) {
+	t.Run("skips refresh when disabled or manual CookiesFile set", func(t *testing.T) {
+		dir := t.TempDir()
+		if shouldRefreshCookies(config.Config{Cookies: "off"}, dir, "") {
+			t.Fatal("expected false when Cookies=off")
+		}
+		if shouldRefreshCookies(config.Config{Cookies: "auto", CookiesFile: "/tmp/manual.txt"}, dir, "") {
+			t.Fatal("expected false when CookiesFile is configured")
+		}
+	})
+
+	t.Run("probes when jar missing and cookies.none absent or stale, skips when cookies.none fresh", func(t *testing.T) {
+		dir := t.TempDir()
+		cfg := config.Config{Cookies: "auto", CookieTTL: 21600}
+		if !shouldRefreshCookies(cfg, dir, "") {
+			t.Fatal("expected true on brand-new cache dir with no jar and no cookies.none")
+		}
+
+		nonePath := filepath.Join(dir, "cookies.none")
+		if err := os.WriteFile(nonePath, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if shouldRefreshCookies(cfg, dir, "") {
+			t.Fatal("expected false when cookies.none is fresh")
+		}
+
+		old := time.Now().Add(-20 * time.Minute)
+		if err := os.Chtimes(nonePath, old, old); err != nil {
+			t.Fatal(err)
+		}
+		if !shouldRefreshCookies(cfg, dir, "") {
+			t.Fatal("expected true once cookies.none is older than 15m")
+		}
+	})
+
+	t.Run("refreshes only when existing jar exceeds CookieTTL", func(t *testing.T) {
+		dir := t.TempDir()
+		jar := filepath.Join(dir, "cookies.txt")
+		if err := os.WriteFile(jar, []byte(".youtube.com\tTRUE\t/\tTRUE\t0\tSAPISID\tok\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cfg := config.Config{Cookies: "auto", CookieTTL: 3600}
+		if shouldRefreshCookies(cfg, dir, jar) {
+			t.Fatal("expected false when jar is fresh")
+		}
+
+		old := time.Now().Add(-2 * time.Hour)
+		if err := os.Chtimes(jar, old, old); err != nil {
+			t.Fatal(err)
+		}
+		if !shouldRefreshCookies(cfg, dir, jar) {
+			t.Fatal("expected true when jar is older than CookieTTL")
+		}
+	})
+}
+
 func TestResolvePlayTargetAndMixFlag(t *testing.T) {
 	tests := []struct {
 		name              string

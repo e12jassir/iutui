@@ -5,12 +5,16 @@ package cookies
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
+	"time"
 )
 
 var (
@@ -148,4 +152,288 @@ func DetectFirefoxProfile(bases ...string) string {
 		}
 	}
 	return ""
+}
+
+type profileRootKind uint8
+
+const (
+	rootHome profileRootKind = iota
+	rootXDG
+)
+
+type browserProfileRoot struct {
+	kind profileRootKind
+	rel  string
+}
+
+var (
+	defaultBrowsers = []string{"zen", "firefox", "librewolf", "brave", "chromium", "chrome"}
+
+	geckoBrowserRoots = map[string][]browserProfileRoot{
+		"zen": {
+			{rootHome, ".zen"},
+			{rootXDG, "zen"},
+			{rootHome, filepath.Join(".var", "app", "app.zen_browser.zen", ".zen")},
+			{rootHome, filepath.Join("Library", "Application Support", "zen", "Profiles")},
+		},
+		"firefox": {
+			{rootHome, filepath.Join(".mozilla", "firefox")},
+			{rootXDG, filepath.Join("mozilla", "firefox")},
+			{rootHome, filepath.Join("snap", "firefox", "common", ".mozilla", "firefox")},
+			{rootHome, filepath.Join(".var", "app", "org.mozilla.firefox", ".mozilla", "firefox")},
+			{rootHome, filepath.Join("Library", "Application Support", "Firefox", "Profiles")},
+		},
+		"librewolf": {
+			{rootHome, ".librewolf"},
+			{rootXDG, "librewolf"},
+			{rootHome, filepath.Join(".var", "app", "io.gitlab.librewolf-community", ".librewolf")},
+		},
+	}
+
+	browserBinaryTargets = map[string][]string{
+		"brave":    {"brave-browser", "brave", "/Applications/Brave Browser.app"},
+		"chromium": {"chromium", "chromium-browser"},
+		"chrome":   {"google-chrome-stable", "google-chrome", "/Applications/Google Chrome.app"},
+		"edge":     {"microsoft-edge", "microsoft-edge-stable", "/Applications/Microsoft Edge.app"},
+		"vivaldi":  {"vivaldi", "vivaldi-stable"},
+	}
+)
+
+// BrowserSpecs resolves browser names into yt-dlp --cookies-from-browser specs
+// in priority order. When explicitBrowser is non-blank, it returns that trimmed
+// spec directly. Profile lookup inspects only homeDir, xdgConfigHome, and lookPath.
+func BrowserSpecs(homeDir, xdgConfigHome, explicitBrowser string, browsers []string, lookPath func(string) (string, error)) []string {
+	if explicit := strings.TrimSpace(explicitBrowser); explicit != "" {
+		return []string{explicit}
+	}
+	if len(browsers) == 0 {
+		browsers = defaultBrowsers
+	}
+	if lookPath == nil {
+		lookPath = exec.LookPath
+	}
+
+	home := strings.TrimSpace(homeDir)
+	cfg := strings.TrimSpace(xdgConfigHome)
+	if cfg == "" && home != "" {
+		cfg = filepath.Join(home, ".config")
+	}
+
+	var specs []string
+	for _, raw := range browsers {
+		b := strings.ToLower(strings.TrimSpace(raw))
+		if b == "" {
+			continue
+		}
+		if roots, ok := geckoBrowserRoots[b]; ok {
+			if prof := detectProfileIn(home, cfg, roots); prof != "" {
+				specs = append(specs, "firefox:"+prof)
+			}
+			continue
+		}
+		if targets, ok := browserBinaryTargets[b]; ok {
+			if hasAnyBrowserTarget(lookPath, targets...) {
+				specs = append(specs, b)
+			}
+			continue
+		}
+		specs = append(specs, b)
+	}
+	return specs
+}
+
+func detectProfileIn(home, xdg string, roots []browserProfileRoot) string {
+	bases := make([]string, 0, len(roots))
+	for _, r := range roots {
+		switch r.kind {
+		case rootHome:
+			if home != "" {
+				bases = append(bases, filepath.Join(home, r.rel))
+			}
+		case rootXDG:
+			if xdg != "" {
+				bases = append(bases, filepath.Join(xdg, r.rel))
+			}
+		}
+	}
+	if len(bases) == 0 {
+		return ""
+	}
+	return DetectFirefoxProfile(bases...)
+}
+
+func hasAnyBrowserTarget(lookPath func(string) (string, error), targets ...string) bool {
+	for _, target := range targets {
+		if filepath.IsAbs(target) {
+			if _, err := os.Stat(target); err == nil {
+				return true
+			}
+			continue
+		}
+		if _, err := lookPath(target); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// RefreshJarFromBrowsers probes specs in order using yt-dlp to extract
+// authenticated Google/YouTube Netscape cookies, writing the filtered jar
+// atomically to cacheDir/cookies.txt (0600) or touching cacheDir/cookies.none
+// (0600) if no spec yields login cookies.
+func RefreshJarFromBrowsers(ctx context.Context, cacheDir, ytdlpBin string, specs []string) (string, error) {
+	if cacheDir == "" || len(specs) == 0 {
+		return "", nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(cacheDir, 0o700); err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(ytdlpBin) == "" {
+		ytdlpBin = "yt-dlp"
+	}
+
+	jarPath := filepath.Join(cacheDir, "cookies.txt")
+	nonePath := filepath.Join(cacheDir, "cookies.none")
+
+	for _, rawSpec := range specs {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		spec := strings.TrimSpace(rawSpec)
+		if spec == "" {
+			continue
+		}
+
+		filtered, err := extractBrowserLoginCookies(ctx, cacheDir, ytdlpBin, spec)
+		if err != nil {
+			return "", err
+		}
+		if len(filtered) == 0 {
+			continue
+		}
+
+		if err := writePrivateFileAtomic(cacheDir, jarPath, filtered); err != nil {
+			return "", err
+		}
+		_ = removeIfExists(nonePath)
+		return jarPath, nil
+	}
+
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if err := touchPrivateFile(nonePath); err != nil {
+		return "", err
+	}
+	return "", nil
+}
+
+func extractBrowserLoginCookies(ctx context.Context, cacheDir, ytdlpBin, spec string) ([]byte, error) {
+	rawFile, err := os.CreateTemp(cacheDir, "cookies.raw.*")
+	if err != nil {
+		return nil, err
+	}
+	rawPath := rawFile.Name()
+	defer os.Remove(rawPath)
+
+	if err := rawFile.Chmod(0o600); err != nil {
+		_ = rawFile.Close()
+		return nil, err
+	}
+	if err := rawFile.Close(); err != nil {
+		return nil, err
+	}
+
+	cmd := exec.CommandContext(
+		ctx,
+		ytdlpBin,
+		"--cookies-from-browser", spec,
+		"--cookies", rawPath,
+		"--no-warnings",
+		"--skip-download",
+		"--flat-playlist",
+		"--playlist-items", "1",
+		"--print", "id",
+		"ytsearch1:youtube",
+	)
+	// Isolate subprocess group so cancellation kills yt-dlp and any helper children cleanly.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+	cmd.WaitDelay = 100 * time.Millisecond
+
+	_ = cmd.Run()
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, ctxErr
+	}
+
+	rawBytes, err := os.ReadFile(rawPath)
+	if err != nil || len(rawBytes) == 0 {
+		return nil, nil
+	}
+	filtered, err := FilterNetscape(bytes.NewReader(rawBytes))
+	if err != nil || !HasLogin(filtered) {
+		return nil, nil
+	}
+	return filtered, nil
+}
+
+func writePrivateFileAtomic(dir, targetPath string, data []byte) error {
+	tmpFile, err := os.CreateTemp(dir, filepath.Base(targetPath)+".tmp.*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmpFile.Name()
+	renamed := false
+	defer func() {
+		if !renamed {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+
+	if err := tmpFile.Chmod(0o600); err != nil {
+		_ = tmpFile.Close()
+		return err
+	}
+	if _, err := tmpFile.Write(data); err != nil {
+		_ = tmpFile.Close()
+		return err
+	}
+	if err := tmpFile.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmpPath, 0o600); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, targetPath); err != nil {
+		return err
+	}
+	renamed = true
+	return nil
+}
+
+func touchPrivateFile(path string) error {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	now := time.Now()
+	return os.Chtimes(path, now, now)
 }

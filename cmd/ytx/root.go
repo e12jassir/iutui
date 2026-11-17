@@ -103,8 +103,12 @@ func newRootCmd() *cobra.Command {
 	return root
 }
 
+func isCookiesDisabled(mode string) bool {
+	return strings.EqualFold(mode, "off") || mode == "0" || strings.EqualFold(mode, "false") || strings.EqualFold(mode, "none")
+}
+
 func resolveCookieJar(cfg config.Config, paths platform.Paths) string {
-	if strings.EqualFold(cfg.Cookies, "off") || cfg.Cookies == "0" || strings.EqualFold(cfg.Cookies, "false") || strings.EqualFold(cfg.Cookies, "none") {
+	if isCookiesDisabled(cfg.Cookies) {
 		return ""
 	}
 	if cfg.CookiesFile != "" {
@@ -146,6 +150,46 @@ func resolveCookieJar(cfg config.Config, paths platform.Paths) string {
 	return ""
 }
 
+func shouldRefreshCookies(cfg config.Config, cacheDir, currentJar string) bool {
+	if cacheDir == "" || isCookiesDisabled(cfg.Cookies) || strings.TrimSpace(cfg.CookiesFile) != "" {
+		return false
+	}
+	if info, err := os.Stat(filepath.Join(cacheDir, "cookies.none")); err == nil && time.Since(info.ModTime()) < 15*time.Minute {
+		return false
+	}
+	if currentJar == "" {
+		return true
+	}
+	ttl := time.Duration(cfg.CookieTTL) * time.Second
+	if ttl <= 0 {
+		ttl = 6 * time.Hour
+	}
+	info, err := os.Stat(currentJar)
+	if err != nil || info.IsDir() || info.Size() <= 0 {
+		return true
+	}
+	return time.Since(info.ModTime()) >= ttl
+}
+
+func startCookieBootstrap(ctx context.Context, cfg config.Config, paths platform.Paths, currentJar string) {
+	if !shouldRefreshCookies(cfg, paths.CacheDir, currentJar) {
+		return
+	}
+	homeDir, err := os.UserHomeDir()
+	if err != nil || homeDir == "" {
+		return
+	}
+	specs := cookies.BrowserSpecs(homeDir, os.Getenv("XDG_CONFIG_HOME"), cfg.Browser, cfg.Browsers, exec.LookPath)
+	if len(specs) == 0 {
+		return
+	}
+	go func() {
+		bootCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		defer cancel()
+		_, _ = cookies.RefreshJarFromBrowsers(bootCtx, paths.CacheDir, cfg.YtdlpBin, specs)
+	}()
+}
+
 func resolvePlayTarget(target string, mixFlag bool) (url string, allowPlaylist bool) {
 	trimmed := strings.TrimSpace(target)
 	if strings.HasPrefix(trimmed, "http://") || strings.HasPrefix(trimmed, "https://") {
@@ -159,6 +203,10 @@ func runTUI(paths platform.Paths) error {
 	cfgPath := filepath.Join(paths.ConfigDir, "config")
 	cfg, _ := config.Load(cfgPath)
 	cookieJar := resolveCookieJar(cfg, paths)
+	bootCtx, bootCancel := context.WithCancel(context.Background())
+	defer bootCancel()
+	startCookieBootstrap(bootCtx, cfg, paths, cookieJar)
+
 	dlDir := cfg.DownloadDir
 	if dlDir == "" {
 		if home, err := os.UserHomeDir(); err == nil {
@@ -168,7 +216,11 @@ func runTUI(paths platform.Paths) error {
 
 	bashCat := catalog.NewBashCatalog(paths.CacheDir, paths.StateDir, "")
 	ytdlpCat := catalog.NewYTDLPCatalog(paths.CacheDir, time.Duration(cfg.CacheTTL)*time.Second, cfg.YtdlpBin)
-	ytdlpCat.CookieJarPath = cookieJar
+	catalogCookieJar := cookieJar
+	if catalogCookieJar == "" && !isCookiesDisabled(cfg.Cookies) && paths.CacheDir != "" {
+		catalogCookieJar = filepath.Join(paths.CacheDir, "cookies.txt")
+	}
+	ytdlpCat.CookieJarPath = catalogCookieJar
 	cat := catalog.NewHybridCatalog(bashCat, ytdlpCat)
 
 	st := store.NewTSVStore(paths.StateDir)

@@ -174,7 +174,7 @@ func (c *YTDLPCatalog) Feed(ctx context.Context, tab model.Tab) ([]model.Video, 
 				defer c.wg.Done()
 				bgCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 				defer cancel()
-				if fresh, err := c.fetchTarget(bgCtx, target); err == nil && len(fresh) > 0 {
+				if fresh, err := c.fetchTabVideos(bgCtx, tab, target); err == nil && len(fresh) > 0 {
 					c.feedMu.Lock()
 					if c.feedGeneration[tab] == generation {
 						_ = writeCacheFile(cachePath, fresh)
@@ -186,7 +186,7 @@ func (c *YTDLPCatalog) Feed(ctx context.Context, tab model.Tab) ([]model.Video, 
 		}
 	}
 
-	videos, err := c.fetchTarget(ctx, target)
+	videos, err := c.fetchTabVideos(ctx, tab, target)
 	if err != nil {
 		return nil, err
 	}
@@ -219,7 +219,7 @@ func (c *YTDLPCatalog) RefreshFeed(ctx context.Context, tab model.Tab) ([]model.
 	generation := c.feedGeneration[tab]
 	c.feedMu.Unlock()
 
-	videos, err := c.fetchTarget(ctx, target)
+	videos, err := c.fetchTabVideos(ctx, tab, target)
 	if err != nil {
 		return nil, err
 	}
@@ -355,12 +355,24 @@ func (c *YTDLPCatalog) cacheFilePath(name string) string {
 	return filepath.Join(dir, name)
 }
 
+const youtubeMusicDiscoveryURL = "https://www.youtube.com/channel/UC-9-kyTW8ZkZNDHQJ6FgpwQ"
+
+// fetchTabVideos fetches target for tab and falls back to public music discovery
+// when logged-out TabHome returns zero videos without error.
+func (c *YTDLPCatalog) fetchTabVideos(ctx context.Context, tab model.Tab, target string) ([]model.Video, error) {
+	videos, err := c.fetchTarget(ctx, target)
+	if tab == model.TabHome && err == nil && len(videos) == 0 && ctx.Err() == nil {
+		return c.fetchTarget(ctx, youtubeMusicDiscoveryURL)
+	}
+	return videos, err
+}
+
 func ytdlpTabTarget(tab model.Tab) (cacheFile, target string, ok bool) {
 	switch tab {
 	case model.TabHome:
 		return "feed_home.json", "https://www.youtube.com", true
 	case model.TabMusic:
-		return "feed_music.json", "https://www.youtube.com/channel/UC-9-kyTW8ZkZNDHQJ6FgpwQ", true
+		return "feed_music.json", youtubeMusicDiscoveryURL, true
 	case model.TabSubscriptions:
 		return "feed_subs.json", "https://www.youtube.com/feed/subscriptions", true
 	default:

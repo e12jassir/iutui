@@ -519,3 +519,153 @@ func lastArg(args []string) string {
 	}
 	return args[len(args)-1]
 }
+
+func TestYTDLPCatalog_TabHomeGuestFallback(t *testing.T) {
+	const musicChannelURL = "https://www.youtube.com/channel/UC-9-kyTW8ZkZNDHQJ6FgpwQ"
+
+	t.Run("Feed TabHome falls back to public music discovery when homepage returns empty output", func(t *testing.T) {
+		tmp := t.TempDir()
+		targetsFile := filepath.Join(tmp, "targets.txt")
+		script := fmt.Sprintf(`
+target=""
+for a in "$@"; do
+	target="$a"
+done
+printf '%%s\n' "$target" >> %s
+case "$target" in
+	"https://www.youtube.com")
+		# Logged-out yt-dlp returns 0 items on homepage.
+		;;
+	%s)
+		printf '{"id":"disc11111","title":"Public Music Mix","channel":"YouTube Music","duration":245,"view_count":980000}\n'
+		;;
+esac
+`, shellQuote(targetsFile), shellQuote(musicChannelURL))
+
+		bin := writeFakeYTDLP(t, tmp, script)
+		cacheDir := filepath.Join(tmp, "cache")
+		cat := NewYTDLPCatalog(cacheDir, 5*time.Minute, bin)
+		defer cat.Wait()
+
+		videos, err := cat.Feed(context.Background(), model.TabHome)
+		if err != nil {
+			t.Fatalf("Feed(TabHome) error = %v", err)
+		}
+		if len(videos) != 1 || videos[0].ID != "disc11111" {
+			t.Fatalf("Feed(TabHome) = %+v, want disc11111", videos)
+		}
+
+		rawTargets, err := os.ReadFile(targetsFile)
+		if err != nil {
+			t.Fatalf("read targets: %v", err)
+		}
+		gotTargets := strings.Split(strings.TrimSpace(string(rawTargets)), "\n")
+		wantTargets := []string{"https://www.youtube.com", musicChannelURL}
+		if !slices.Equal(gotTargets, wantTargets) {
+			t.Fatalf("targets invoked = %v, want %v", gotTargets, wantTargets)
+		}
+
+		cached, _, err := readCacheFile(filepath.Join(cacheDir, "feed_home.json"))
+		if err != nil || len(cached) != 1 || cached[0].ID != "disc11111" {
+			t.Fatalf("feed_home.json = %+v (err=%v), want cached disc11111", cached, err)
+		}
+	})
+
+	t.Run("RefreshFeed TabHome falls back to public music discovery when homepage returns empty entries", func(t *testing.T) {
+		tmp := t.TempDir()
+		targetsFile := filepath.Join(tmp, "targets.txt")
+		script := fmt.Sprintf(`
+target=""
+for a in "$@"; do
+	target="$a"
+done
+printf '%%s\n' "$target" >> %s
+case "$target" in
+	"https://www.youtube.com")
+		printf '{"entries":[]}\n'
+		;;
+	%s)
+		printf '{"id":"disc22222","title":"Refreshed Discovery","channel":"Music","duration":190}\n'
+		;;
+esac
+`, shellQuote(targetsFile), shellQuote(musicChannelURL))
+
+		bin := writeFakeYTDLP(t, tmp, script)
+		cacheDir := filepath.Join(tmp, "cache")
+		cat := NewYTDLPCatalog(cacheDir, 5*time.Minute, bin)
+		defer cat.Wait()
+
+		videos, err := cat.RefreshFeed(context.Background(), model.TabHome)
+		if err != nil {
+			t.Fatalf("RefreshFeed(TabHome) error = %v", err)
+		}
+		if len(videos) != 1 || videos[0].ID != "disc22222" {
+			t.Fatalf("RefreshFeed(TabHome) = %+v, want disc22222", videos)
+		}
+	})
+
+	t.Run("Feed TabHome preserves ErrForbidden and does not fall back on yt-dlp error", func(t *testing.T) {
+		tmp := t.TempDir()
+		targetsFile := filepath.Join(tmp, "targets.txt")
+		script := fmt.Sprintf(`
+target=""
+for a in "$@"; do
+	target="$a"
+done
+printf '%%s\n' "$target" >> %s
+if [ "$target" = "https://www.youtube.com" ]; then
+	echo "ERROR: HTTP Error 403: Forbidden" >&2
+	exit 1
+fi
+printf '{"id":"shouldnot01","title":"Should Not Reach","channel":"Music","duration":100}\n'
+`, shellQuote(targetsFile))
+
+		bin := writeFakeYTDLP(t, tmp, script)
+		cat := NewYTDLPCatalog(filepath.Join(tmp, "cache"), 5*time.Minute, bin)
+		defer cat.Wait()
+
+		_, err := cat.Feed(context.Background(), model.TabHome)
+		if !IsErrKind(err, ErrForbidden) {
+			t.Fatalf("Feed(TabHome) error = %v, want ErrForbidden", err)
+		}
+
+		rawTargets, readErr := os.ReadFile(targetsFile)
+		if readErr != nil {
+			t.Fatalf("read targets: %v", readErr)
+		}
+		gotTargets := strings.Split(strings.TrimSpace(string(rawTargets)), "\n")
+		if !slices.Equal(gotTargets, []string{"https://www.youtube.com"}) {
+			t.Fatalf("targets invoked = %v, want only primary target", gotTargets)
+		}
+	})
+
+	t.Run("non-home tabs do not fall back when empty and fallback errors propagate", func(t *testing.T) {
+		tmp := t.TempDir()
+		targetsFile := filepath.Join(tmp, "targets.txt")
+		script := fmt.Sprintf(`
+target=""
+for a in "$@"; do
+	target="$a"
+done
+printf '%%s\n' "$target" >> %s
+if [ "$target" = %s ]; then
+	echo "ERROR: HTTP Error 429: Too Many Requests" >&2
+	exit 1
+fi
+`, shellQuote(targetsFile), shellQuote(musicChannelURL))
+
+		bin := writeFakeYTDLP(t, tmp, script)
+		cat := NewYTDLPCatalog(filepath.Join(tmp, "cache"), 5*time.Minute, bin)
+		defer cat.Wait()
+
+		subs, err := cat.Feed(context.Background(), model.TabSubscriptions)
+		if err != nil || len(subs) != 0 {
+			t.Fatalf("Feed(TabSubscriptions) = (%+v, %v), want empty nil", subs, err)
+		}
+
+		_, err = cat.Feed(context.Background(), model.TabHome)
+		if !IsErrKind(err, ErrRateLimit) {
+			t.Fatalf("Feed(TabHome) fallback error = %v, want ErrRateLimit", err)
+		}
+	})
+}

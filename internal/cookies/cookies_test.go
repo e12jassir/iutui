@@ -1,10 +1,15 @@
 package cookies
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestFilterNetscape(t *testing.T) {
@@ -284,4 +289,520 @@ func TestDetectFirefoxProfile(t *testing.T) {
 			t.Fatalf("DetectFirefoxProfile() = %q, want empty", got)
 		}
 	})
+}
+
+func TestBrowserSpecs(t *testing.T) {
+	t.Parallel()
+
+	mkProfile := func(t *testing.T, base, name string) string {
+		t.Helper()
+		dir := filepath.Join(base, name)
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatalf("MkdirAll(%q) error = %v", dir, err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "cookies.sqlite"), []byte("sqlite"), 0o600); err != nil {
+			t.Fatalf("WriteFile(cookies.sqlite) error = %v", err)
+		}
+		return dir
+	}
+
+	fakeLookPath := func(bins ...string) func(string) (string, error) {
+		set := make(map[string]struct{}, len(bins))
+		for _, b := range bins {
+			set[b] = struct{}{}
+		}
+		return func(name string) (string, error) {
+			if _, ok := set[name]; ok {
+				return "/fake/bin/" + name, nil
+			}
+			return "", errors.New("not found")
+		}
+	}
+
+	t.Run("explicit browser overrides browser detection", func(t *testing.T) {
+		t.Parallel()
+		home := t.TempDir()
+		mkProfile(t, filepath.Join(home, ".zen"), "abc.default-release")
+
+		got := BrowserSpecs(home, "", "  firefox:custom-prof  ", nil, fakeLookPath("brave", "chrome"))
+		want := []string{"firefox:custom-prof"}
+		if !slices.Equal(got, want) {
+			t.Fatalf("BrowserSpecs() = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("default browser priority detects gecko profiles and chromium binaries", func(t *testing.T) {
+		t.Parallel()
+		home := t.TempDir()
+		xdg := filepath.Join(home, "xdg-cfg")
+
+		zenProf := mkProfile(t, filepath.Join(home, ".zen"), "z1.default-release")
+		ffProf := mkProfile(t, filepath.Join(xdg, "mozilla", "firefox"), "f1.default")
+		lwProf := mkProfile(t, filepath.Join(home, ".librewolf"), "l1.default-release")
+
+		got := BrowserSpecs(home, xdg, "", nil, fakeLookPath("brave", "chromium-browser", "google-chrome-stable"))
+		want := []string{
+			"firefox:" + zenProf,
+			"firefox:" + ffProf,
+			"firefox:" + lwProf,
+			"brave",
+			"chromium",
+			"chrome",
+		}
+		if !slices.Equal(got, want) {
+			t.Fatalf("BrowserSpecs() = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("zen searches fallback config, flatpak, and macOS paths in order", func(t *testing.T) {
+		t.Parallel()
+		cases := []struct {
+			name    string
+			relBase func(home, xdg string) string
+		}{
+			{
+				name:    "xdg config",
+				relBase: func(_, xdg string) string { return filepath.Join(xdg, "zen") },
+			},
+			{
+				name:    "flatpak",
+				relBase: func(home, _ string) string { return filepath.Join(home, ".var", "app", "app.zen_browser.zen", ".zen") },
+			},
+			{
+				name: "macOS",
+				relBase: func(home, _ string) string {
+					return filepath.Join(home, "Library", "Application Support", "zen", "Profiles")
+				},
+			},
+		}
+
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				home := t.TempDir()
+				xdg := filepath.Join(home, "custom-xdg")
+				prof := mkProfile(t, tc.relBase(home, xdg), "p1.default-release")
+
+				got := BrowserSpecs(home, xdg, "", []string{"zen"}, fakeLookPath())
+				want := []string{"firefox:" + prof}
+				if !slices.Equal(got, want) {
+					t.Fatalf("BrowserSpecs() = %v, want %v", got, want)
+				}
+			})
+		}
+	})
+
+	t.Run("firefox searches snap, flatpak, and macOS paths", func(t *testing.T) {
+		t.Parallel()
+		cases := []struct {
+			name    string
+			relBase func(home, xdg string) string
+		}{
+			{
+				name:    "home mozilla",
+				relBase: func(home, _ string) string { return filepath.Join(home, ".mozilla", "firefox") },
+			},
+			{
+				name: "snap",
+				relBase: func(home, _ string) string {
+					return filepath.Join(home, "snap", "firefox", "common", ".mozilla", "firefox")
+				},
+			},
+			{
+				name: "flatpak",
+				relBase: func(home, _ string) string {
+					return filepath.Join(home, ".var", "app", "org.mozilla.firefox", ".mozilla", "firefox")
+				},
+			},
+			{
+				name: "macOS",
+				relBase: func(home, _ string) string {
+					return filepath.Join(home, "Library", "Application Support", "Firefox", "Profiles")
+				},
+			},
+		}
+
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				home := t.TempDir()
+				prof := mkProfile(t, tc.relBase(home, ""), "ff.default-release")
+
+				got := BrowserSpecs(home, "", "", []string{"firefox"}, fakeLookPath())
+				want := []string{"firefox:" + prof}
+				if !slices.Equal(got, want) {
+					t.Fatalf("BrowserSpecs() = %v, want %v", got, want)
+				}
+			})
+		}
+	})
+
+	t.Run("librewolf searches xdg and flatpak paths", func(t *testing.T) {
+		t.Parallel()
+		cases := []struct {
+			name    string
+			relBase func(home, xdg string) string
+		}{
+			{
+				name:    "xdg config",
+				relBase: func(_, xdg string) string { return filepath.Join(xdg, "librewolf") },
+			},
+			{
+				name: "flatpak",
+				relBase: func(home, _ string) string {
+					return filepath.Join(home, ".var", "app", "io.gitlab.librewolf-community", ".librewolf")
+				},
+			},
+		}
+
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				home := t.TempDir()
+				xdg := filepath.Join(home, "cfg")
+				prof := mkProfile(t, tc.relBase(home, xdg), "lw.default")
+
+				got := BrowserSpecs(home, xdg, "", []string{"librewolf"}, fakeLookPath())
+				want := []string{"firefox:" + prof}
+				if !slices.Equal(got, want) {
+					t.Fatalf("BrowserSpecs() = %v, want %v", got, want)
+				}
+			})
+		}
+	})
+
+	t.Run("xdgConfigHome defaults to homeDir/.config when empty", func(t *testing.T) {
+		t.Parallel()
+		home := t.TempDir()
+		prof := mkProfile(t, filepath.Join(home, ".config", "zen"), "cfg.default-release")
+
+		got := BrowserSpecs(home, "", "", []string{"zen"}, fakeLookPath())
+		want := []string{"firefox:" + prof}
+		if !slices.Equal(got, want) {
+			t.Fatalf("BrowserSpecs() = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("supports brave, chromium, chrome, edge, vivaldi, case folding, and custom browsers", func(t *testing.T) {
+		t.Parallel()
+		home := t.TempDir()
+		got := BrowserSpecs(
+			home,
+			"",
+			"",
+			[]string{"Brave", "CHROMIUM", "Chrome", "edge", "Vivaldi", "  Opera ", ""},
+			fakeLookPath("brave-browser", "chromium", "google-chrome", "microsoft-edge-stable", "vivaldi-stable"),
+		)
+		want := []string{"brave", "chromium", "chrome", "edge", "vivaldi", "opera"}
+		if !slices.Equal(got, want) {
+			t.Fatalf("BrowserSpecs() = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("empty home and xdg returns no profiles", func(t *testing.T) {
+		t.Parallel()
+		got := BrowserSpecs("", "", "", []string{"zen", "firefox", "librewolf"}, fakeLookPath())
+		if len(got) != 0 {
+			t.Fatalf("BrowserSpecs() = %v, want empty", got)
+		}
+	})
+}
+
+func TestRefreshJarFromBrowsers(t *testing.T) {
+	t.Parallel()
+
+	writeFakeYTDLP := func(t *testing.T, dir, body string) string {
+		t.Helper()
+		bin := filepath.Join(dir, "yt-dlp")
+		if err := os.WriteFile(bin, []byte("#!/usr/bin/env bash\nset -euo pipefail\n"+body), 0o755); err != nil {
+			t.Fatalf("write fake yt-dlp: %v", err)
+		}
+		return bin
+	}
+
+	t.Run("returns empty immediately when cacheDir or specs are empty", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		bin := writeFakeYTDLP(t, dir, `exit 99`)
+
+		if jar, err := RefreshJarFromBrowsers(context.Background(), "", bin, []string{"firefox"}); err != nil || jar != "" {
+			t.Fatalf("empty cacheDir = (%q, %v), want (\"\", nil)", jar, err)
+		}
+
+		cacheDir := filepath.Join(dir, "cache")
+		if jar, err := RefreshJarFromBrowsers(context.Background(), cacheDir, bin, nil); err != nil || jar != "" {
+			t.Fatalf("empty specs = (%q, %v), want (\"\", nil)", jar, err)
+		}
+		if _, err := os.Stat(filepath.Join(cacheDir, "cookies.none")); !os.IsNotExist(err) {
+			t.Fatalf("expected no cookies.none when specs empty, stat err = %v", err)
+		}
+	})
+
+	t.Run("writes filtered 0600 cookies.txt, removes cookies.none, and cleans temp files", func(t *testing.T) {
+		t.Parallel()
+		tmp := t.TempDir()
+		cacheDir := filepath.Join(tmp, "cache")
+		if err := os.MkdirAll(cacheDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		nonePath := filepath.Join(cacheDir, "cookies.none")
+		if err := os.WriteFile(nonePath, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		argsLog := filepath.Join(tmp, "args.log")
+		script := fmt.Sprintf(`
+args_log=%q
+for a in "$@"; do
+	printf '%%s\n' "$a" >> "$args_log"
+done
+spec=""
+raw=""
+while [ $# -gt 0 ]; do
+	case "$1" in
+		--cookies-from-browser) spec="$2"; shift 2 ;;
+		--cookies) raw="$2"; shift 2 ;;
+		*) shift ;;
+	esac
+done
+cat > "$raw" <<'COOKIES'
+# Netscape HTTP Cookie File
+evil.com	TRUE	/	TRUE	1893456000	SESSION	secret
+.youtube.com	TRUE	/	TRUE	1893456000	LOGIN_INFO	valid-token
+COOKIES
+`, argsLog)
+		bin := writeFakeYTDLP(t, tmp, script)
+
+		jarPath, err := RefreshJarFromBrowsers(context.Background(), cacheDir, bin, []string{"firefox:/prof"})
+		if err != nil {
+			t.Fatalf("RefreshJarFromBrowsers() error = %v", err)
+		}
+		wantJar := filepath.Join(cacheDir, "cookies.txt")
+		if jarPath != wantJar {
+			t.Fatalf("jarPath = %q, want %q", jarPath, wantJar)
+		}
+
+		info, err := os.Stat(jarPath)
+		if err != nil {
+			t.Fatalf("Stat(%q) error = %v", jarPath, err)
+		}
+		if perm := info.Mode().Perm(); perm != 0o600 {
+			t.Fatalf("cookies.txt perm = %o, want 0600", perm)
+		}
+
+		data, err := os.ReadFile(jarPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		content := string(data)
+		if strings.Contains(content, "evil.com") {
+			t.Fatalf("cookies.txt contains unfiltered domain: %s", content)
+		}
+		if !strings.Contains(content, "LOGIN_INFO") {
+			t.Fatalf("cookies.txt missing LOGIN_INFO: %s", content)
+		}
+		if _, err := os.Stat(nonePath); !os.IsNotExist(err) {
+			t.Fatalf("expected cookies.none to be removed, err = %v", err)
+		}
+
+		entries, err := os.ReadDir(cacheDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(entries) != 1 || entries[0].Name() != "cookies.txt" {
+			t.Fatalf("unexpected files left in cacheDir: %+v", entries)
+		}
+
+		loggedBytes, err := os.ReadFile(argsLog)
+		if err != nil {
+			t.Fatal(err)
+		}
+		gotArgs := strings.Split(strings.TrimSpace(string(loggedBytes)), "\n")
+		if len(gotArgs) != 12 {
+			t.Fatalf("yt-dlp arg count = %d (%v), want 12", len(gotArgs), gotArgs)
+		}
+		if gotArgs[0] != "--cookies-from-browser" || gotArgs[1] != "firefox:/prof" || gotArgs[2] != "--cookies" {
+			t.Fatalf("unexpected leading args: %v", gotArgs[:4])
+		}
+		if !strings.HasPrefix(filepath.Base(gotArgs[3]), "cookies.raw.") || filepath.Dir(gotArgs[3]) != cacheDir {
+			t.Fatalf("unexpected raw cookie temp path %q", gotArgs[3])
+		}
+		wantTail := []string{"--no-warnings", "--skip-download", "--flat-playlist", "--playlist-items", "1", "--print", "id", "ytsearch1:youtube"}
+		if !slices.Equal(gotArgs[4:], wantTail) {
+			t.Fatalf("yt-dlp trailing args = %v, want %v", gotArgs[4:], wantTail)
+		}
+	})
+
+	t.Run("tries specs in order until one yields login cookies", func(t *testing.T) {
+		t.Parallel()
+		tmp := t.TempDir()
+		cacheDir := filepath.Join(tmp, "cache")
+		seenFile := filepath.Join(tmp, "seen.txt")
+
+		script := fmt.Sprintf(`
+seen=%q
+spec=""
+raw=""
+while [ $# -gt 0 ]; do
+	case "$1" in
+		--cookies-from-browser) spec="$2"; shift 2 ;;
+		--cookies) raw="$2"; shift 2 ;;
+		*) shift ;;
+	esac
+done
+printf '%%s\n' "$spec" >> "$seen"
+case "$spec" in
+	zen-fail)
+		exit 1
+		;;
+	brave)
+		printf '.youtube.com\tTRUE\t/\tTRUE\t0\tVISITOR_INFO1_LIVE\tguest\n' > "$raw"
+		;;
+	chrome)
+		printf '.google.com\tTRUE\t/\tTRUE\t0\tSAPISID\tauth-ok\n' > "$raw"
+		;;
+	never-reached)
+		exit 99
+		;;
+esac
+`, seenFile)
+		bin := writeFakeYTDLP(t, tmp, script)
+
+		jarPath, err := RefreshJarFromBrowsers(context.Background(), cacheDir, bin, []string{"zen-fail", "brave", "chrome", "never-reached"})
+		if err != nil {
+			t.Fatalf("RefreshJarFromBrowsers() error = %v", err)
+		}
+		if jarPath != filepath.Join(cacheDir, "cookies.txt") {
+			t.Fatalf("jarPath = %q, want cookies.txt", jarPath)
+		}
+
+		seenRaw, err := os.ReadFile(seenFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		seen := strings.Split(strings.TrimSpace(string(seenRaw)), "\n")
+		wantSeen := []string{"zen-fail", "brave", "chrome"}
+		if !slices.Equal(seen, wantSeen) {
+			t.Fatalf("probed specs = %v, want %v", seen, wantSeen)
+		}
+	})
+
+	t.Run("creates cacheDir 0700 and touches 0600 cookies.none when no spec yields login", func(t *testing.T) {
+		t.Parallel()
+		tmp := t.TempDir()
+		cacheDir := filepath.Join(tmp, "nested", "cache")
+		script := `
+raw=""
+while [ $# -gt 0 ]; do
+	case "$1" in
+		--cookies) raw="$2"; shift 2 ;;
+		*) shift ;;
+	esac
+done
+printf '.youtube.com\tTRUE\t/\tTRUE\t0\tPREF\tguest\n' > "$raw"
+`
+		bin := writeFakeYTDLP(t, tmp, script)
+
+		jarPath, err := RefreshJarFromBrowsers(context.Background(), cacheDir, bin, []string{"firefox", "brave"})
+		if err != nil {
+			t.Fatalf("RefreshJarFromBrowsers() error = %v", err)
+		}
+		if jarPath != "" {
+			t.Fatalf("jarPath = %q, want empty", jarPath)
+		}
+
+		dirInfo, err := os.Stat(cacheDir)
+		if err != nil {
+			t.Fatalf("Stat(cacheDir) error = %v", err)
+		}
+		if perm := dirInfo.Mode().Perm(); perm != 0o700 {
+			t.Fatalf("cacheDir perm = %o, want 0700", perm)
+		}
+
+		nonePath := filepath.Join(cacheDir, "cookies.none")
+		noneInfo, err := os.Stat(nonePath)
+		if err != nil {
+			t.Fatalf("Stat(cookies.none) error = %v", err)
+		}
+		if perm := noneInfo.Mode().Perm(); perm != 0o600 {
+			t.Fatalf("cookies.none perm = %o, want 0600", perm)
+		}
+		if _, err := os.Stat(filepath.Join(cacheDir, "cookies.txt")); !os.IsNotExist(err) {
+			t.Fatalf("expected no cookies.txt, stat err = %v", err)
+		}
+
+		// Verify existing cookies.none mtime gets refreshed on subsequent empty refresh.
+		old := time.Now().Add(-2 * time.Hour)
+		if err := os.Chtimes(nonePath, old, old); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := RefreshJarFromBrowsers(context.Background(), cacheDir, bin, []string{"firefox"}); err != nil {
+			t.Fatalf("second RefreshJarFromBrowsers() error = %v", err)
+		}
+		refreshedInfo, err := os.Stat(nonePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !refreshedInfo.ModTime().After(old) {
+			t.Fatalf("cookies.none mtime = %v, want after %v", refreshedInfo.ModTime(), old)
+		}
+	})
+
+	t.Run("respects context cancellation without touching cookies.none", func(t *testing.T) {
+		t.Parallel()
+		tmp := t.TempDir()
+		cacheDir := filepath.Join(tmp, "cache")
+		bin := writeFakeYTDLP(t, tmp, `sleep 5`)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
+		defer cancel()
+
+		jarPath, err := RefreshJarFromBrowsers(ctx, cacheDir, bin, []string{"firefox"})
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("RefreshJarFromBrowsers() error = %v, want DeadlineExceeded", err)
+		}
+		if jarPath != "" {
+			t.Fatalf("jarPath = %q, want empty", jarPath)
+		}
+		if _, statErr := os.Stat(filepath.Join(cacheDir, "cookies.none")); !os.IsNotExist(statErr) {
+			t.Fatalf("expected no cookies.none on context cancellation, stat err = %v", statErr)
+		}
+		raws, globErr := filepath.Glob(filepath.Join(cacheDir, "cookies.raw.*"))
+		if globErr != nil || len(raws) != 0 {
+			t.Fatalf("expected no leftover raw cookie files, got %v (err=%v)", raws, globErr)
+		}
+	})
+}
+
+func TestRefreshJarFromBrowsers_DefaultYTDLPBinary(t *testing.T) {
+	tmp := t.TempDir()
+	binDir := filepath.Join(tmp, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(binDir, "yt-dlp")
+	script := `#!/usr/bin/env bash
+set -euo pipefail
+raw=""
+while [ $# -gt 0 ]; do
+	case "$1" in
+		--cookies) raw="$2"; shift 2 ;;
+		*) shift ;;
+	esac
+done
+printf '.youtube.com\tTRUE\t/\tTRUE\t0\t__Secure-3PAPISID\tdefault-bin-ok\n' > "$raw"
+`
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	cacheDir := filepath.Join(tmp, "cache")
+	jarPath, err := RefreshJarFromBrowsers(context.Background(), cacheDir, "", []string{"firefox"})
+	if err != nil {
+		t.Fatalf("RefreshJarFromBrowsers() error = %v", err)
+	}
+	if jarPath != filepath.Join(cacheDir, "cookies.txt") {
+		t.Fatalf("jarPath = %q, want %q", jarPath, filepath.Join(cacheDir, "cookies.txt"))
+	}
 }
