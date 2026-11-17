@@ -170,11 +170,12 @@ func TestStateToastExpirationRespectsID(t *testing.T) {
 func TestMouseInteractions(t *testing.T) {
 	t.Run("click search bar focuses search", func(t *testing.T) {
 		s, _, _, _ := newTestState()
+		defer s.Close()
 		s.Width, s.Height = 120, 36
 		_, _, barStart := s.headerSearchBounds()
 		s, _ = s.Update(tea.MouseMsg{
 			X:      barStart + 2,
-			Y:      0,
+			Y:      1,
 			Button: tea.MouseButtonLeft,
 			Action: tea.MouseActionPress,
 		})
@@ -183,37 +184,35 @@ func TestMouseInteractions(t *testing.T) {
 		}
 	})
 
-	t.Run("click Buscar button submits search", func(t *testing.T) {
+	t.Run("click reload [r] button triggers sync", func(t *testing.T) {
 		s, _, _, _ := newTestState()
+		defer s.Close()
 		s.Width, s.Height = 120, 36
 		s.Focus = FocusSearch
-		s.SearchDraft = "golang"
 		btnStart, _, _ := s.headerSearchBounds()
 		var cmd tea.Cmd
 		s, cmd = s.Update(tea.MouseMsg{
 			X:      btnStart + 1,
-			Y:      0,
+			Y:      1,
 			Button: tea.MouseButtonLeft,
 			Action: tea.MouseActionPress,
 		})
-		if s.View != ViewSearch {
-			t.Fatalf("expected ViewSearch, got %v", s.View)
-		}
-		if s.SearchQuery != "golang" {
-			t.Fatalf("expected SearchQuery %q, got %q", "golang", s.SearchQuery)
+		if !s.Syncing {
+			t.Fatal("expected Syncing=true after clicking [r]")
 		}
 		if cmd == nil {
-			t.Fatal("expected non-nil search cmd")
+			t.Fatal("expected non-nil loadFeed cmd")
 		}
 	})
 
 	t.Run("click chip switches active chip filter", func(t *testing.T) {
 		s, _, _, _ := newTestState()
+		defer s.Close()
 		s.Width, s.Height = 120, 36
-		// mainX = 9 (miniGuideW=8 + 1); first chip "Todo" width=6, second chip "Música" starts at 9+1+6+1=17
+		// mainX = 11 (miniGuideW=10 + 1 border); first chip "Todo" width=6, second chip starts at 11+1+6+1=19
 		s, _ = s.Update(tea.MouseMsg{
-			X:      18,
-			Y:      2,
+			X:      20,
+			Y:      4,
 			Button: tea.MouseButtonLeft,
 			Action: tea.MouseActionPress,
 		})
@@ -227,11 +226,11 @@ func TestMouseInteractions(t *testing.T) {
 		defer s.Close()
 		s.Width, s.Height = 120, 36
 		s, _ = s.Update(FeedLoadedMsg{Tab: model.TabHome, Videos: cat.Feeds[model.TabHome]})
-		// mainX = 9; col 1 starts after col 0 width + gap
-		col1X := 9 + s.gridCardWidth() + 4
+		// mainX = 11; col 1 starts after col 0 width + gap, y >= 5
+		col1X := s.mainOriginX() + s.gridCardWidth() + 4
 		s, _ = s.Update(tea.MouseMsg{
 			X:      col1X,
-			Y:      5,
+			Y:      7,
 			Button: tea.MouseButtonLeft,
 			Action: tea.MouseActionPress,
 		})
@@ -245,7 +244,7 @@ func TestMouseInteractions(t *testing.T) {
 		var cmd tea.Cmd
 		s, cmd = s.Update(tea.MouseMsg{
 			X:      col1X,
-			Y:      5,
+			Y:      7,
 			Button: tea.MouseButtonLeft,
 			Action: tea.MouseActionPress,
 		})
@@ -266,10 +265,12 @@ func TestMouseInteractions(t *testing.T) {
 
 	t.Run("click help button toggles and next click dismisses", func(t *testing.T) {
 		s, _, _, _ := newTestState()
+		defer s.Close()
 		s.Width, s.Height = 120, 36
+		// [?] inside right actions panel [Width-15, Width-10]
 		s, _ = s.Update(tea.MouseMsg{
-			X:      s.Width - 5,
-			Y:      0,
+			X:      s.Width - 12,
+			Y:      1,
 			Button: tea.MouseButtonLeft,
 			Action: tea.MouseActionPress,
 		})
@@ -296,8 +297,8 @@ func TestMouseInteractions(t *testing.T) {
 			y      int
 			want   model.Tab
 		}{
-			{name: "mini-guide music", width: 120, height: 36, x: 3, y: 5, want: model.TabMusic},
-			{name: "full sidebar subscriptions", width: 156, height: 45, x: 5, y: 5, want: model.TabSubscriptions},
+			{name: "mini-guide music", width: 120, height: 36, x: 4, y: 7, want: model.TabMusic},
+			{name: "full sidebar subscriptions", width: 156, height: 45, x: 5, y: 7, want: model.TabSubscriptions},
 		}
 		for _, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {
@@ -365,6 +366,31 @@ func TestMouseInteractions(t *testing.T) {
 		s, _ = s.Update(ActionResultMsg{Err: context.DeadlineExceeded})
 		if s.Toast == "" {
 			t.Fatal("expected error toast")
+		}
+	})
+
+	t.Run("c key cycles quality presets and invokes OnQualityChange", func(t *testing.T) {
+		s, _, _, _ := newTestState()
+		defer s.Close()
+		var got []int
+		s.Deps.OnQualityChange = func(q int) error {
+			got = append(got, q)
+			return nil
+		}
+		var cmd tea.Cmd
+		s, cmd = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+		if s.Quality != 1080 {
+			t.Fatalf("expected Quality 1080 after cycling from 0, got %d", s.Quality)
+		}
+		if batch, ok := cmd().(tea.BatchMsg); ok {
+			for _, c := range batch {
+				if c != nil {
+					c()
+				}
+			}
+		}
+		if len(got) != 1 || got[0] != 1080 {
+			t.Fatalf("expected OnQualityChange [1080], got %v", got)
 		}
 	})
 }

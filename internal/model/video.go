@@ -11,6 +11,9 @@ const (
 	TabSubscriptions
 	TabDownloads
 	TabHistory
+	TabWatchLater
+	TabLiked
+	TabPlaylists
 )
 
 func (t Tab) String() string {
@@ -25,6 +28,12 @@ func (t Tab) String() string {
 		return "Descargas"
 	case TabHistory:
 		return "Historial"
+	case TabWatchLater:
+		return "Ver más tarde"
+	case TabLiked:
+		return "Me gusta"
+	case TabPlaylists:
+		return "Playlists"
 	default:
 		return "Desconocido"
 	}

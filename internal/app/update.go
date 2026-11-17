@@ -97,6 +97,7 @@ func (s *State) Update(msg tea.Msg) (*State, tea.Cmd) {
 		s.Feeds[msg.Tab] = msg.Videos
 		if msg.Tab == s.ActiveTab {
 			s.SetSelection(s.SelectedIdx)
+			s.prefetchTop(msg.Videos, 3)
 		}
 		return s, nil
 
@@ -111,6 +112,8 @@ func (s *State) Update(msg tea.Msg) (*State, tea.Cmd) {
 		s.SearchResults = msg.Videos
 		s.ResultIdx = 0
 		s.ResultScroll = 0
+		s.SetSelection(0)
+		s.prefetchTop(msg.Videos, 3)
 		return s, nil
 
 	case SavedLoadedMsg:
@@ -126,6 +129,12 @@ func (s *State) Update(msg tea.Msg) (*State, tea.Cmd) {
 		if _, ok := s.Feeds[model.TabHistory]; !ok && len(msg.History) > 0 {
 			s.Feeds[model.TabHistory] = msg.History
 		}
+		if _, ok := s.Feeds[model.TabWatchLater]; !ok {
+			s.Feeds[model.TabWatchLater] = append([]model.Video(nil), msg.Saved...)
+		}
+		if _, ok := s.Feeds[model.TabLiked]; !ok {
+			s.Feeds[model.TabLiked] = append([]model.Video(nil), msg.Saved...)
+		}
 		return s, nil
 
 	case ToggledSaveMsg:
@@ -134,10 +143,16 @@ func (s *State) Update(msg tea.Msg) (*State, tea.Cmd) {
 		}
 		if msg.Saved {
 			s.SavedIDs[msg.Video.ID] = true
+			for _, t := range []model.Tab{model.TabWatchLater, model.TabLiked} {
+				s.Feeds[t] = prependUniqueVideo(s.Feeds[t], msg.Video)
+			}
 			s.SetSelection(s.SelectedIdx)
 			return s, s.toastCmd("★ Guardado: " + msg.Video.Title)
 		}
 		delete(s.SavedIDs, msg.Video.ID)
+		for _, t := range []model.Tab{model.TabWatchLater, model.TabLiked} {
+			s.Feeds[t] = removeVideoByID(s.Feeds[t], msg.Video.ID)
+		}
 		s.SetSelection(s.SelectedIdx)
 		return s, s.toastCmd("Quitado de guardados")
 
@@ -195,11 +210,11 @@ func (s *State) Update(msg tea.Msg) (*State, tea.Cmd) {
 
 // GridCols returns the current number of grid columns for the terminal width.
 func (s *State) GridCols() int {
-	mainW := s.Width
+	mainW := s.Width - 2
 	if s.Width >= 140 {
-		mainW -= 23
+		mainW -= 26
 	} else if s.Width >= 100 {
-		mainW -= 9
+		mainW -= 10
 	}
 	cols := (mainW + 2) / 32
 	if cols < 1 {
@@ -218,6 +233,17 @@ func (s *State) handleKey(msg tea.KeyMsg) (*State, tea.Cmd) {
 	if s.ShowHelp {
 		if key == "?" || key == "esc" {
 			s.ShowHelp = false
+		}
+		return s, nil
+	}
+
+	if s.ShowSettings {
+		switch key {
+		case "esc", "S", "q":
+			s.ShowSettings = false
+			return s, nil
+		case "c", "enter", " ", "right", "l":
+			return s.CycleQuality()
 		}
 		return s, nil
 	}
@@ -254,6 +280,9 @@ func (s *State) handleKey(msg tea.KeyMsg) (*State, tea.Cmd) {
 		return s, tea.Quit
 	case "?":
 		s.ShowHelp = true
+		return s, nil
+	case "S":
+		s.ShowSettings = !s.ShowSettings
 		return s, nil
 	case "/":
 		s.Focus = FocusSearch
@@ -342,6 +371,8 @@ func (s *State) handleKey(msg tea.KeyMsg) (*State, tea.Cmd) {
 		return s.EnqueueSelected()
 	case "d":
 		return s.DownloadSelected(false)
+	case "c":
+		return s.CycleQuality()
 	case " ":
 		return s, s.engineCmd(func(ctx context.Context) error { return s.Deps.Engine.TogglePause(ctx) }, "")
 	case "n":
@@ -364,6 +395,16 @@ func (s *State) handleKey(msg tea.KeyMsg) (*State, tea.Cmd) {
 	return s, nil
 }
 
+func (s *State) prefetchTop(videos []model.Video, n int) {
+	p, ok := s.Deps.Engine.(streamPrefetcher)
+	if !ok {
+		return
+	}
+	for i := 0; i < len(videos) && i < n; i++ {
+		p.Prefetch(videos[i])
+	}
+}
+
 func (s *State) activeIdx() int {
 	if s.View == ViewSearch {
 		return s.ResultIdx
@@ -378,6 +419,19 @@ func (s *State) SwitchTab(tab model.Tab) (*State, tea.Cmd) {
 	s.SelectedIdx = 0
 	s.ScrollOffset = 0
 	s.HomeChip = 0
+	if tab == model.TabPlaylists {
+		var pls []model.Video
+		for _, v := range s.Feeds[model.TabHome] {
+			if strings.HasPrefix(v.ID, "RD") || strings.Contains(strings.ToLower(v.Title), "mix") || strings.Contains(strings.ToLower(v.Title), "playlist") {
+				pls = append(pls, v)
+			}
+		}
+		s.Feeds[model.TabPlaylists] = pls
+		return s, nil
+	}
+	if tab == model.TabWatchLater || tab == model.TabLiked {
+		return s, nil
+	}
 	if _, ok := s.Feeds[tab]; ok {
 		return s, nil
 	}
@@ -386,7 +440,16 @@ func (s *State) SwitchTab(tab model.Tab) (*State, tea.Cmd) {
 }
 
 func (s *State) cycleSidebarTab(delta int) (*State, tea.Cmd) {
-	tabs := []model.Tab{model.TabHome, model.TabMusic, model.TabSubscriptions, model.TabHistory, model.TabDownloads}
+	tabs := []model.Tab{
+		model.TabHome,
+		model.TabMusic,
+		model.TabSubscriptions,
+		model.TabHistory,
+		model.TabWatchLater,
+		model.TabPlaylists,
+		model.TabLiked,
+		model.TabDownloads,
+	}
 	cur := 0
 	for i, t := range tabs {
 		if t == s.ActiveTab {
@@ -396,6 +459,27 @@ func (s *State) cycleSidebarTab(delta int) (*State, tea.Cmd) {
 	}
 	next := (cur + delta + len(tabs)) % len(tabs)
 	return s.SwitchTab(tabs[next])
+}
+
+func prependUniqueVideo(list []model.Video, v model.Video) []model.Video {
+	out := make([]model.Video, 0, len(list)+1)
+	out = append(out, v)
+	for _, item := range list {
+		if item.ID != v.ID {
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
+func removeVideoByID(list []model.Video, id string) []model.Video {
+	out := make([]model.Video, 0, len(list))
+	for _, item := range list {
+		if item.ID != id {
+			out = append(out, item)
+		}
+	}
+	return out
 }
 
 // CycleChip steps through the active view's filter chips.
@@ -483,6 +567,57 @@ func (s *State) EnqueueSelected() (*State, tea.Cmd) {
 		return nil
 	}
 	return s, tea.Batch(toastCmd, enqCmd)
+}
+
+type qualitySetter interface {
+	SetQuality(ctx context.Context, quality int)
+}
+
+var qualityPresets = []int{0, 1080, 720, 480}
+
+// QualityLabel returns a human-readable badge for the current max vertical resolution.
+func (s *State) QualityLabel() string {
+	if s.Quality <= 0 {
+		return "MAX"
+	}
+	return fmt.Sprintf("%dp", s.Quality)
+}
+
+// CycleQuality rotates through quality presets (MAX -> 1080p -> 720p -> 480p),
+// updates the player engine, persists config, and re-prefetches the current item.
+func (s *State) CycleQuality() (*State, tea.Cmd) {
+	next := qualityPresets[0]
+	for i, q := range qualityPresets {
+		if q == s.Quality {
+			next = qualityPresets[(i+1)%len(qualityPresets)]
+			break
+		}
+	}
+	s.Quality = next
+	if qs, ok := s.Deps.Engine.(qualitySetter); ok {
+		qs.SetQuality(s.appCtx, next)
+	}
+	if v, ok := s.SelectedVideo(); ok {
+		if p, ok := s.Deps.Engine.(streamPrefetcher); ok {
+			p.Prefetch(v)
+		}
+	}
+	var saveCmd tea.Cmd
+	if s.Deps.OnQualityChange != nil {
+		fn := s.Deps.OnQualityChange
+		q := next
+		saveCmd = func() tea.Msg {
+			if err := fn(q); err != nil {
+				return ActionResultMsg{Err: err}
+			}
+			return nil
+		}
+	}
+	label := "Máxima (best)"
+	if next > 0 {
+		label = fmt.Sprintf("%dp", next)
+	}
+	return s, tea.Batch(s.toastCmd("🎬 Calidad: "+label), saveCmd)
 }
 
 // DownloadSelected queues a background download for the highlighted video.

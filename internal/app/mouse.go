@@ -11,8 +11,8 @@ import (
 const (
 	fullSidebarMinW = 140
 	miniGuideMinW   = 100
-	fullSidebarW    = 22
-	miniGuideW      = 8
+	fullSidebarW    = 26
+	miniGuideW      = 10
 	cardW           = 30
 	cardGap         = 2
 	cardH           = 14
@@ -48,94 +48,130 @@ func (s *State) handleLeftClick(x, y int) (*State, tea.Cmd) {
 		s.ShowHelp = false
 		return s, nil
 	}
-
-	// 1. Header row (y == 0)
-	if y == 0 {
-		// Left logo area: return home
-		if x < 10 {
-			s.Focus = FocusMain
-			return s.SwitchTab(model.TabHome)
-		}
-		// Right action buttons: [⟳] [?] [E]
-		if x >= s.Width-12 && x < s.Width-7 {
-			s.Focus = FocusMain
-			s.Syncing = true
-			return s, s.loadFeedCmd(s.ActiveTab, true)
-		}
-		if x >= s.Width-7 && x < s.Width-3 {
-			s.ShowHelp = !s.ShowHelp
-			return s, nil
-		}
-
-		// Search input + "Buscar" button in the center of header
-		searchBtnStart, searchBtnEnd, searchBarStart := s.headerSearchBounds()
-		if x >= searchBtnStart && x <= searchBtnEnd {
-			if s.SearchDraft == "" && s.SearchQuery != "" {
-				s.SearchDraft = s.SearchQuery
-			}
-			return s.SubmitSearch()
-		}
-		if x >= searchBarStart && x < searchBtnStart {
-			s.Focus = FocusSearch
-			return s, nil
-		}
+	if s.ShowSettings {
+		s.ShowSettings = false
 		return s, nil
 	}
 
-	// Clicking outside header blurs search focus
+	// 1. Top Spotatui panels (y == 0..2)
+	if y >= 0 && y <= 2 {
+		sideW := s.topBrandWidth()
+		if x < sideW {
+			s.Focus = FocusMain
+			s.View = ViewHome
+			return s.SwitchTab(model.TabHome)
+		}
+
+		actionsW := 15
+		searchPanelW := max(24, (s.Width-sideW)-actionsW)
+		if x < sideW+searchPanelW {
+			btnStart, btnEnd, _ := s.headerSearchBounds()
+			// [r] reload button on far right inside search panel
+			if x >= btnStart && x <= btnEnd {
+				s.Focus = FocusMain
+				s.Syncing = true
+				return s, s.loadFeedCmd(s.ActiveTab, true)
+			}
+			s.Focus = FocusSearch
+			return s, nil
+		}
+
+		// Right actions panel: " [?] [S] [Q] "
+		relX := x - (sideW + searchPanelW)
+		switch {
+		case relX <= 5:
+			s.ShowHelp = !s.ShowHelp
+			return s, nil
+		case relX <= 9:
+			s.ShowSettings = !s.ShowSettings
+			return s, nil
+		default:
+			s.Close()
+			return s, tea.Quit
+		}
+	}
+
+	// Clicking outside top search panel blurs search focus
 	if s.Focus == FocusSearch {
 		s.Focus = FocusMain
 	}
 
-	// 2. Player bar (y == s.Height - 2)
-	if y == s.Height-2 && x < 6 {
-		return s, s.engineCmd(func(ctx context.Context) error { return s.Deps.Engine.TogglePause(ctx) }, "")
-	}
-
-	// Ignore divider / status bar rows
-	if y < 2 || y >= s.Height-2 {
+	// 2. Bottom Player panel (y == s.Height-5 .. s.Height-1)
+	if y >= s.Height-5 {
+		if y == s.Height-2 {
+			switch {
+			case x >= 2 && x <= 5:
+				return s, s.engineCmd(func(ctx context.Context) error { return s.Deps.Engine.Prev(ctx) }, "⏮ Anterior")
+			case x >= 7 && x <= 11:
+				return s, s.engineCmd(func(ctx context.Context) error { return s.Deps.Engine.TogglePause(ctx) }, "")
+			case x >= 13 && x <= 16:
+				return s, s.engineCmd(func(ctx context.Context) error { return s.Deps.Engine.Next(ctx) }, "⏭ Siguiente")
+			case x >= 18 && x <= 23:
+				return s, s.engineCmd(func(ctx context.Context) error { return s.Deps.Engine.Seek(ctx, -10) }, "-10s")
+			case x >= 25 && x <= 30:
+				return s, s.engineCmd(func(ctx context.Context) error { return s.Deps.Engine.Seek(ctx, 10) }, "+10s")
+			case x >= 32 && x <= 37:
+				return s, s.engineCmd(func(ctx context.Context) error { return s.Deps.Engine.AddVolume(ctx, -5) }, "Vol -5%")
+			case x >= 39 && x <= 44:
+				return s, s.engineCmd(func(ctx context.Context) error { return s.Deps.Engine.AddVolume(ctx, 5) }, "Vol +5%")
+			case x >= 46 && x <= 49:
+				return s.ToggleSaveSelected()
+			}
+		}
 		return s, nil
 	}
 
-	// 3. Sidebar / Mini-guide area
-	mainX := s.mainOriginX()
-	if mainX > 0 && x < mainX-1 {
+	// Ignore panel top border (y == 3)
+	if y < 4 {
+		return s, nil
+	}
+
+	// 3. Sidebar / Mini-guide panel
+	sideW := s.sidebarWidth()
+	if sideW > 0 && x < sideW {
+		s.Focus = FocusSidebar
 		if s.Width >= fullSidebarMinW {
 			switch y {
-			case 3:
-				return s.SwitchTab(model.TabHome)
-			case 4:
-				return s.SwitchTab(model.TabMusic)
 			case 5:
+				return s.SwitchTab(model.TabHome)
+			case 6:
+				return s.SwitchTab(model.TabMusic)
+			case 7:
 				return s.SwitchTab(model.TabSubscriptions)
-			case 8:
+			case 10:
 				return s.SwitchTab(model.TabHistory)
-			case 9:
+			case 11:
+				return s.SwitchTab(model.TabWatchLater)
+			case 12:
+				return s.SwitchTab(model.TabPlaylists)
+			case 13:
+				return s.SwitchTab(model.TabLiked)
+			case 14:
 				return s.SwitchTab(model.TabDownloads)
 			}
-			// Clicking a subscribed channel searches that channel
-			subIdx := y - 12
-			if subIdx >= 0 && subIdx < len(s.Subscriptions) {
+			subIdx := y - 17
+			if subIdx >= 0 && subIdx < len(s.Subscriptions) && subIdx < 4 {
 				s.SearchDraft = s.Subscriptions[subIdx]
 				return s.SubmitSearch()
 			}
 			return s, nil
 		}
-		// Mini-guide (3 rows per tab starting at y=2)
 		tabs := []model.Tab{model.TabHome, model.TabMusic, model.TabSubscriptions, model.TabHistory, model.TabDownloads}
-		slot := (y - 2) / 3
+		slot := (y - 4) / 3
 		if slot >= 0 && slot < len(tabs) {
 			return s.SwitchTab(tabs[slot])
 		}
 		return s, nil
 	}
 
+	s.Focus = FocusMain
+	mainX := s.mainOriginX()
 	if x < mainX {
 		return s, nil
 	}
 
-	// 4. Chips row (y == 2)
-	if y == 2 {
+	// 4. Chips row inside Main panel (y == 4)
+	if y == 4 {
 		chips := HomeChips
 		if s.View == ViewSearch {
 			chips = SearchChips
@@ -159,18 +195,15 @@ func (s *State) handleLeftClick(x, y int) (*State, tea.Cmd) {
 		return s, nil
 	}
 
-	// 5. Main content (y >= 3)
+	// 5. Main content inside panel (y >= 5)
 	items := s.VisibleItems()
 	if len(items) == 0 {
 		return s, nil
 	}
 
-	relY := y - 3
+	relY := y - 5
+	bodyH := max(1, s.Height-11)
 	if s.View == ViewSearch {
-		bodyH := s.Height - 6
-		if bodyH < 1 {
-			bodyH = 1
-		}
 		visibleCount := max(1, bodyH/searchRowH)
 		startIdx := s.ResultScroll
 		if s.ResultIdx < startIdx {
@@ -196,10 +229,6 @@ func (s *State) handleLeftClick(x, y int) (*State, tea.Cmd) {
 	if col < 0 || col >= cols {
 		return s, nil
 	}
-	bodyH := s.Height - 6
-	if bodyH < 1 {
-		bodyH = 1
-	}
 	visibleRows := max(1, bodyH/cardH)
 	selRow := s.SelectedIdx / cols
 	startRow := s.ScrollOffset
@@ -224,44 +253,53 @@ func (s *State) handleLeftClick(x, y int) (*State, tea.Cmd) {
 	return s, nil
 }
 
-func (s *State) mainOriginX() int {
+func (s *State) sidebarWidth() int {
 	if s.Width >= fullSidebarMinW {
-		return fullSidebarW + 1
+		return fullSidebarW
 	}
 	if s.Width >= miniGuideMinW {
-		return miniGuideW + 1
+		return miniGuideW
 	}
 	return 0
 }
 
+func (s *State) mainOriginX() int {
+	return s.sidebarWidth() + 1 // +1 for left border of Main panel
+}
+
 func (s *State) gridCardWidth() int {
-	mainW := s.Width - s.mainOriginX()
+	innerMainW := s.Width - s.sidebarWidth() - 2
 	cols := s.GridCols()
-	if mainW <= 0 || cols <= 0 {
+	if innerMainW <= 0 || cols <= 0 {
 		return cardW
 	}
-	w := (mainW - (cols-1)*cardGap) / cols
+	w := (innerMainW - (cols-1)*cardGap) / cols
 	if w < cardW {
-		if mainW < cardW {
-			return mainW
+		if innerMainW < cardW {
+			return innerMainW
 		}
 		return cardW
 	}
 	return w
 }
 
-func (s *State) headerSearchBounds() (btnStart, btnEnd, barStart int) {
-	leftW := 8 // " ▶  ytx"
-	if s.Width < miniGuideMinW {
-		leftW = 36
+func (s *State) topBrandWidth() int {
+	switch {
+	case s.Width >= 140:
+		return 26
+	case s.Width >= 100:
+		return 10
+	default:
+		return 0
 	}
-	rightW := 12 // "⟳  ?  E "
-	searchBtnW := 8
-	searchW := min(54, max(14, s.Width-leftW-rightW-searchBtnW-6))
-	totalSearchW := searchW + searchBtnW
-	padW := max(1, (s.Width-leftW-totalSearchW-rightW)/2)
-	barStart = leftW + padW
-	btnStart = barStart + searchW
-	btnEnd = btnStart + searchBtnW - 1
+}
+
+func (s *State) headerSearchBounds() (btnStart, btnEnd, barStart int) {
+	sideW := s.topBrandWidth()
+	searchPanelW := max(24, (s.Width-sideW)-15)
+	// Inside top search panel: "... [r] │" -> [r] is 3 cols at [sideW+searchPanelW-5, sideW+searchPanelW-2]
+	barStart = sideW + 1
+	btnStart = sideW + searchPanelW - 5
+	btnEnd = sideW + searchPanelW - 2
 	return btnStart, btnEnd, barStart
 }

@@ -57,10 +57,12 @@ type Downloader interface {
 
 // Dependencies holds the injected application ports.
 type Dependencies struct {
-	Catalog    catalog.Catalog
-	Engine     player.Engine
-	Store      store.Store
-	Downloader Downloader
+	Catalog         catalog.Catalog
+	Engine          player.Engine
+	Store           store.Store
+	Downloader      Downloader
+	InitialQuality  int
+	OnQualityChange func(int) error
 }
 
 // State holds the pure application state decoupled from terminal rendering.
@@ -96,6 +98,7 @@ type State struct {
 
 	ShowHelp     bool
 	ShowSettings bool
+	Quality      int
 	Width        int
 	Height       int
 	Ready        bool
@@ -114,6 +117,7 @@ func NewState(deps Dependencies) *State {
 		View:       ViewHome,
 		ActiveTab:  model.TabHome,
 		Focus:      FocusMain,
+		Quality:    deps.InitialQuality,
 		Feeds:      make(map[model.Tab][]model.Video),
 		SavedIDs:   make(map[string]bool),
 		HistoryIDs: make(map[string]bool),
@@ -174,6 +178,10 @@ func (s *State) SelectedVideo() (model.Video, bool) {
 	return items[idx], true
 }
 
+type streamPrefetcher interface {
+	Prefetch(v model.Video)
+}
+
 // SetSelection updates the active cursor clamped to bounds.
 func (s *State) SetSelection(idx int) {
 	items := s.VisibleItems()
@@ -195,6 +203,12 @@ func (s *State) SetSelection(idx int) {
 		s.ResultIdx = idx
 	} else {
 		s.SelectedIdx = idx
+	}
+	if p, ok := s.Deps.Engine.(streamPrefetcher); ok {
+		p.Prefetch(items[idx])
+		if idx+1 < len(items) {
+			p.Prefetch(items[idx+1])
+		}
 	}
 }
 
