@@ -79,6 +79,9 @@ func WithCommandTimeout(d time.Duration) IPCOption {
 func WithLaunchDefaults(opts LaunchOpts) IPCOption {
 	return func(c *IPCClient) {
 		c.launchDefaults = opts
+		if opts.FastPlayback {
+			c.resolver = NewStreamResolver("", opts.Quality)
+		}
 	}
 }
 
@@ -103,7 +106,9 @@ type IPCClient struct {
 	initialBackoff time.Duration
 	maxBackoff     time.Duration
 	cmdTimeout     time.Duration
+	launchMu       sync.RWMutex
 	launchDefaults LaunchOpts
+	resolver       *StreamResolver
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -185,8 +190,15 @@ func (c *IPCClient) run() {
 				}
 				continue
 			}
+			c.connMu.Lock()
+			if c.ctx.Err() != nil {
+				c.connMu.Unlock()
+				_ = dialed.Close()
+				return
+			}
+			c.conn = dialed
+			c.connMu.Unlock()
 			conn = dialed
-			c.setConn(conn)
 			c.setRunning(true)
 		}
 
@@ -459,16 +471,61 @@ func (c *IPCClient) sendCommand(ctx context.Context, args ...any) (ipcResponse, 
 	}
 }
 
+// SetQuality updates the preferred max vertical resolution (0 = best available)
+// for future launches, clears stale stream prefetch cache, and updates a live mpv.
+func (c *IPCClient) SetQuality(ctx context.Context, quality int) {
+	c.launchMu.Lock()
+	c.launchDefaults.Quality = quality
+	if c.resolver != nil {
+		c.resolver.SetQuality(quality)
+	}
+	c.launchMu.Unlock()
+	if c.isConnected() {
+		fmtStr := "bestvideo+bestaudio/best"
+		if quality > 0 {
+			fmtStr = fmt.Sprintf("bestvideo[height<=%d]+bestaudio/best[height<=%d]/best", quality, quality)
+		}
+		_, _ = c.sendCommand(ctx, "set_property", "ytdl-format", fmtStr)
+	}
+}
+
+// Prefetch asynchronously resolves direct stream URLs for v in the background.
+func (c *IPCClient) Prefetch(v model.Video) {
+	if c.resolver != nil {
+		c.resolver.Prefetch(c.ctx, v)
+	}
+}
+
 // Play starts playback of v using the active socket or launches mpv directly.
 func (c *IPCClient) Play(ctx context.Context, v model.Video, mode string) error {
 	url := fmt.Sprintf("https://www.youtube.com/watch?v=%s", v.ID)
+	audioFile := ""
+	if c.resolver != nil {
+		if st, ok := c.resolver.GetCached(v.ID); ok {
+			if mode == "audio" && st.AudioURL != "" {
+				url = st.AudioURL
+			} else {
+				url = st.VideoURL
+				if mode != "audio" {
+					audioFile = st.AudioURL
+				}
+			}
+		}
+	}
+
 	if c.isConnected() {
 		wantVid := "auto"
 		if mode == "audio" {
 			wantVid = "no"
 		}
 		_, _ = c.sendCommand(ctx, "set_property", "vid", wantVid)
-		if _, err := c.sendCommand(ctx, "loadfile", url, "replace"); err == nil {
+		var err error
+		if audioFile != "" {
+			_, err = c.sendCommand(ctx, "loadfile", url, "replace", 0, "audio-file="+audioFile)
+		} else {
+			_, err = c.sendCommand(ctx, "loadfile", url, "replace")
+		}
+		if err == nil {
 			if v.Title != "" {
 				_, _ = c.sendCommand(ctx, "set_property", "force-media-title", v.Title)
 			}
@@ -476,12 +533,15 @@ func (c *IPCClient) Play(ctx context.Context, v model.Video, mode string) error 
 			return nil
 		}
 	}
-	if c.launchDefaults.SocketPath != "" {
-		_ = os.MkdirAll(filepath.Dir(c.launchDefaults.SocketPath), 0o700)
-		opts := c.launchDefaults
+	c.launchMu.RLock()
+	opts := c.launchDefaults
+	c.launchMu.RUnlock()
+	if opts.SocketPath != "" {
+		_ = os.MkdirAll(filepath.Dir(opts.SocketPath), 0o700)
 		opts.VideoID = v.ID
 		opts.Title = v.Title
 		opts.URL = url
+		opts.AudioFile = audioFile
 		if mode != "" && mode != "auto" {
 			opts.Mode = mode
 		}

@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -439,4 +441,179 @@ func TestFakeEngine(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatalf("expected status update on Subscribe channel")
 	}
+}
+
+func writeStubBin(t *testing.T, dir, name, body string) string {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir stub bin dir: %v", err)
+	}
+	binPath := filepath.Join(dir, name)
+	content := "#!/bin/sh\n" + body + "\n"
+	if err := os.WriteFile(binPath, []byte(content), 0o755); err != nil {
+		t.Fatalf("write stub %s: %v", name, err)
+	}
+	return binPath
+}
+
+func TestIPCClient_ConcurrentSetQualityPrefetchPlay(t *testing.T) {
+	t.Run("disconnected fallback synchronizes launchDefaults across SetQuality, Prefetch, and Play", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		binDir := filepath.Join(tmpDir, "bin")
+		finalArgsFile := filepath.Join(tmpDir, "final-mpv-args.txt")
+
+		writeStubBin(t, binDir, "yt-dlp", "printf 'https://cdn.example.com/video.mp4\\nhttps://cdn.example.com/audio.m4a\\n'")
+		writeStubBin(t, binDir, "mpv", fmt.Sprintf(`for arg in "$@"; do
+  if [ "$arg" = "--force-media-title=final-verify-title" ]; then
+    printf '%%s\n' "$@" > %q
+    break
+  fi
+done
+exit 0`, finalArgsFile))
+
+		t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+		sockPath := filepath.Join(tmpDir, "run", "mpv.sock")
+		client := NewIPCClient(
+			WithSocketPath(sockPath),
+			WithBackoff(50*time.Millisecond, 100*time.Millisecond),
+			WithLaunchDefaults(LaunchOpts{
+				SocketPath:   sockPath,
+				Mode:         "window",
+				Quality:      1080,
+				FastPlayback: true,
+			}),
+		)
+		defer client.Close()
+
+		const workers = 8
+		const iterations = 15
+		qualities := []int{0, 1080, 720, 480}
+		videos := []model.Video{
+			{ID: "vid-a", Title: "Video A"},
+			{ID: "vid-b", Title: "Video B"},
+			{ID: "vid-c", Title: "Video C"},
+			{ID: "vid-d", Title: "Video D"},
+		}
+
+		start := make(chan struct{})
+		errCh := make(chan error, workers*iterations)
+		var wg sync.WaitGroup
+
+		for w := 0; w < workers; w++ {
+			wg.Add(1)
+			go func(workerID int) {
+				defer wg.Done()
+				<-start
+				for i := 0; i < iterations; i++ {
+					v := videos[(workerID+i)%len(videos)]
+					switch (workerID + i) % 3 {
+					case 0:
+						client.SetQuality(context.Background(), qualities[(workerID+i)%len(qualities)])
+					case 1:
+						client.Prefetch(v)
+					case 2:
+						if err := client.Play(context.Background(), v, "window"); err != nil {
+							errCh <- err
+						}
+					}
+				}
+			}(w)
+		}
+
+		close(start)
+		wg.Wait()
+		close(errCh)
+
+		for err := range errCh {
+			t.Fatalf("concurrent Play failed: %v", err)
+		}
+
+		client.SetQuality(context.Background(), 480)
+		if err := client.Play(context.Background(), model.Video{ID: "final-id", Title: "final-verify-title"}, "window"); err != nil {
+			t.Fatalf("final Play failed: %v", err)
+		}
+
+		deadline := time.Now().Add(2 * time.Second)
+		var rawArgs []byte
+		var readErr error
+		for time.Now().Before(deadline) {
+			rawArgs, readErr = os.ReadFile(finalArgsFile)
+			if readErr == nil && len(rawArgs) > 0 {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		if readErr != nil || len(rawArgs) == 0 {
+			t.Fatalf("timed out waiting for final fake mpv args: %v", readErr)
+		}
+
+		args := strings.Split(strings.TrimSuffix(string(rawArgs), "\n"), "\n")
+		wantFmt := "--ytdl-format=bestvideo[height<=480]+bestaudio/best[height<=480]/best"
+		if !slices.Contains(args, wantFmt) {
+			t.Fatalf("final mpv args %v missing %q", args, wantFmt)
+		}
+	})
+
+	t.Run("connected IPC handles concurrent SetQuality, Prefetch, and Play", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		binDir := filepath.Join(tmpDir, "bin")
+		writeStubBin(t, binDir, "yt-dlp", "printf 'https://cdn.example.com/video.mp4\\nhttps://cdn.example.com/audio.m4a\\n'")
+		t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+		srv := startTestMPVServer(t, nil)
+		client := NewIPCClient(
+			WithSocketPath(srv.sockPath),
+			WithCommandTimeout(2*time.Second),
+			WithLaunchDefaults(LaunchOpts{
+				SocketPath:   srv.sockPath,
+				Mode:         "window",
+				Quality:      1080,
+				FastPlayback: true,
+			}),
+		)
+		defer client.Close()
+
+		const workers = 6
+		const iterations = 10
+		qualities := []int{0, 1080, 720, 480}
+		videos := []model.Video{
+			{ID: "conn-a", Title: "Conn A"},
+			{ID: "conn-b", Title: "Conn B"},
+			{ID: "conn-c", Title: "Conn C"},
+		}
+
+		start := make(chan struct{})
+		errCh := make(chan error, workers*iterations)
+		var wg sync.WaitGroup
+
+		for w := 0; w < workers; w++ {
+			wg.Add(1)
+			go func(workerID int) {
+				defer wg.Done()
+				<-start
+				for i := 0; i < iterations; i++ {
+					v := videos[(workerID+i)%len(videos)]
+					switch (workerID + i) % 3 {
+					case 0:
+						client.SetQuality(context.Background(), qualities[(workerID+i)%len(qualities)])
+					case 1:
+						client.Prefetch(v)
+					case 2:
+						if err := client.Play(context.Background(), v, "window"); err != nil {
+							errCh <- err
+						}
+					}
+				}
+			}(w)
+		}
+
+		close(start)
+		wg.Wait()
+		close(errCh)
+
+		for err := range errCh {
+			t.Fatalf("concurrent connected Play failed: %v", err)
+		}
+	})
 }

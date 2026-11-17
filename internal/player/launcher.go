@@ -11,6 +11,7 @@ type LaunchOpts struct {
 	VideoID       string
 	Title         string
 	URL           string
+	AudioFile     string
 	Mode          string
 	SocketPath    string
 	Quality       int
@@ -42,15 +43,20 @@ func BuildMPVArgs(opts LaunchOpts) []string {
 		args = append(args, "--force-media-title="+opts.Title)
 	}
 
+	winFlag := "--force-window=yes"
+	if opts.FastPlayback {
+		winFlag = "--force-window=immediate"
+	}
+
 	switch opts.Mode {
 	case "audio":
 		args = append(args, "--no-video", "--force-window=no")
 	case "pip":
-		args = append(args, "--force-window=yes", "--ontop", "--autofit=35%")
+		args = append(args, winFlag, "--ontop", "--autofit=35%")
 	case "fs":
-		args = append(args, "--force-window=yes", "--fs")
+		args = append(args, winFlag, "--fs")
 	default: // "window", "auto", or unspecified
-		args = append(args, "--force-window=yes")
+		args = append(args, winFlag)
 	}
 
 	if opts.Quality <= 0 {
@@ -62,7 +68,11 @@ func BuildMPVArgs(opts LaunchOpts) []string {
 	if opts.CookieJarPath != "" {
 		args = append(args, "--ytdl-raw-options=cookies="+opts.CookieJarPath)
 	} else if opts.FastPlayback {
-		args = append(args, "--ytdl-raw-options=no-playlist=,extractor-args=youtube:player_client=android")
+		args = append(args, "--ytdl-raw-options=no-playlist=")
+	}
+
+	if opts.AudioFile != "" {
+		args = append(args, "--audio-file="+opts.AudioFile)
 	}
 
 	if opts.URL != "" {
