@@ -31,8 +31,11 @@ func TestDefault(t *testing.T) {
 	if cfg.Home != "auto" || cfg.Lang != "auto" || cfg.Preview != "auto" || cfg.ThumbQuality != "max" {
 		t.Fatalf("unexpected display defaults: %+v", cfg)
 	}
-	if !cfg.HideShorts || !cfg.Interleave || !cfg.Notify || cfg.DownloadAudio {
+	if !cfg.HideShorts || !cfg.Interleave || !cfg.Notify || !cfg.SponsorBlock || cfg.DownloadAudio {
 		t.Fatalf("unexpected bool defaults: %+v", cfg)
+	}
+	if cfg.Theme != "youtube-dark" {
+		t.Fatalf("Theme = %q, want %q", cfg.Theme, "youtube-dark")
 	}
 	if cfg.Cookies != "auto" || cfg.YtdlpBin != "yt-dlp" {
 		t.Fatalf("unexpected tool defaults: %+v", cfg)
@@ -343,6 +346,77 @@ func TestSaveVal(t *testing.T) {
 			}
 			if len(entries) != 1 || entries[0].Name() != "config" {
 				t.Errorf("unexpected leftover files in %s: %v", dir, entries)
+			}
+		})
+	}
+}
+
+func TestLoadThemeAndSponsorBlock(t *testing.T) {
+	tests := []struct {
+		name             string
+		content          string
+		env              map[string]string
+		wantTheme        string
+		wantSponsorBlock bool
+	}{
+		{
+			name:             "valid normalized theme and disabled sponsorblock",
+			content:          "YT_THEME=\"  Catppuccin  \"\nYT_SPONSORBLOCK=0\n",
+			wantTheme:        "catppuccin",
+			wantSponsorBlock: false,
+		},
+		{
+			name:             "mixed case tokyonight and enabled sponsorblock",
+			content:          "YT_THEME=TokyoNight\nYT_SPONSORBLOCK=1\n",
+			wantTheme:        "tokyonight",
+			wantSponsorBlock: true,
+		},
+		{
+			name:             "gruvbox and kanagawa supported",
+			content:          "YT_THEME=GRUVBOX\n",
+			wantTheme:        "gruvbox",
+			wantSponsorBlock: true,
+		},
+		{
+			name:             "kanagawa valid",
+			content:          "YT_THEME=kanagawa\n",
+			wantTheme:        "kanagawa",
+			wantSponsorBlock: true,
+		},
+		{
+			name:             "invalid theme and invalid bool fall back to defaults",
+			content:          "YT_THEME=solarized\nYT_SPONSORBLOCK=true\n",
+			wantTheme:        "youtube-dark",
+			wantSponsorBlock: true,
+		},
+		{
+			name:             "env overrides config file",
+			content:          "YT_THEME=gruvbox\nYT_SPONSORBLOCK=1\n",
+			env:              map[string]string{"YT_THEME": "  KANAGAWA ", "YT_SPONSORBLOCK": "0"},
+			wantTheme:        "kanagawa",
+			wantSponsorBlock: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			clearYTEnv(t)
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+			path := filepath.Join(t.TempDir(), "config")
+			if err := os.WriteFile(path, []byte(tc.content), 0o600); err != nil {
+				t.Fatalf("WriteFile() error = %v", err)
+			}
+			cfg, err := Load(path)
+			if err != nil {
+				t.Fatalf("Load() error = %v", err)
+			}
+			if cfg.Theme != tc.wantTheme {
+				t.Errorf("Theme = %q, want %q", cfg.Theme, tc.wantTheme)
+			}
+			if cfg.SponsorBlock != tc.wantSponsorBlock {
+				t.Errorf("SponsorBlock = %v, want %v", cfg.SponsorBlock, tc.wantSponsorBlock)
 			}
 		})
 	}

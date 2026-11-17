@@ -38,6 +38,8 @@ type Config struct {
 	HideShorts    bool
 	Interleave    bool
 	Notify        bool
+	SponsorBlock  bool
+	Theme         string
 	Cookies       string
 	CookiesFile   string
 	Browser       string
@@ -68,6 +70,8 @@ func Default() Config {
 		HideShorts:    true,
 		Interleave:    true,
 		Notify:        true,
+		SponsorBlock:  true,
+		Theme:         "youtube-dark",
 		Cookies:       "auto",
 		CookiesFile:   "",
 		Browser:       "",
@@ -203,6 +207,8 @@ var knownKeys = []string{
 	"YT_HIDE_SHORTS",
 	"YT_INTERLEAVE",
 	"YT_NOTIFY",
+	"YT_SPONSORBLOCK",
+	"YT_THEME",
 	"YT_COOKIES",
 	"YT_COOKIES_FILE",
 	"YT_BROWSER",
@@ -310,10 +316,12 @@ func buildConfig(raw map[string]string) Config {
 	cfg.Preview = asEnum(raw["YT_PREVIEW"], cfg.Preview, "auto", "kitty", "chafa", "none")
 	cfg.ThumbQuality = asEnum(raw["YT_THUMB_QUALITY"], cfg.ThumbQuality, "max", "hq", "mq")
 	cfg.Cookies = asEnum(raw["YT_COOKIES"], cfg.Cookies, "auto", "off")
+	cfg.Theme = asEnum(strings.ToLower(strings.TrimSpace(raw["YT_THEME"])), cfg.Theme, "youtube-dark", "catppuccin", "tokyonight", "gruvbox", "kanagawa")
 
 	cfg.HideShorts = asBool(raw["YT_HIDE_SHORTS"], cfg.HideShorts)
 	cfg.Interleave = asBool(raw["YT_INTERLEAVE"], cfg.Interleave)
 	cfg.Notify = asBool(raw["YT_NOTIFY"], cfg.Notify)
+	cfg.SponsorBlock = asBool(raw["YT_SPONSORBLOCK"], cfg.SponsorBlock)
 	cfg.DownloadAudio = asBool(raw["YT_DOWNLOAD_AUDIO"], cfg.DownloadAudio)
 
 	if v := raw["YT_HOME"]; v != "" {
