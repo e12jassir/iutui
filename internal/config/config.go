@@ -57,7 +57,7 @@ func Default() Config {
 		CacheTTL:      900,
 		CookieTTL:     21600,
 		AudioVolume:   75,
-		Quality:       1080,
+		Quality:       720, // Crisp HD with ~3x-12x lower data usage than 1080p60/4K60.
 		MusicMode:     "bg",
 		DownloadAudio: false,
 		Prefetch:      24,

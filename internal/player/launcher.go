@@ -28,12 +28,15 @@ type LaunchOpts struct {
 func BuildMPVArgs(opts LaunchOpts) []string {
 	var args []string
 	if opts.FastPlayback {
+		// Cap forward/backward demuxer buffers so mpv does not pre-fetch 150+ MiB ahead per track.
 		args = append(args,
 			"--hwdec=auto-safe",
 			"--really-quiet",
 			"--cache=yes",
 			"--cache-pause=no",
 			"--demuxer-readahead-secs=3",
+			"--demuxer-max-bytes=24MiB",
+			"--demuxer-max-back-bytes=8MiB",
 		)
 	}
 

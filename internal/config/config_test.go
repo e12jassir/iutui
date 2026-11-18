@@ -22,7 +22,7 @@ func TestDefault(t *testing.T) {
 	if cfg.FeedSize != 100 || cfg.SearchSize != 40 || cfg.CacheTTL != 900 || cfg.CookieTTL != 21600 {
 		t.Fatalf("unexpected numeric defaults: %+v", cfg)
 	}
-	if cfg.AudioVolume != 75 || cfg.Quality != 1080 || cfg.Prefetch != 24 {
+	if cfg.AudioVolume != 75 || cfg.Quality != 720 || cfg.Prefetch != 24 {
 		t.Fatalf("unexpected media numeric defaults: %+v", cfg)
 	}
 	if cfg.MusicMode != "bg" || cfg.DefaultMode != "window" || cfg.Playback != "auto" {

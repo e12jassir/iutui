@@ -172,6 +172,8 @@ func TestBuildMPVArgs_OptionsAndFlagInjection(t *testing.T) {
 				"--cache=yes",
 				"--cache-pause=no",
 				"--demuxer-readahead-secs=3",
+				"--demuxer-max-bytes=24MiB",
+				"--demuxer-max-back-bytes=8MiB",
 				"--input-ipc-server=/tmp/yt-1000/mpv.sock",
 				"--idle=yes",
 				"--keep-open=no",
@@ -196,6 +198,8 @@ func TestBuildMPVArgs_OptionsAndFlagInjection(t *testing.T) {
 				"--cache=yes",
 				"--cache-pause=no",
 				"--demuxer-readahead-secs=3",
+				"--demuxer-max-bytes=24MiB",
+				"--demuxer-max-back-bytes=8MiB",
 				"--force-window=immediate",
 				"--ytdl-format=bestvideo+bestaudio/best",
 				"--ytdl-raw-options=no-playlist=,extractor-args=youtube:player_client=android",
@@ -218,6 +222,8 @@ func TestBuildMPVArgs_OptionsAndFlagInjection(t *testing.T) {
 				"--cache=yes",
 				"--cache-pause=no",
 				"--demuxer-readahead-secs=3",
+				"--demuxer-max-bytes=24MiB",
+				"--demuxer-max-back-bytes=8MiB",
 				"--force-window=immediate",
 				"--ytdl-format=bestvideo+bestaudio/best",
 				"--ytdl-raw-options=cookies=/tmp/cookies.txt,yes-playlist=",
@@ -239,6 +245,8 @@ func TestBuildMPVArgs_OptionsAndFlagInjection(t *testing.T) {
 				"--cache=yes",
 				"--cache-pause=no",
 				"--demuxer-readahead-secs=3",
+				"--demuxer-max-bytes=24MiB",
+				"--demuxer-max-back-bytes=8MiB",
 				"--force-window=immediate",
 				"--ytdl-format=bestvideo+bestaudio/best",
 				"--ytdl-raw-options=yes-playlist=,extractor-args=youtube:player_client=android,web",
@@ -310,6 +318,47 @@ func TestBuildMPVArgs_OptionsAndFlagInjection(t *testing.T) {
 			got := BuildMPVArgs(tc.opts)
 			if !reflect.DeepEqual(got, tc.want) {
 				t.Errorf("BuildMPVArgs() =\n  %v\nwant:\n  %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestBuildMPVArgs_FastPlaybackDemuxerLimits(t *testing.T) {
+	demuxerFlags := []string{
+		"--demuxer-max-bytes=24MiB",
+		"--demuxer-max-back-bytes=8MiB",
+	}
+
+	tests := []struct {
+		name         string
+		fastPlayback bool
+		wantPresent  bool
+	}{
+		{
+			name:         "emits demuxer limits when FastPlayback is true",
+			fastPlayback: true,
+			wantPresent:  true,
+		},
+		{
+			name:         "omits demuxer limits when FastPlayback is false",
+			fastPlayback: false,
+			wantPresent:  false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := BuildMPVArgs(LaunchOpts{
+				Mode:         "window",
+				URL:          "https://www.youtube.com/watch?v=abc123",
+				FastPlayback: tc.fastPlayback,
+			})
+			for _, flag := range demuxerFlags {
+				hasFlag := slices.Contains(got, flag)
+				if hasFlag != tc.wantPresent {
+					t.Errorf("BuildMPVArgs(FastPlayback=%v) contains %q = %v, want %v (args=%v)",
+						tc.fastPlayback, flag, hasFlag, tc.wantPresent, got)
+				}
 			}
 		})
 	}
