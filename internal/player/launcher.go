@@ -22,6 +22,8 @@ type LaunchOpts struct {
 	FastPlayback  bool
 	YtdlpBin      string
 	AllowPlaylist bool
+	StartPos      float64
+	StartPaused   bool
 }
 
 // BuildMPVArgs constructs the command-line argument slice for mpv from opts.
@@ -60,7 +62,7 @@ func BuildMPVArgs(opts LaunchOpts) []string {
 	}
 
 	if opts.AudioOnly || opts.Mode == "audio" {
-		args = append(args, "--no-video", "--force-window=no")
+		args = append(args, "--no-video", "--force-window=no", "--ytdl-format=bestaudio/best")
 	} else {
 		switch opts.Mode {
 		case "pip":
@@ -70,12 +72,18 @@ func BuildMPVArgs(opts LaunchOpts) []string {
 		default: // "window", "auto", or unspecified
 			args = append(args, winFlag)
 		}
+		if opts.Quality <= 0 {
+			args = append(args, "--ytdl-format=bestvideo+bestaudio/best")
+		} else {
+			args = append(args, fmt.Sprintf("--ytdl-format=bestvideo[height<=%d]+bestaudio/best[height<=%d]/best", opts.Quality, opts.Quality))
+		}
 	}
 
-	if opts.Quality <= 0 {
-		args = append(args, "--ytdl-format=bestvideo+bestaudio/best")
-	} else {
-		args = append(args, fmt.Sprintf("--ytdl-format=bestvideo[height<=%d]+bestaudio/best[height<=%d]/best", opts.Quality, opts.Quality))
+	if opts.StartPos > 0.5 {
+		args = append(args, fmt.Sprintf("--start=%.1f", opts.StartPos))
+	}
+	if opts.StartPaused {
+		args = append(args, "--pause=yes")
 	}
 
 	playlistOpt := "no-playlist="

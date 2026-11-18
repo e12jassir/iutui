@@ -119,10 +119,34 @@ func (c *Client) Fetch(ctx context.Context, videoID, title, channel string) (Tra
 		httpClient = defaultHTTPClient
 	}
 
+	lyrics, found, statusNotFound, err := c.searchOnce(ctx, baseURL, ua, httpClient, query)
+	if err != nil {
+		return TrackLyrics{}, err
+	}
+	if !found {
+		if fb := FallbackQuery(title, channel); fb != "" && !strings.EqualFold(fb, query) {
+			var fbErr error
+			lyrics, found, statusNotFound, fbErr = c.searchOnce(ctx, baseURL, ua, httpClient, fb)
+			if fbErr != nil {
+				return TrackLyrics{}, fbErr
+			}
+		}
+	}
+	if !found {
+		_ = statusNotFound
+		c.setCached(cacheKey, cacheEntry{err: ErrNotFound})
+		return TrackLyrics{}, ErrNotFound
+	}
+
+	c.setCached(cacheKey, cacheEntry{lyrics: cloneTrackLyrics(lyrics)})
+	return cloneTrackLyrics(lyrics), nil
+}
+
+func (c *Client) searchOnce(ctx context.Context, baseURL, ua string, httpClient *http.Client, query string) (TrackLyrics, bool, bool, error) {
 	searchURL := baseURL + "/api/search?q=" + url.QueryEscape(query)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, searchURL, nil)
 	if err != nil {
-		return TrackLyrics{}, fmt.Errorf("lyrics: build request: %w", err)
+		return TrackLyrics{}, false, false, fmt.Errorf("lyrics: build request: %w", err)
 	}
 	req.Header.Set("User-Agent", ua)
 	req.Header.Set("Accept", "application/json")
@@ -130,41 +154,34 @@ func (c *Client) Fetch(ctx context.Context, videoID, title, channel string) (Tra
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			return TrackLyrics{}, ctxErr
+			return TrackLyrics{}, false, false, ctxErr
 		}
-		return TrackLyrics{}, fmt.Errorf("lyrics: request failed: %w", err)
+		return TrackLyrics{}, false, false, fmt.Errorf("lyrics: request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusNotFound {
-		c.setCached(cacheKey, cacheEntry{err: ErrNotFound})
-		return TrackLyrics{}, ErrNotFound
+		return TrackLyrics{}, false, true, nil
 	}
 	if resp.StatusCode != http.StatusOK {
-		return TrackLyrics{}, fmt.Errorf("lyrics: unexpected status %d", resp.StatusCode)
+		return TrackLyrics{}, false, false, fmt.Errorf("lyrics: unexpected status %d", resp.StatusCode)
 	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			return TrackLyrics{}, ctxErr
+			return TrackLyrics{}, false, false, ctxErr
 		}
-		return TrackLyrics{}, fmt.Errorf("lyrics: read response: %w", err)
+		return TrackLyrics{}, false, false, fmt.Errorf("lyrics: read response: %w", err)
 	}
 
 	var items []lrclibSearchItem
 	if err := json.Unmarshal(body, &items); err != nil {
-		return TrackLyrics{}, fmt.Errorf("lyrics: decode response: %w", err)
+		return TrackLyrics{}, false, false, fmt.Errorf("lyrics: decode response: %w", err)
 	}
 
 	lyrics, found := selectBestLyrics(items)
-	if !found {
-		c.setCached(cacheKey, cacheEntry{err: ErrNotFound})
-		return TrackLyrics{}, ErrNotFound
-	}
-
-	c.setCached(cacheKey, cacheEntry{lyrics: cloneTrackLyrics(lyrics)})
-	return cloneTrackLyrics(lyrics), nil
+	return lyrics, found, false, nil
 }
 
 func (c *Client) getCached(key string) (cacheEntry, bool) {
@@ -270,10 +287,34 @@ var (
 	parenNoiseRe      = regexp.MustCompile(`\([^)]*\)`)
 	bracketNoiseRe    = regexp.MustCompile(`\[[^\]]*\]`)
 	cjkBracketNoiseRe = regexp.MustCompile(`【[^】]*】`)
-	noiseKeywordRe    = regexp.MustCompile(`(?i)\b(?:official|oficial|lyrics?|letra|audio|video|videoclip|visualizer|en\s+vivo|hd|hq|4k|8k|1080p|720p|uhd|mv|m/v|remaster(?:ed)?|explicit|clean|topic|subtitul\w*|sub\.?\s*espa[ñn]ol|featuring)\b|(?i)^(?:live(?:\s+(?:at|in|from|session|version|performance))?)$|(?i)\b(?:ft|feat)(?:\.|\b)`)
+	noiseKeywordRe    = regexp.MustCompile(`(?i)\b(?:official|oficial|lyrics?|letra|audio|video|videoclip|visualizer|en\s+vivo|concierto|vivo|directo|ac[uú]stico|unplugged|session|sesi[oó]n|versi[oó]n|version|edit(?:ed)?|restored|completo|karaoke|hd|hq|4k|8k|1080p|720p|uhd|mv|m/v|remaster(?:ed)?|explicit|clean|topic|subtitul\w*|sub\.?\s*espa[ñn]ol|featuring)\b|(?i)^(?:live(?:\s+(?:at|in|from|session|version|performance))?)$|(?i)\b(?:ft|feat)(?:\.|\b)`)
 	trailingPipeRe    = regexp.MustCompile(`(?i)(?:\s+[\|\-–—]\s*)(?:official(?:\s+(?:music\s+)?(?:video|audio|lyric\s+video|visualizer))?|video\s+oficial|audio\s+oficial|lyrics?|hd|4k|en\s+vivo)\s*$`)
+	trailingPipeAnyRe = regexp.MustCompile(`\s*\|.*$`)
 	channelSuffixRe   = regexp.MustCompile(`(?i)(?:\s+-\s*topic|\s+(?:oficial|official))$`)
 )
+
+// FallbackQuery strips all parenthetical/bracketed tags and trailing pipe metadata
+// for a secondary LRCLib search when the primary cleaned query yields no matches.
+func FallbackQuery(rawTitle, channel string) string {
+	s := strings.TrimSpace(rawTitle)
+	if s != "" {
+		s = parenNoiseRe.ReplaceAllString(s, " ")
+		s = bracketNoiseRe.ReplaceAllString(s, " ")
+		s = cjkBracketNoiseRe.ReplaceAllString(s, " ")
+		s = trailingPipeAnyRe.ReplaceAllString(s, "")
+		s = stripStandaloneFeatTokens(s)
+		s = trimDanglingSeparators(s)
+		s = collapseSpaces(s)
+	}
+	ch := cleanChannelName(channel)
+	if s == "" {
+		return ch
+	}
+	if ch == "" || strings.Contains(strings.ToLower(s), strings.ToLower(ch)) || hasArtistSeparator(s) {
+		return s
+	}
+	return ch + " " + s
+}
 
 // CleanQuery strips common YouTube title noise (such as "(Official Video)",
 // "[Official Audio]", "(Lyrics)", "[HD]", "[4K]", "(En Vivo)", "(Audio Oficial)",

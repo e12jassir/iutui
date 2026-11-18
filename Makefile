@@ -1,7 +1,8 @@
 PREFIX ?= $(HOME)/.local
 BINDIR ?= $(PREFIX)/bin
 LIBDIR ?= $(PREFIX)/lib/yt
-FILES  := yt yt-fmt yt-thumb-preview iutui
+LIBEXEC_FILES := yt yt-fmt yt-thumb-preview
+LEGACY_BINS := yt yt-fmt yt-thumb-preview yt-tui ytx
 
 .PHONY: install uninstall test test-bash test-go build clean lint verify
 
@@ -13,12 +14,15 @@ clean:
 
 install: build
 	@mkdir -p $(BINDIR) $(LIBDIR)
-	@for f in $(FILES); do install -m 755 bin/$$f $(BINDIR)/$$f; done
+	@for f in $(LEGACY_BINS); do rm -f $(BINDIR)/$$f; done
+	@install -m 755 bin/iutui $(BINDIR)/iutui
+	@ln -sf iutui $(BINDIR)/uitui
+	@for f in $(LIBEXEC_FILES); do install -m 755 bin/$$f $(LIBDIR)/$$f; done
 	@install -m 644 lib/*.sh $(LIBDIR)/
-	@echo "iutui installed in $(BINDIR) (libs in $(LIBDIR))"
+	@echo "iutui (and uitui alias) installed in $(BINDIR) (libs in $(LIBDIR))"
 
 uninstall:
-	@for f in $(FILES); do rm -f $(BINDIR)/$$f; done
+	@for f in $(LEGACY_BINS) iutui uitui; do rm -f $(BINDIR)/$$f; done
 	@rm -rf $(LIBDIR)
 	@echo "iutui removed from $(BINDIR)"
 

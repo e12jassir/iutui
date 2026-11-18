@@ -29,6 +29,7 @@ type FakeEngine struct {
 	done         chan struct{}
 	sponsorBlock bool
 	audioOnly    bool
+	quality      int
 	chapters     []Chapter
 }
 
@@ -203,6 +204,33 @@ func (f *FakeEngine) ToggleVideoMode(_ context.Context) (bool, error) {
 	}
 	f.audioOnly = !f.audioOnly
 	return !f.audioOnly, nil
+}
+
+// SetPlaybackProfile updates FakeEngine quality and audio-only state and records the call.
+func (f *FakeEngine) SetPlaybackProfile(_ context.Context, quality int, audioOnly bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, FakeCall{Method: "SetPlaybackProfile", Seconds: quality, Enabled: audioOnly})
+	if f.err != nil {
+		return f.err
+	}
+	f.quality = quality
+	f.audioOnly = audioOnly
+	return nil
+}
+
+// AudioOnly reports the current FakeEngine audio-only flag.
+func (f *FakeEngine) AudioOnly() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.audioOnly
+}
+
+// Quality reports the current FakeEngine max resolution.
+func (f *FakeEngine) Quality() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.quality
 }
 
 // Chapters records the call and returns configured fake chapters.

@@ -41,14 +41,22 @@ func PlayVideo(v model.Video, mode string) error {
 }
 
 func resolveYtBin() string {
+	var candidates []string
 	if exe, err := os.Executable(); err == nil {
-		sibling := filepath.Join(filepath.Dir(exe), "yt")
-		if info, err := os.Stat(sibling); err == nil && !info.IsDir() {
-			return sibling
-		}
+		dir := filepath.Dir(exe)
+		candidates = append(candidates,
+			filepath.Join(dir, "yt"),
+			filepath.Join(dir, "..", "lib", "yt", "yt"),
+		)
 	}
-	if info, err := os.Stat("./bin/yt"); err == nil && !info.IsDir() {
-		return "./bin/yt"
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		candidates = append(candidates, filepath.Join(home, ".local", "lib", "yt", "yt"))
+	}
+	candidates = append(candidates, "./bin/yt")
+	for _, p := range candidates {
+		if info, err := os.Stat(p); err == nil && !info.IsDir() {
+			return p
+		}
 	}
 	if p, err := exec.LookPath("yt"); err == nil {
 		return p

@@ -66,9 +66,11 @@ type Dependencies struct {
 	Downloader           Downloader
 	LyricsClient         *lyrics.Client
 	InitialQuality       int
+	InitialAudioOnly     bool
 	InitialTheme         string
 	InitialSponsorBlock  *bool
 	OnQualityChange      func(int) error
+	OnAudioOnlyChange    func(bool) error
 	OnThemeChange        func(string) error
 	OnSponsorBlockChange func(bool) error
 }
@@ -112,6 +114,8 @@ type State struct {
 
 	ShowHelp          bool
 	ShowSettings      bool
+	ShowQualityModal  bool
+	QualityIdx        int
 	ShowStillWatching bool
 	ShowChapters      bool
 	Chapters          []player.Chapter
@@ -124,6 +128,7 @@ type State struct {
 
 	Autoplay     bool
 	SponsorBlock bool
+	AudioOnly    bool
 	ThemeName    string
 	Quality      int
 	Width        int
@@ -169,6 +174,7 @@ func NewState(deps Dependencies) *State {
 		Focus:             FocusMain,
 		Autoplay:          true,
 		SponsorBlock:      sponsorBlock,
+		AudioOnly:         deps.InitialAudioOnly,
 		ThemeName:         themeName,
 		Quality:           deps.InitialQuality,
 		Feeds:             make(map[model.Tab][]model.Video),
@@ -319,6 +325,33 @@ func (s *State) SetSelection(idx int) {
 			p.Prefetch(items[idx+2])
 		}
 	}
+}
+
+// HoverSelection updates the active cursor from mouse hover without triggering
+// stream prefetch storms across items as the cursor glides over the grid/list.
+func (s *State) HoverSelection(idx int) bool {
+	items := s.VisibleItems()
+	if len(items) == 0 {
+		return false
+	}
+	if idx < 0 {
+		idx = 0
+	}
+	if idx >= len(items) {
+		idx = len(items) - 1
+	}
+	if idx == s.ActiveListIndex() {
+		return false
+	}
+	switch s.View {
+	case ViewSearch:
+		s.ResultIdx = idx
+	case ViewChannel:
+		s.ChannelIdx = idx
+	default:
+		s.SelectedIdx = idx
+	}
+	return true
 }
 
 func (s *State) setToast(msg string) int {

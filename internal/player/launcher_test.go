@@ -76,13 +76,27 @@ func TestBuildMPVArgs_Modes(t *testing.T) {
 			AudioOnly: true,
 			URL:       baseURL,
 		})
-		for _, want := range []string{"--no-video", "--force-window=no"} {
+		for _, want := range []string{"--no-video", "--force-window=no", "--ytdl-format=bestaudio/best"} {
 			if !slices.Contains(got, want) {
 				t.Errorf("BuildMPVArgs(AudioOnly=true) = %v, missing %q", got, want)
 			}
 		}
 		if slices.Contains(got, "--force-window=yes") {
 			t.Errorf("BuildMPVArgs(AudioOnly=true) = %v, should not contain --force-window=yes", got)
+		}
+	})
+
+	t.Run("startPos and startPaused emit resume flags", func(t *testing.T) {
+		got := BuildMPVArgs(LaunchOpts{
+			Mode:        "window",
+			URL:         baseURL,
+			StartPos:    42.5,
+			StartPaused: true,
+		})
+		for _, want := range []string{"--start=42.5", "--pause=yes"} {
+			if !slices.Contains(got, want) {
+				t.Errorf("BuildMPVArgs(StartPos/StartPaused) = %v, missing %q", got, want)
+			}
 		}
 	})
 }

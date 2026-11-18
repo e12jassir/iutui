@@ -88,6 +88,9 @@ func WithLaunchDefaults(opts LaunchOpts) IPCOption {
 		if opts.FastPlayback {
 			c.resolver = NewStreamResolver(opts.YtdlpBin, opts.Quality)
 			c.resolver.SetCookieJar(opts.CookieJarPath)
+			if opts.AudioOnly {
+				c.resolver.SetAudioOnly(true)
+			}
 		}
 	}
 }
@@ -130,6 +133,8 @@ type IPCClient struct {
 	cmdTimeout     time.Duration
 	launchMu       sync.RWMutex
 	launchDefaults LaunchOpts
+	lastVideo      model.Video
+	lastMode       string
 	resolver       *StreamResolver
 
 	ctx    context.Context
@@ -142,8 +147,9 @@ type IPCClient struct {
 	writeMu sync.Mutex
 	conn    net.Conn
 
-	procMu  sync.Mutex
-	mpvProc *os.Process
+	procMu        sync.Mutex
+	mpvProc       *os.Process
+	procAudioOnly bool
 
 	playMu     sync.Mutex
 	playSeq    atomic.Uint64
@@ -544,22 +550,76 @@ func (c *IPCClient) sendCommand(ctx context.Context, args ...any) (ipcResponse, 
 	}
 }
 
+func formatSelector(quality int, audioOnly bool) string {
+	if audioOnly {
+		return "bestaudio/best"
+	}
+	if quality > 0 {
+		return fmt.Sprintf("bestvideo[height<=%d]+bestaudio/best[height<=%d]/best", quality, quality)
+	}
+	return "bestvideo+bestaudio/best"
+}
+
 // SetQuality updates the preferred max vertical resolution (0 = best available)
 // for future launches, clears stale stream prefetch cache, and updates a live mpv.
 func (c *IPCClient) SetQuality(ctx context.Context, quality int) {
 	c.launchMu.Lock()
 	c.launchDefaults.Quality = quality
+	audioOnly := c.launchDefaults.AudioOnly
 	if c.resolver != nil {
 		c.resolver.SetQuality(quality)
 	}
 	c.launchMu.Unlock()
 	if c.isConnected() {
-		fmtStr := "bestvideo+bestaudio/best"
-		if quality > 0 {
-			fmtStr = fmt.Sprintf("bestvideo[height<=%d]+bestaudio/best[height<=%d]/best", quality, quality)
-		}
-		_, _ = c.sendCommand(ctx, "set_property", "ytdl-format", fmtStr)
+		_, _ = c.sendCommand(ctx, "set_property", "ytdl-format", formatSelector(quality, audioOnly))
 	}
+}
+
+// SetPlaybackProfile updates both resolution quality and audio-only mode, persists
+// them into launch defaults + resolver, and seamlessly relaunches an active managed
+// mpv process at the current timestamp so video windows open/close cleanly on Wayland.
+func (c *IPCClient) SetPlaybackProfile(ctx context.Context, quality int, audioOnly bool) error {
+	if c.ctx.Err() != nil {
+		return ErrClientClosed
+	}
+
+	c.launchMu.Lock()
+	c.launchDefaults.Quality = quality
+	c.launchDefaults.AudioOnly = audioOnly
+	if audioOnly {
+		c.launchDefaults.Mode = "audio"
+	} else if c.launchDefaults.Mode == "audio" || c.launchDefaults.Mode == "" {
+		c.launchDefaults.Mode = "window"
+	}
+	lastVid := c.lastVideo
+	if c.resolver != nil {
+		c.resolver.SetQuality(quality)
+		c.resolver.SetAudioOnly(audioOnly)
+	}
+	c.launchMu.Unlock()
+
+	if !c.hasManagedProc() {
+		if c.isConnected() {
+			_, _ = c.sendCommand(ctx, "set_property", "ytdl-format", formatSelector(quality, audioOnly))
+			wantVid := "auto"
+			if audioOnly {
+				wantVid = "no"
+			}
+			_, err := c.sendCommand(ctx, "set_property", "vid", wantVid)
+			return err
+		}
+		return nil
+	}
+
+	st := c.Status()
+	if lastVid.ID == "" {
+		return nil
+	}
+	mode := "video"
+	if audioOnly {
+		mode = "audio"
+	}
+	return c.playWithResume(ctx, lastVid, mode, st.TimePos, st.Paused)
 }
 
 // Prefetch asynchronously resolves direct stream URLs for v in the background.
@@ -817,15 +877,23 @@ func (c *IPCClient) hasManagedProc() bool {
 	}
 	if err := c.mpvProc.Signal(syscall.Signal(0)); err != nil {
 		c.mpvProc = nil
+		c.procAudioOnly = false
 		return false
 	}
 	return true
+}
+
+func (c *IPCClient) isProcAudioOnly() bool {
+	c.procMu.Lock()
+	defer c.procMu.Unlock()
+	return c.procAudioOnly
 }
 
 func (c *IPCClient) killManagedMPV() {
 	c.procMu.Lock()
 	proc := c.mpvProc
 	c.mpvProc = nil
+	c.procAudioOnly = false
 	c.procMu.Unlock()
 	if proc == nil {
 		return
@@ -928,12 +996,21 @@ type resolvedPlayTarget struct {
 // Play starts playback of v using the active socket or launches mpv directly.
 // Any active or in-flight playback is immediately interrupted so the latest Play wins.
 func (c *IPCClient) Play(ctx context.Context, v model.Video, mode string) error {
+	return c.playWithResume(ctx, v, mode, 0, false)
+}
+
+func (c *IPCClient) playWithResume(ctx context.Context, v model.Video, mode string, startPos float64, startPaused bool) error {
 	if c.ctx.Err() != nil {
 		return ErrClientClosed
 	}
 	if ctx != nil && ctx.Err() != nil {
 		return ctx.Err()
 	}
+
+	c.launchMu.Lock()
+	c.lastVideo = v
+	c.lastMode = mode
+	c.launchMu.Unlock()
 
 	c.playMu.Lock()
 	seq := c.playSeq.Add(1)
@@ -964,7 +1041,7 @@ func (c *IPCClient) Play(ctx context.Context, v model.Video, mode string) error 
 		return nil
 	}
 
-	if err := c.playOnSingleMPV(ctx, waitCtx, seq, v, plan, skipReconnect); err != nil {
+	if err := c.playOnSingleMPV(ctx, waitCtx, seq, v, plan, skipReconnect, startPos, startPaused); err != nil {
 		return err
 	}
 
@@ -1027,17 +1104,18 @@ func (c *IPCClient) resolvePlayTarget(waitCtx context.Context, v model.Video, mo
 		isMix:         mode == "mix" || model.IsPlaylistID(v.ID),
 	}
 
+	wantAudio := effectiveMode == "audio"
 	applyResolved := func(st ResolvedStream) {
-		if effectiveMode == "audio" && st.AudioURL != "" {
-			plan.url = st.AudioURL
+		if wantAudio {
+			if st.AudioURL != "" {
+				plan.url = st.AudioURL
+			}
 			plan.audioFile = ""
 			return
 		}
 		if st.VideoURL != "" {
 			plan.url = st.VideoURL
-			if effectiveMode != "audio" {
-				plan.audioFile = st.AudioURL
-			}
+			plan.audioFile = st.AudioURL
 		}
 	}
 
@@ -1050,7 +1128,7 @@ func (c *IPCClient) resolvePlayTarget(waitCtx context.Context, v model.Video, mo
 			}
 		}
 		if c.resolver != nil {
-			if st, ok := c.resolver.WaitOrGet(waitCtx, v.ID, streamWaitTimeout); ok {
+			if st, ok := c.resolver.WaitOrGetForMode(waitCtx, v.ID, wantAudio, streamWaitTimeout); ok {
 				applyResolved(st)
 			}
 		}
@@ -1061,7 +1139,7 @@ func (c *IPCClient) resolvePlayTarget(waitCtx context.Context, v model.Video, mo
 		plan.url = "https://www.youtube.com/watch?v=" + seedID
 		plan.fallbackURL = plan.url
 		if c.resolver != nil {
-			if st, ok := c.resolver.WaitOrGet(waitCtx, seedID, streamWaitTimeout); ok {
+			if st, ok := c.resolver.WaitOrGetForMode(waitCtx, seedID, wantAudio, streamWaitTimeout); ok {
 				applyResolved(st)
 			}
 		}
@@ -1076,7 +1154,7 @@ func (c *IPCClient) resolvePlayTarget(waitCtx context.Context, v model.Video, mo
 		plan.fallbackURL = plan.url
 		plan.playlistIDs = ids[1:]
 		if c.resolver != nil {
-			if st, ok := c.resolver.WaitOrGet(waitCtx, plan.seedID, streamWaitTimeout); ok {
+			if st, ok := c.resolver.WaitOrGetForMode(waitCtx, plan.seedID, wantAudio, streamWaitTimeout); ok {
 				applyResolved(st)
 			}
 		}
@@ -1087,7 +1165,7 @@ func (c *IPCClient) resolvePlayTarget(waitCtx context.Context, v model.Video, mo
 	return plan
 }
 
-func (c *IPCClient) playOnSingleMPV(ctx, waitCtx context.Context, seq uint64, v model.Video, plan resolvedPlayTarget, skipReconnect bool) error {
+func (c *IPCClient) playOnSingleMPV(ctx, waitCtx context.Context, seq uint64, v model.Video, plan resolvedPlayTarget, skipReconnect bool, startPos float64, startPaused bool) error {
 	if !skipReconnect && !c.isConnected() {
 		_ = c.tryConnectImmediateCtx(waitCtx, 150*time.Millisecond)
 	}
@@ -1102,7 +1180,7 @@ func (c *IPCClient) playOnSingleMPV(ctx, waitCtx context.Context, seq uint64, v 
 		return ctx.Err()
 	}
 
-	if c.tryPlayViaIPC(waitCtx, seq, v, plan) {
+	if startPos <= 0.5 && !startPaused && c.tryPlayViaIPC(waitCtx, seq, v, plan) {
 		c.step3Mu.Unlock()
 		return nil
 	}
@@ -1134,6 +1212,8 @@ func (c *IPCClient) playOnSingleMPV(ctx, waitCtx context.Context, seq uint64, v 
 	opts.URL = plan.url
 	opts.AudioFile = plan.audioFile
 	opts.AllowPlaylist = plan.launchAllowPlaylist
+	opts.StartPos = startPos
+	opts.StartPaused = startPaused
 	if plan.effectiveMode != "" && plan.effectiveMode != "auto" {
 		opts.Mode = plan.effectiveMode
 	}
@@ -1154,6 +1234,7 @@ func (c *IPCClient) playOnSingleMPV(ctx, waitCtx context.Context, seq uint64, v 
 		return err
 	}
 	c.mpvProc = proc
+	c.procAudioOnly = opts.AudioOnly || opts.Mode == "audio"
 	c.procMu.Unlock()
 	c.step3Mu.Unlock()
 	c.signalWake()
@@ -1168,16 +1249,26 @@ func (c *IPCClient) tryPlayViaIPC(waitCtx context.Context, seq uint64, v model.V
 	audioOnly := c.launchDefaults.AudioOnly
 	c.launchMu.RUnlock()
 
+	wantAudioOnly := false
 	wantVid := "auto"
 	switch plan.effectiveMode {
 	case "audio":
 		wantVid = "no"
+		wantAudioOnly = true
 	case "video", "pip", "fs":
 		wantVid = "auto"
+		wantAudioOnly = false
 	default:
 		if audioOnly {
 			wantVid = "no"
+			wantAudioOnly = true
 		}
+	}
+	// If our managed mpv process was started in a different window mode (e.g.
+	// video window vs --no-video --force-window=no), force a clean relaunch so
+	// Wayland/Hyprland never leaves a blank window open or fails to open one.
+	if c.hasManagedProc() && c.isProcAudioOnly() != wantAudioOnly {
+		return false
 	}
 	_, _ = c.sendCommand(waitCtx, "set_property", "vid", wantVid)
 	_, _ = c.sendCommand(waitCtx, "set_property", "audio-files", []string{})
@@ -1461,19 +1552,35 @@ func (c *IPCClient) SeekAbsolute(ctx context.Context, seconds float64) error {
 	return err
 }
 
-// ToggleVideoMode toggles audio-only vs video mode in launch defaults and, when an
-// mpv IPC socket is active, toggles the live "vid" property ("no" <-> "auto").
+// ToggleVideoMode toggles audio-only vs video mode in launch defaults and on mpv.
+// When managing a live mpv child process, it relaunches cleanly at the current
+// timestamp with --no-video --force-window=no (or video window) so window managers
+// never keep an orphan black window open.
 func (c *IPCClient) ToggleVideoMode(ctx context.Context) (bool, error) {
 	if c.ctx.Err() != nil {
 		return false, ErrClientClosed
 	}
+	if c.hasManagedProc() {
+		newAudioOnly := !c.isProcAudioOnly()
+		c.launchMu.RLock()
+		q := c.launchDefaults.Quality
+		c.launchMu.RUnlock()
+		err := c.SetPlaybackProfile(ctx, q, newAudioOnly)
+		return !newAudioOnly, err
+	}
 	if !c.isConnected() {
 		c.launchMu.Lock()
 		c.launchDefaults.AudioOnly = !c.launchDefaults.AudioOnly
-		if !c.launchDefaults.AudioOnly && c.launchDefaults.Mode == "audio" {
+		if c.launchDefaults.AudioOnly {
+			c.launchDefaults.Mode = "audio"
+		} else if c.launchDefaults.Mode == "audio" {
 			c.launchDefaults.Mode = "window"
 		}
-		videoOn := !c.launchDefaults.AudioOnly
+		audioOnly := c.launchDefaults.AudioOnly
+		if c.resolver != nil {
+			c.resolver.SetAudioOnly(audioOnly)
+		}
+		videoOn := !audioOnly
 		c.launchMu.Unlock()
 		return videoOn, nil
 	}
@@ -1508,8 +1615,13 @@ func (c *IPCClient) ToggleVideoMode(ctx context.Context) (bool, error) {
 
 	c.launchMu.Lock()
 	c.launchDefaults.AudioOnly = newAudioOnly
-	if !newAudioOnly && c.launchDefaults.Mode == "audio" {
+	if newAudioOnly {
+		c.launchDefaults.Mode = "audio"
+	} else if c.launchDefaults.Mode == "audio" {
 		c.launchDefaults.Mode = "window"
+	}
+	if c.resolver != nil {
+		c.resolver.SetAudioOnly(newAudioOnly)
 	}
 	c.launchMu.Unlock()
 	return !newAudioOnly, nil

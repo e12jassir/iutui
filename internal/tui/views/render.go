@@ -100,60 +100,19 @@ func loadingSpinner(frame int) string {
 	return brailleFrames[frame%len(brailleFrames)]
 }
 
-func renderLoadingWave(frame, width int, pal renderPalette) string {
-	if width <= 0 {
-		return ""
-	}
-	if frame < 0 {
-		frame = -frame
-	}
-	cometStyle := lipgloss.NewStyle().Foreground(pal.spotAccent).Bold(true)
-	trackStyle := lipgloss.NewStyle().Foreground(pal.spotBorder)
-	if width < 5 {
-		pos := frame % width
-		return trackStyle.Render(strings.Repeat("─", pos)) +
-			cometStyle.Render("●") +
-			trackStyle.Render(strings.Repeat("─", width-1-pos))
-	}
-	const cometW = 5
-	travel := width - cometW
-	if travel == 0 {
-		return cometStyle.Render("━━●━━")
-	}
-	period := 2 * travel
-	pos := frame % period
-	if pos > travel {
-		pos = period - pos
-	}
-	return trackStyle.Render(strings.Repeat("─", pos)) +
-		cometStyle.Render("━━●━━") +
-		trackStyle.Render(strings.Repeat("─", travel-pos))
-}
-
 func renderLoadingBox(title, subtitle string, frame, width, height int, pal renderPalette) string {
 	if width < 8 || height < 3 {
 		return fitBlock("", width, height)
 	}
-	boxW := min(48, max(16, width-6))
-	if boxW > width {
-		boxW = width
-	}
-	innerW := max(4, boxW-2)
 	spinner := loadingSpinner(frame)
-	header := " " + lipgloss.NewStyle().Foreground(pal.spotAccent).Bold(true).Render(spinner+" "+truncatePlain(title, max(1, innerW-4)))
-	sub := ""
+	header := lipgloss.NewStyle().Foreground(pal.spotAccent).Bold(true).Render(
+		spinner + " " + truncatePlain(title, max(1, width-6)),
+	)
+	lines := []string{header}
 	if strings.TrimSpace(subtitle) != "" {
-		sub = " " + lipgloss.NewStyle().Foreground(pal.text).Render(truncatePlain(subtitle, max(1, innerW-2)))
+		lines = append(lines, lipgloss.NewStyle().Foreground(pal.muted).Render(truncatePlain(subtitle, max(1, width-6))))
 	}
-	wave := " " + renderLoadingWave(frame, max(4, innerW-2), pal)
-	hint := " " + lipgloss.NewStyle().Foreground(pal.dim).Render(truncatePlain("Conectando con YouTube...", max(1, innerW-2)))
-	content := []string{header, sub, wave, hint}
-	boxH := min(6, height)
-	if boxH < 3 {
-		boxH = 3
-	}
-	card := renderSpotatuiPanel("", content, boxW, boxH, true, pal)
-	placed := lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, card)
+	placed := lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, strings.Join(lines, "\n"))
 	return fitBlock(placed, width, height)
 }
 
@@ -268,6 +227,8 @@ func Render(s *app.State, th theme.Theme, tr thumbs.Renderer) string {
 	}
 	if s.ShowStillWatching {
 		frame = renderStillWatchingOverlay(s, s.Width, s.Height, th, pal)
+	} else if s.ShowQualityModal {
+		frame = renderQualityOverlay(s, s.Width, s.Height, th, pal)
 	} else if s.ShowChapters {
 		frame = renderChaptersOverlay(s, s.Width, s.Height, th, pal)
 	} else if s.ShowSettings {
@@ -360,15 +321,16 @@ func renderTopPanels(s *app.State, th theme.Theme, tr thumbs.Renderer, width int
 	var brand string
 	red := lipgloss.NewStyle().Foreground(pal.red).Bold(true)
 	white := lipgloss.NewStyle().Foreground(pal.white).Bold(true)
+	mutedBrand := lipgloss.NewStyle().Foreground(pal.muted).Bold(true)
 	if sideW >= fullSidebarW {
 		if br, ok := tr.(thumbs.BrandRenderer); ok {
 			brand = br.RenderBrand(sideW, 3)
 		}
 		if brand == "" {
-			brand = red.Render("▶") + white.Render("  iutui")
+			brand = red.Render("▶ ") + white.Render("iu") + mutedBrand.Render("tui")
 		}
 	} else {
-		brand = red.Render("▶") + white.Render(" iutui")
+		brand = red.Render("▶") + white.Render(" iu") + mutedBrand.Render("tui")
 	}
 	brandBox := lipgloss.NewStyle().
 		Width(sideW).
@@ -410,8 +372,30 @@ func renderChips(s *app.State, th theme.Theme, width int, pal renderPalette) str
 			spacer := max(1, width-leftW-lipgloss.Width(toastStyled)-1)
 			line = line + strings.Repeat(" ", spacer) + toastStyled
 		}
+	} else if pills := s.ChipActionPills(); len(pills) > 0 {
+		leftW := lipgloss.Width(line)
+		pillStr := renderPillBar(s, pills, pal)
+		spacer := max(1, width-leftW-lipgloss.Width(pillStr)-1)
+		line = line + strings.Repeat(" ", spacer) + pillStr
 	}
 	return fitBlock(line, width, 1)
+}
+
+func renderPillBar(s *app.State, pills []app.ActionPill, pal renderPalette) string {
+	out := make([]string, len(pills))
+	for i, p := range pills {
+		st := lipgloss.NewStyle().Foreground(pal.muted)
+		switch {
+		case p.ID == "toggle_audio" && s.AudioOnly:
+			st = lipgloss.NewStyle().Foreground(pal.spotAccent).Bold(true)
+		case p.ID == "toggle_lyrics" && s.ShowLyrics:
+			st = lipgloss.NewStyle().Foreground(pal.spotAccent).Bold(true)
+		case p.ID == "open_quality":
+			st = lipgloss.NewStyle().Foreground(pal.ctrlBtn).Bold(true)
+		}
+		out[i] = st.Render(p.Label)
+	}
+	return strings.Join(out, " ")
 }
 
 func renderSidebarFull(s *app.State, th theme.Theme, width, height int, pal renderPalette) string {
@@ -879,7 +863,7 @@ func renderPlayerPanel(s *app.State, th theme.Theme, width int, pal renderPalett
 	barW := max(8, innerW-len(posStr)-len(durStr)-6)
 	var progBar string
 	if !s.PlayerStatus.IsRunning && s.PlayLoading {
-		progBar = renderLoadingWave(s.AnimFrame, barW, pal)
+		progBar = lipgloss.NewStyle().Foreground(pal.spotBorder).Render(strings.Repeat("─", barW))
 	} else {
 		ratio := 0.0
 		if s.PlayerStatus.IsRunning && s.PlayerStatus.Duration > 0 {
@@ -901,7 +885,7 @@ func renderPlayerPanel(s *app.State, th theme.Theme, width int, pal renderPalett
 	}
 	row2 := " " + lipgloss.NewStyle().Foreground(pal.muted).Render(posStr) + "  " + progBar + "  " + lipgloss.NewStyle().Foreground(pal.muted).Render(durStr)
 
-	// Row 3: minimalist transport controls + key hints (no heavy emojis).
+	// Row 3: minimalist transport controls + clickable action pills.
 	btnStyle := lipgloss.NewStyle().Foreground(pal.ctrlBtn).Bold(true)
 	btns := strings.Join([]string{
 		btnStyle.Render("[|<]"),
@@ -913,18 +897,53 @@ func renderPlayerPanel(s *app.State, th theme.Theme, width int, pal renderPalett
 		btnStyle.Render("[Vol+]"),
 		btnStyle.Render("[★]"),
 	}, " ")
-	hints := lipgloss.NewStyle().Foreground(pal.dim).Render("   Enter: Play · a: Audio · /: Buscar · S: Config")
-	row3 := " " + truncateStyledLine(btns+hints, max(10, innerW-2))
+	row3Content := " " + btns
+	if pills := s.PlayerActionPills(); len(pills) > 0 {
+		row3Content += "  " + renderPillBar(s, pills, pal)
+	}
+	if rem := (innerW - 1) - lipgloss.Width(row3Content); rem > 12 {
+		hint := truncatePlain("  ? Ayuda · S Config", rem)
+		row3Content += lipgloss.NewStyle().Foreground(pal.dim).Render(hint)
+	}
+	row3 := truncateStyledLine(row3Content, innerW)
 
 	return renderSpotatuiPanel(panelTitle, []string{row1, row2, row3}, width, 5, s.Focus == app.FocusPlayer, pal)
 }
 
+func renderQualityOverlay(s *app.State, width, height int, th theme.Theme, pal renderPalette) string {
+	_, _, boxW, _, _ := s.QualityModalBounds()
+	innerW := max(12, boxW-4)
+	title := lipgloss.NewStyle().Foreground(pal.spotAccent).Bold(true).Render("🎬 Calidad, Ahorro y Solo Audio")
+	rows := []string{title, ""}
+
+	for i, opt := range app.QualityOptions {
+		isActive := (!s.AudioOnly && !opt.AudioOnly && s.Quality == opt.Quality) || (s.AudioOnly && opt.AudioOnly)
+		marker := "  "
+		if i == s.QualityIdx {
+			marker = "▶ "
+		}
+		badge := "○ "
+		if isActive {
+			badge = "● "
+		}
+		lineText := fmt.Sprintf("%s%d. %s%s — %s", marker, i+1, badge, opt.Label, opt.Desc)
+		lineText = truncatePlain(lineText, innerW)
+		if i == s.QualityIdx {
+			rows = append(rows, lipgloss.NewStyle().Foreground(pal.white).Background(pal.surf).Bold(true).Width(innerW).Render(lineText))
+		} else if isActive {
+			rows = append(rows, lipgloss.NewStyle().Foreground(pal.spotAccent).Bold(true).Render(lineText))
+		} else {
+			rows = append(rows, lipgloss.NewStyle().Foreground(pal.text).Render(lineText))
+		}
+	}
+	rows = append(rows, "", lipgloss.NewStyle().Foreground(pal.dim).Render(truncatePlain("  [↑/↓] Mover · [Enter/Click] Aplicar · [1-5] · [Esc]", innerW)))
+	modal := th.Toast.BorderForeground(pal.spotAccent).Width(boxW - 2).Render(strings.Join(rows, "\n"))
+	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, modal)
+}
+
 func renderSettingsOverlay(s *app.State, width, height int, th theme.Theme, pal renderPalette) string {
 	title := lipgloss.NewStyle().Foreground(pal.spotAccent).Bold(true).Render("Configuración (iutui)")
-	qLabel := "Máxima (best)"
-	if s.Quality > 0 {
-		qLabel = fmt.Sprintf("%dp", s.Quality)
-	}
+	qLabel := s.QualityLabel()
 	autoplayLabel := "DESACTIVADO"
 	if s.Autoplay {
 		autoplayLabel = "ACTIVADO"
@@ -933,6 +952,10 @@ func renderSettingsOverlay(s *app.State, width, height int, th theme.Theme, pal 
 	if s.SponsorBlock {
 		sbLabel = "ACTIVADO"
 	}
+	audioLabel := "DESACTIVADO"
+	if s.AudioOnly {
+		audioLabel = "ACTIVADO (sin ventana)"
+	}
 	themeLabel := s.ThemeName
 	if themeLabel == "" {
 		themeLabel = "youtube-dark"
@@ -940,15 +963,16 @@ func renderSettingsOverlay(s *app.State, width, height int, th theme.Theme, pal 
 	rows := []string{
 		title,
 		"",
-		fmt.Sprintf("  Calidad máxima [c]:   %s", qLabel),
-		fmt.Sprintf("  Autoplay [A]:         %s", autoplayLabel),
-		fmt.Sprintf("  SponsorBlock [B]:     %s", sbLabel),
-		fmt.Sprintf("  Tema [t]:             %s", themeLabel),
-		"  Config archivo:       ~/.config/iutui/config",
-		"  Carpeta descargas:    ~/Videos/yt",
-		"  Reproductor:          mpv IPC + prefetch HD",
+		fmt.Sprintf("  Calidad / Audio [f/c]: %s", qLabel),
+		fmt.Sprintf("  Solo Audio [x/V]:      %s", audioLabel),
+		fmt.Sprintf("  Autoplay [A]:          %s", autoplayLabel),
+		fmt.Sprintf("  SponsorBlock [b]:      %s", sbLabel),
+		fmt.Sprintf("  Tema [t]:              %s", themeLabel),
+		"  Config archivo:        ~/.config/iutui/config",
+		"  Carpeta descargas:     ~/Videos/yt",
+		"  Reproductor:           mpv IPC + prefetch HD",
 		"",
-		"  [c] Calidad · [A] Autoplay · [B] SB · [t] Tema · [Esc]",
+		"  [f] Calidad · [x] Audio · [A] Auto · [b] SB · [t] Tema · [Esc]",
 	}
 	boxW := min(68, max(34, width-8))
 	trimmed := make([]string, 0, len(rows))
@@ -993,20 +1017,20 @@ func renderHelpOverlay(_ string, width, height int, th theme.Theme, pal renderPa
 	rows := []string{
 		title,
 		"",
-		"  j / k / ↑ / ↓   Mover selección",
+		"  j / k / ↑ / ↓   Mover selección (o pasa el puntero)",
 		"  Enter / a / v   Reproducir (auto / audio / video)",
-		"  V / m           Alternar Video/Audio en vivo · Mix Radio",
+		"  x / V · m       Alternar Solo Audio en vivo · Mix Radio",
 		"  Space / n / p   Pausar · Siguiente · Anterior",
 		"  , / . · - / +   Retroceder/Avanzar 10s · Volumen ±5%",
 		"  w / s / g / q   Guardar (★) · Suscribir · Canal · Cola",
-		"  d / C / L       Descargar · Capítulos · Letras",
-		"  c / B / t       Calidad · SponsorBlock · Tema",
+		"  d / o / l       Descargar · Capítulos · Letras",
+		"  f / c · b / t   Selector Calidad/Audio · SponsorBlock · Tema",
 		"  A               Activar/desactivar Autoplay",
 		"  [ / ] · Tab     Cambiar chip · Foco sidebar",
 		"  1..5 / / / r    Pestañas · Buscar · Recargar",
 		"  Esc · ? / Q     Volver/Cerrar · Ayuda · Salir",
 	}
-	boxW := min(66, max(30, width-8))
+	boxW := min(68, max(30, width-8))
 	trimmed := make([]string, 0, len(rows))
 	for _, r := range rows {
 		trimmed = append(trimmed, truncateStyledLine(r, boxW-4))
@@ -1019,14 +1043,7 @@ func renderChaptersOverlay(s *app.State, width, height int, th theme.Theme, pal 
 	title := lipgloss.NewStyle().Foreground(pal.spotAccent).Bold(true).Render("📑 Capítulos del video")
 	rows := []string{title, ""}
 
-	maxVisible := max(4, min(len(s.Chapters), height-10))
-	start := 0
-	if s.ChapterIdx >= maxVisible {
-		start = s.ChapterIdx - maxVisible + 1
-	}
-	end := min(len(s.Chapters), start+maxVisible)
-
-	boxW := min(66, max(34, width-8))
+	start, end, boxW, _, _, _, _ := s.ChaptersModalWindow()
 	innerW := boxW - 4
 	for i := start; i < end; i++ {
 		ch := s.Chapters[i]
@@ -1039,7 +1056,7 @@ func renderChaptersOverlay(s *app.State, width, height int, th theme.Theme, pal 
 			rows = append(rows, lipgloss.NewStyle().Foreground(pal.text).Render(truncatePlain(label, innerW)))
 		}
 	}
-	rows = append(rows, "", lipgloss.NewStyle().Foreground(pal.dim).Render("  [j/k] Navegar · [Enter] Saltar · [Esc/C] Cerrar"))
+	rows = append(rows, "", lipgloss.NewStyle().Foreground(pal.dim).Render("  [j/k] Navegar · [Enter/Click] Saltar · [Esc/o] Cerrar"))
 	modal := th.Toast.BorderForeground(pal.spotAccent).Width(boxW - 2).Render(strings.Join(rows, "\n"))
 	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, modal)
 }

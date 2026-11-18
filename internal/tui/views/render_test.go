@@ -304,8 +304,11 @@ func TestRenderLoadingAnimations(t *testing.T) {
 		s.AnimFrame = 0
 		out0 := Render(s, th, tr)
 		assertBounds(t, out0, 120, 36)
-		if !strings.Contains(out0, "Conectando con YouTube...") {
-			t.Fatalf("expected loading card hint in home sync, got:\n%s", out0)
+		if !strings.Contains(out0, "Cargando videos...") {
+			t.Fatalf("expected loading spinner title in home sync, got:\n%s", out0)
+		}
+		if strings.Contains(out0, "━━●━━") {
+			t.Fatalf("expected no bouncing wave bar in home sync, got:\n%s", out0)
 		}
 		if !strings.Contains(out0, "[⠋]") {
 			t.Fatalf("expected animated top badge [⠋], got:\n%s", out0)
@@ -328,8 +331,11 @@ func TestRenderLoadingAnimations(t *testing.T) {
 		s.AnimFrame = 0
 		out0 := Render(s, th, tr)
 		assertBounds(t, out0, 120, 36)
-		if !strings.Contains(out0, "Conectando con YouTube...") {
-			t.Fatalf("expected loading card hint in search pending, got:\n%s", out0)
+		if !strings.Contains(out0, "Buscando") {
+			t.Fatalf("expected loading spinner title in search pending, got:\n%s", out0)
+		}
+		if strings.Contains(out0, "━━●━━") {
+			t.Fatalf("expected no bouncing wave bar in search pending, got:\n%s", out0)
 		}
 
 		s.AnimFrame = 3

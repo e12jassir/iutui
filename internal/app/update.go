@@ -249,10 +249,22 @@ func (s *State) Update(msg tea.Msg) (*State, tea.Cmd) {
 		if msg.Err != nil {
 			return s, s.toastCmd(fmt.Sprintf("Error alternando video: %v", msg.Err))
 		}
-		if msg.VideoOn {
-			return s, s.toastCmd("🎬 Video activado")
+		s.AudioOnly = !msg.VideoOn
+		var saveCmd tea.Cmd
+		if s.Deps.OnAudioOnlyChange != nil {
+			fn := s.Deps.OnAudioOnlyChange
+			audioOnly := s.AudioOnly
+			saveCmd = func() tea.Msg {
+				if err := fn(audioOnly); err != nil {
+					return ActionResultMsg{Err: err}
+				}
+				return nil
+			}
 		}
-		return s, s.toastCmd("🎧 Solo audio (en caliente)")
+		if msg.VideoOn {
+			return s, tea.Batch(s.toastCmd("🎬 Video activado"), saveCmd)
+		}
+		return s, tea.Batch(s.toastCmd("🎧 Solo audio (sin ventana)"), saveCmd)
 
 	case ChannelLoadedMsg:
 		if msg.Seq != 0 && msg.Seq != s.channelSeq {
@@ -411,12 +423,7 @@ func (s *State) Update(msg tea.Msg) (*State, tea.Cmd) {
 
 // GridCols returns the current number of grid columns for the terminal width.
 func (s *State) GridCols() int {
-	mainW := s.Width - 2
-	if s.Width >= 140 {
-		mainW -= 26
-	} else if s.Width >= 100 {
-		mainW -= 10
-	}
+	mainW := s.MainInnerWidth()
 	cols := (mainW + 2) / 32
 	if cols < 1 {
 		return 1
@@ -469,19 +476,48 @@ func (s *State) handleKey(msg tea.KeyMsg) (*State, tea.Cmd) {
 		return s, nil
 	}
 
+	if s.ShowQualityModal {
+		switch key {
+		case "esc", "f", "F", "q":
+			s.ShowQualityModal = false
+			return s, nil
+		case "j", "down":
+			if s.QualityIdx < len(QualityOptions)-1 {
+				s.QualityIdx++
+			}
+			return s, nil
+		case "k", "up":
+			if s.QualityIdx > 0 {
+				s.QualityIdx--
+			}
+			return s, nil
+		case "1", "2", "3", "4", "5":
+			idx := int(key[0] - '1')
+			return s.ApplyQualityOption(idx)
+		case "enter", " ":
+			return s.ApplyQualityOption(s.QualityIdx)
+		}
+		return s, nil
+	}
+
 	if s.ShowSettings {
 		switch key {
 		case "esc", "S", "q":
 			s.ShowSettings = false
 			return s, nil
-		case "c", "enter", " ", "right", "l":
+		case "f", "F":
+			s.ShowSettings = false
+			return s.OpenQualityModal(), nil
+		case "c", "enter", " ", "right":
 			return s.CycleQuality()
-		case "A":
+		case "a", "A":
 			return s.ToggleAutoplay()
-		case "B":
+		case "b", "B":
 			return s.ToggleSponsorBlock()
-		case "t":
+		case "t", "T":
 			return s.CycleTheme()
+		case "x", "V":
+			return s.ToggleVideoMode()
 		}
 		return s, nil
 	}
@@ -584,7 +620,7 @@ func (s *State) handleKey(msg tea.KeyMsg) (*State, tea.Cmd) {
 		}
 		s.SetSelection(s.activeIdx() - step)
 		return s, nil
-	case "l", "right":
+	case "right":
 		if s.Focus == FocusSidebar {
 			s.Focus = FocusMain
 			return s, nil
@@ -622,7 +658,7 @@ func (s *State) handleKey(msg tea.KeyMsg) (*State, tea.Cmd) {
 		return s.PlaySelected("audio")
 	case "v":
 		return s.PlaySelected("video")
-	case "V":
+	case "x", "V":
 		return s.ToggleVideoMode()
 	case "m":
 		return s.PlaySelected("mix")
@@ -630,7 +666,7 @@ func (s *State) handleKey(msg tea.KeyMsg) (*State, tea.Cmd) {
 		return s.ToggleSaveSelected()
 	case "s":
 		return s.ToggleSubscribeSelected()
-	case "g":
+	case "g", "G":
 		return s.OpenSelectedChannel()
 	case "q":
 		return s.EnqueueSelected()
@@ -638,13 +674,19 @@ func (s *State) handleKey(msg tea.KeyMsg) (*State, tea.Cmd) {
 		return s.DownloadSelected(false)
 	case "c":
 		return s.CycleQuality()
-	case "C":
+	case "f", "F":
+		return s.OpenQualityModal(), nil
+	case "o", "O", "C":
 		return s.OpenChapters()
-	case "L":
+	case "l", "L":
+		if key == "l" && s.Focus == FocusSidebar {
+			s.Focus = FocusMain
+			return s, nil
+		}
 		return s.ToggleLyrics()
-	case "B":
+	case "b", "B":
 		return s.ToggleSponsorBlock()
-	case "t":
+	case "t", "T":
 		return s.CycleTheme()
 	case "A":
 		return s.ToggleAutoplay()
@@ -688,7 +730,9 @@ func (s *State) activeIdx() int {
 func (s *State) SwitchTab(tab model.Tab) (*State, tea.Cmd) {
 	s.View = ViewHome
 	s.PrevView = ViewHome
+	s.Focus = FocusMain
 	s.ShowChapters = false
+	s.ShowQualityModal = false
 	s.ActiveTab = tab
 	s.SelectedIdx = 0
 	s.ScrollOffset = 0
@@ -944,7 +988,9 @@ func (s *State) PlaySelected(mode string) (*State, tea.Cmd) {
 		s.Feeds[model.TabHistory] = updated
 	}
 	toastPrefix := "▶ Abriendo en mpv: "
-	if isMixTarget(v.ID, mode) {
+	if mode == "audio" || (mode == "auto" && s.AudioOnly) {
+		toastPrefix = "🎧 Solo audio: "
+	} else if isMixTarget(v.ID, mode) {
 		toastPrefix = "📻 Abriendo Mix: "
 	}
 	toastCmd := s.toastCmd(toastPrefix + v.Title)
@@ -981,19 +1027,147 @@ type qualitySetter interface {
 	SetQuality(ctx context.Context, quality int)
 }
 
+type playbackProfileSetter interface {
+	SetPlaybackProfile(ctx context.Context, quality int, audioOnly bool) error
+}
+
+// QualityOption describes one preset in the interactive Resolution & Audio-Only modal.
+type QualityOption struct {
+	Label     string
+	Desc      string
+	Quality   int
+	AudioOnly bool
+}
+
+// QualityOptions lists the selectable resolution / data-saver / audio-only presets.
+var QualityOptions = []QualityOption{
+	{Label: "Máxima (4K / Best)", Desc: "Máxima nitidez disponible (~4-15 GB/h)", Quality: 0, AudioOnly: false},
+	{Label: "1080p Full HD", Desc: "Alta definición (~2.5 GB/h)", Quality: 1080, AudioOnly: false},
+	{Label: "720p HD", Desc: "Equilibrado · recomendado (~1.0 GB/h)", Quality: 720, AudioOnly: false},
+	{Label: "360p Ahorro", Desc: "Ahorro de datos (~250 MB/h)", Quality: 360, AudioOnly: false},
+	{Label: "Solo Audio", Desc: "Sin ventana de video (~50 MB/h)", Quality: 720, AudioOnly: true},
+}
+
 var qualityPresets = []int{0, 1080, 720, 480, 360}
 
-// QualityLabel returns a human-readable badge for the current max vertical resolution.
+// QualityLabel returns a human-readable badge for the current max vertical resolution or audio-only mode.
 func (s *State) QualityLabel() string {
+	if s.AudioOnly {
+		return "Solo Audio"
+	}
 	if s.Quality <= 0 {
 		return "MAX"
+	}
+	if s.Quality <= 360 {
+		return fmt.Sprintf("%dp Ahorro", s.Quality)
 	}
 	return fmt.Sprintf("%dp", s.Quality)
 }
 
-// CycleQuality rotates through quality presets (MAX -> 1080p -> 720p -> 480p -> 360p),
+// OpenQualityModal opens the resolution / data-saver / audio-only selector centered on the current preset.
+func (s *State) OpenQualityModal() *State {
+	s.ShowHelp = false
+	s.ShowSettings = false
+	s.ShowChapters = false
+	s.ShowQualityModal = true
+	s.QualityIdx = s.currentQualityOptionIndex()
+	return s
+}
+
+func (s *State) currentQualityOptionIndex() int {
+	if s.AudioOnly {
+		return len(QualityOptions) - 1
+	}
+	for i, opt := range QualityOptions {
+		if !opt.AudioOnly && opt.Quality == s.Quality {
+			return i
+		}
+	}
+	return 2 // 720p HD fallback
+}
+
+// ApplyQualityOption applies preset idx from QualityOptions, updates the engine,
+// persists configuration, and displays a confirmation toast.
+func (s *State) ApplyQualityOption(idx int) (*State, tea.Cmd) {
+	if idx < 0 || idx >= len(QualityOptions) {
+		idx = 2
+	}
+	opt := QualityOptions[idx]
+	s.ShowQualityModal = false
+	return s.applyPlaybackProfile(opt.Quality, opt.AudioOnly, opt.Label)
+}
+
+func (s *State) applyPlaybackProfile(quality int, audioOnly bool, label string) (*State, tea.Cmd) {
+	s.Quality = quality
+	s.AudioOnly = audioOnly
+
+	var cmds []tea.Cmd
+	if label == "" {
+		if audioOnly {
+			label = "Solo Audio"
+		} else if quality <= 0 {
+			label = "Máxima (best)"
+		} else {
+			label = fmt.Sprintf("%dp", quality)
+		}
+	}
+	toastPrefix := "🎬 Calidad: "
+	if audioOnly {
+		toastPrefix = "🎧 Modo: "
+	}
+	cmds = append(cmds, s.toastCmd(toastPrefix+label))
+
+	if ps, ok := s.Deps.Engine.(playbackProfileSetter); ok {
+		q := quality
+		ao := audioOnly
+		cmds = append(cmds, func() tea.Msg {
+			if err := ps.SetPlaybackProfile(s.appCtx, q, ao); err != nil {
+				return ActionResultMsg{Err: err}
+			}
+			return nil
+		})
+	} else if qs, ok := s.Deps.Engine.(qualitySetter); ok {
+		qs.SetQuality(s.appCtx, quality)
+	}
+
+	if v, ok := s.SelectedVideo(); ok {
+		if p, ok := s.Deps.Engine.(streamPrefetcher); ok {
+			p.Prefetch(v)
+		}
+	}
+
+	if s.Deps.OnQualityChange != nil {
+		fn := s.Deps.OnQualityChange
+		q := quality
+		cmds = append(cmds, func() tea.Msg {
+			if err := fn(q); err != nil {
+				return ActionResultMsg{Err: err}
+			}
+			return nil
+		})
+	}
+	if s.Deps.OnAudioOnlyChange != nil {
+		fn := s.Deps.OnAudioOnlyChange
+		ao := audioOnly
+		cmds = append(cmds, func() tea.Msg {
+			if err := fn(ao); err != nil {
+				return ActionResultMsg{Err: err}
+			}
+			return nil
+		})
+	}
+	return s, tea.Batch(cmds...)
+}
+
+// CycleQuality rotates through presets (MAX -> 1080p -> 720p -> 480p -> 360p -> Solo Audio -> MAX),
 // updates the player engine, persists config, and re-prefetches the current item.
 func (s *State) CycleQuality() (*State, tea.Cmd) {
+	if s.AudioOnly {
+		return s.applyPlaybackProfile(0, false, "Máxima (best)")
+	}
+	if s.Quality == qualityPresets[len(qualityPresets)-1] {
+		return s.applyPlaybackProfile(s.Quality, true, "Solo Audio (sin ventana)")
+	}
 	next := qualityPresets[0]
 	for i, q := range qualityPresets {
 		if q == s.Quality {
@@ -1001,31 +1175,11 @@ func (s *State) CycleQuality() (*State, tea.Cmd) {
 			break
 		}
 	}
-	s.Quality = next
-	if qs, ok := s.Deps.Engine.(qualitySetter); ok {
-		qs.SetQuality(s.appCtx, next)
-	}
-	if v, ok := s.SelectedVideo(); ok {
-		if p, ok := s.Deps.Engine.(streamPrefetcher); ok {
-			p.Prefetch(v)
-		}
-	}
-	var saveCmd tea.Cmd
-	if s.Deps.OnQualityChange != nil {
-		fn := s.Deps.OnQualityChange
-		q := next
-		saveCmd = func() tea.Msg {
-			if err := fn(q); err != nil {
-				return ActionResultMsg{Err: err}
-			}
-			return nil
-		}
-	}
 	label := "Máxima (best)"
 	if next > 0 {
 		label = fmt.Sprintf("%dp", next)
 	}
-	return s, tea.Batch(s.toastCmd("🎬 Calidad: "+label), saveCmd)
+	return s.applyPlaybackProfile(next, false, label)
 }
 
 // DownloadSelected queues a background download for the highlighted video.

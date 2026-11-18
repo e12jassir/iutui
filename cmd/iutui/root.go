@@ -29,7 +29,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var version = "0.4.0"
+var version = "0.4.1"
 
 type nativeThumbs struct {
 	backend thumbs.Backend
@@ -250,10 +250,18 @@ func runTUI(paths platform.Paths) error {
 		Downloader:          dl,
 		LyricsClient:        lyrics.NewClient(),
 		InitialQuality:      cfg.Quality,
+		InitialAudioOnly:    cfg.DefaultMode == "audio",
 		InitialTheme:        cfg.Theme,
 		InitialSponsorBlock: &sbEnabled,
 		OnQualityChange: func(q int) error {
 			return config.SaveVal(cfgPath, "YT_QUALITY", strconv.Itoa(q))
+		},
+		OnAudioOnlyChange: func(audioOnly bool) error {
+			mode := "window"
+			if audioOnly {
+				mode = "audio"
+			}
+			return config.SaveVal(cfgPath, "YT_DEFAULT_MODE", mode)
 		},
 		OnThemeChange: func(name string) error {
 			return config.SaveVal(cfgPath, "YT_THEME", name)
@@ -279,7 +287,7 @@ func runTUI(paths platform.Paths) error {
 			thumbs: newNativeThumbs(),
 		},
 		tea.WithAltScreen(),
-		tea.WithMouseCellMotion(),
+		tea.WithMouseAllMotion(),
 	)
 	_, err := p.Run()
 	return err

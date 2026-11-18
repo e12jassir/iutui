@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -371,5 +372,42 @@ func TestClientFetch_Concurrent(t *testing.T) {
 	close(errs)
 	for err := range errs {
 		t.Fatalf("concurrent Fetch failed: %v", err)
+	}
+}
+
+func TestClientFetch_FallbackStripsAllParens(t *testing.T) {
+	var queries []string
+	var mu sync.Mutex
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query().Get("q")
+		mu.Lock()
+		queries = append(queries, q)
+		mu.Unlock()
+		if strings.Contains(q, "Argentina") {
+			_ = json.NewEncoder(w).Encode([]any{})
+			return
+		}
+		_ = json.NewEncoder(w).Encode([]map[string]any{
+			{
+				"trackName":    "De Música Ligera",
+				"artistName":   "Soda Stereo",
+				"syncedLyrics": "[00:10.00] Ella durmió al calor de las masas",
+			},
+		})
+	}))
+	defer srv.Close()
+
+	client := NewClient()
+	client.BaseURL = srv.URL
+
+	got, err := client.Fetch(context.Background(), "soda-fallback-1", "Soda Stereo - De Música Ligera (Argentina 1997) | Bonus", "Soda Stereo Oficial")
+	if err != nil {
+		t.Fatalf("expected fallback query to succeed, got %v (queries=%v)", err, queries)
+	}
+	if len(got.Synced) != 1 || got.Synced[0].Text != "Ella durmió al calor de las masas" {
+		t.Fatalf("unexpected fallback lyrics: %+v", got)
+	}
+	if len(queries) != 2 {
+		t.Fatalf("expected 2 search calls (primary + fallback), got %d: %v", len(queries), queries)
 	}
 }

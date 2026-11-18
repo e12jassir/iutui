@@ -182,7 +182,7 @@ func TestMouseInteractions(t *testing.T) {
 	t.Run("click search bar focuses search", func(t *testing.T) {
 		s, _, _, _ := newTestState()
 		defer s.Close()
-		s.Width, s.Height = 120, 36
+		s.Width, s.Height = 120, 38
 		_, _, barStart := s.headerSearchBounds()
 		s, _ = s.Update(tea.MouseMsg{
 			X:      barStart + 2,
@@ -198,7 +198,7 @@ func TestMouseInteractions(t *testing.T) {
 	t.Run("click reload [r] button triggers sync", func(t *testing.T) {
 		s, _, _, _ := newTestState()
 		defer s.Close()
-		s.Width, s.Height = 120, 36
+		s.Width, s.Height = 120, 38
 		s.Focus = FocusSearch
 		btnStart, _, _ := s.headerSearchBounds()
 		var cmd tea.Cmd
@@ -219,7 +219,7 @@ func TestMouseInteractions(t *testing.T) {
 	t.Run("click chip switches active chip filter", func(t *testing.T) {
 		s, _, _, _ := newTestState()
 		defer s.Close()
-		s.Width, s.Height = 120, 36
+		s.Width, s.Height = 120, 38
 		// mainX = 11 (miniGuideW=10 + 1 border); first chip "Todo" width=6, second chip starts at 11+1+6+1=19
 		s, _ = s.Update(tea.MouseMsg{
 			X:      20,
@@ -235,7 +235,7 @@ func TestMouseInteractions(t *testing.T) {
 	t.Run("click card selects then second click plays", func(t *testing.T) {
 		s, cat, eng, _ := newTestState()
 		defer s.Close()
-		s.Width, s.Height = 120, 36
+		s.Width, s.Height = 120, 38
 		s, _ = s.Update(FeedLoadedMsg{Tab: model.TabHome, Videos: cat.Feeds[model.TabHome]})
 		// mainX = 11; col 1 starts after col 0 width + gap, y >= 5
 		col1X := s.mainOriginX() + s.gridCardWidth() + 4
@@ -277,7 +277,7 @@ func TestMouseInteractions(t *testing.T) {
 	t.Run("click help button toggles and next click dismisses", func(t *testing.T) {
 		s, _, _, _ := newTestState()
 		defer s.Close()
-		s.Width, s.Height = 120, 36
+		s.Width, s.Height = 120, 38
 		// [?] inside right actions panel [Width-15, Width-10]
 		s, _ = s.Update(tea.MouseMsg{
 			X:      s.Width - 12,
@@ -496,7 +496,7 @@ func (c *controlledSearchCatalog) Search(ctx context.Context, _ string) ([]model
 func TestMultiRoundSearchClearsPreviousAndPreventsConcat(t *testing.T) {
 	s, cat, _, _ := newTestState()
 	defer s.Close()
-	s.Width, s.Height = 120, 36
+	s.Width, s.Height = 120, 38
 	cat.Results["pink floyd"] = []model.Video{
 		{ID: "pf1", Title: "Pink Floyd - Time", Channel: "Pink Floyd", Duration: "07:05"},
 	}
@@ -894,7 +894,7 @@ func collectNonTickMsgs(cmd tea.Cmd, timeout time.Duration) []tea.Msg {
 func TestCollapsiblePlayerBarAndMouseCoords(t *testing.T) {
 	s, _, eng, _ := newTestState()
 	defer s.Close()
-	s.Width, s.Height = 120, 36
+	s.Width, s.Height = 120, 38
 
 	if s.HasPlayerBar() {
 		t.Fatal("expected HasPlayerBar() to be false initially")
@@ -1428,5 +1428,117 @@ func TestV040ShortcutsVideoSponsorThemeChannelSubsChaptersLyrics(t *testing.T) {
 	}
 	if idx := lyrics.ActiveLineIndex(s.Lyrics.Synced, s.PlayerStatus.TimePos); idx != 1 {
 		t.Fatalf("ActiveLineIndex at 14s = %d, want 1", idx)
+	}
+}
+
+func TestApp_MouseHoverQualityModalAndLowercaseKeys(t *testing.T) {
+	cat := &catalog.FakeCatalog{
+		Feeds: map[model.Tab][]model.Video{
+			model.TabHome: {
+				{ID: "v0", Title: "Track Zero", Channel: "Ch0", Duration: "03:00"},
+				{ID: "v1", Title: "Track One", Channel: "Ch1", Duration: "04:00"},
+				{ID: "v2", Title: "Track Two", Channel: "Ch2", Duration: "05:00"},
+			},
+		},
+	}
+	eng := player.NewFakeEngine()
+	var savedQ []int
+	var savedAudio []bool
+	var mu sync.Mutex
+
+	s := NewState(Dependencies{
+		Catalog: cat,
+		Engine:  eng,
+		Store:   store.NewFakeStore(),
+		OnQualityChange: func(q int) error {
+			mu.Lock()
+			savedQ = append(savedQ, q)
+			mu.Unlock()
+			return nil
+		},
+		OnAudioOnlyChange: func(a bool) error {
+			mu.Lock()
+			savedAudio = append(savedAudio, a)
+			mu.Unlock()
+			return nil
+		},
+	})
+	defer s.Close()
+	s.Width, s.Height = 120, 38
+	s, _ = s.Update(FeedLoadedMsg{Tab: model.TabHome, Videos: cat.Feeds[model.TabHome]})
+
+	// 1. Mouse hover selects card 1 without starting playback, then single click plays it immediately.
+	col1X := s.mainOriginX() + s.gridCardWidth() + 4
+	s, cmd := s.Update(tea.MouseMsg{
+		X:      col1X,
+		Y:      7,
+		Action: tea.MouseActionMotion,
+	})
+	if cmd != nil {
+		t.Fatalf("expected nil cmd on hover motion, got non-nil")
+	}
+	if s.SelectedIdx != 1 || len(eng.Calls()) != 0 {
+		t.Fatalf("expected hover to select idx 1 without playing, got idx=%d calls=%v", s.SelectedIdx, eng.Calls())
+	}
+	s, cmd = s.Update(tea.MouseMsg{
+		X:      col1X,
+		Y:      7,
+		Button: tea.MouseButtonLeft,
+		Action: tea.MouseActionPress,
+	})
+	_ = collectNonTickMsgs(cmd, 100*time.Millisecond)
+	if len(eng.Calls()) == 0 || eng.Calls()[0].Video.ID != "v1" {
+		t.Fatalf("expected immediate Play(v1) on single click after hover, got calls=%+v", eng.Calls())
+	}
+
+	// 2. 'f' opens ShowQualityModal; selecting Solo Audio sets AudioOnly and SetPlaybackProfile; '360p Ahorro' sets 360.
+	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'f'}})
+	if !s.ShowQualityModal {
+		t.Fatal("expected ShowQualityModal=true after f key")
+	}
+	// Press '5' for Solo Audio (index 4).
+	s, cmd = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'5'}})
+	_ = collectNonTickMsgs(cmd, 150*time.Millisecond)
+	if s.ShowQualityModal || !s.AudioOnly || s.QualityLabel() != "Solo Audio" {
+		t.Fatalf("expected Solo Audio applied, modal=%v audio=%v label=%q", s.ShowQualityModal, s.AudioOnly, s.QualityLabel())
+	}
+	if !eng.AudioOnly() {
+		t.Fatal("expected FakeEngine AudioOnly=true via SetPlaybackProfile")
+	}
+	// Click [Calidad: Solo Audio ▾] or open modal via 'f' and click option 3 ("360p Ahorro").
+	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'f'}})
+	leftX, _, _, _, optStartY := s.QualityModalBounds()
+	s, cmd = s.Update(tea.MouseMsg{
+		X:      leftX + 4,
+		Y:      optStartY + 3,
+		Button: tea.MouseButtonLeft,
+		Action: tea.MouseActionPress,
+	})
+	_ = collectNonTickMsgs(cmd, 150*time.Millisecond)
+	if s.Quality != 360 || s.AudioOnly || s.QualityLabel() != "360p Ahorro" {
+		t.Fatalf("expected 360p Ahorro applied by click, q=%d audio=%v label=%q", s.Quality, s.AudioOnly, s.QualityLabel())
+	}
+
+	mu.Lock()
+	if !slices.Equal(savedQ, []int{720, 360}) || !slices.Equal(savedAudio, []bool{true, false}) {
+		mu.Unlock()
+		t.Fatalf("saved callbacks mismatch: q=%v audio=%v", savedQ, savedAudio)
+	}
+	mu.Unlock()
+
+	// 3. Lowercase 'b' toggles SponsorBlock, lowercase 'l' toggles Lyrics, and SwitchTab resets FocusMain.
+	s.Focus = FocusSidebar
+	s, _ = s.SwitchTab(model.TabMusic)
+	if s.Focus != FocusMain {
+		t.Fatalf("expected SwitchTab to reset Focus=FocusMain, got %v", s.Focus)
+	}
+	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'b'}})
+	if s.SponsorBlock {
+		t.Fatal("expected lowercase b to toggle SponsorBlock OFF")
+	}
+	s.PlayerStatus = player.Status{IsRunning: true, Title: "Track One"}
+	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
+	if !s.ShowLyrics {
+		t.Fatal("expected lowercase l to toggle ShowLyrics ON")
 	}
 }

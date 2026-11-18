@@ -7,10 +7,11 @@ PREFIX="${PREFIX:-$HOME/.local}"
 BINDIR="${BINDIR:-$PREFIX/bin}"
 LIBDIR="${LIBDIR:-$PREFIX/lib/yt}"
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-FILES=(yt yt-fmt yt-thumb-preview)
+LIBEXEC_FILES=(yt yt-fmt yt-thumb-preview)
+LEGACY_BINS=(yt yt-fmt yt-thumb-preview yt-tui ytx)
 
 if [ "${1:-}" = "--uninstall" ]; then
-    for f in "${FILES[@]}" iutui ytx; do rm -f "$BINDIR/$f"; done
+    for f in "${LEGACY_BINS[@]}" iutui uitui; do rm -f "$BINDIR/$f"; done
     rm -rf "$LIBDIR"
     echo "iutui removed from $BINDIR (config, cache and history were left untouched)"
     exit 0
@@ -23,7 +24,8 @@ fi
 
 echo "==> Installing iutui into $BINDIR"
 mkdir -p "$BINDIR" "$LIBDIR"
-for f in "${FILES[@]}"; do install -m 755 "$SRC/bin/$f" "$BINDIR/$f"; done
+for f in "${LEGACY_BINS[@]}"; do rm -f "$BINDIR/$f"; done
+for f in "${LIBEXEC_FILES[@]}"; do install -m 755 "$SRC/bin/$f" "$LIBDIR/$f"; done
 install -m 644 "$SRC"/lib/*.sh "$LIBDIR/"
 
 if command -v go >/dev/null 2>&1 && [ -d "$SRC/cmd/iutui" ]; then
@@ -32,6 +34,9 @@ if command -v go >/dev/null 2>&1 && [ -d "$SRC/cmd/iutui" ]; then
     install -m 755 "$SRC/bin/iutui" "$BINDIR/iutui"
 elif [ -x "$SRC/bin/iutui" ]; then
     install -m 755 "$SRC/bin/iutui" "$BINDIR/iutui"
+fi
+if [ -x "$BINDIR/iutui" ]; then
+    ln -sf iutui "$BINDIR/uitui"
 fi
 
 IUTUI_CONFIG_DEST="${XDG_CONFIG_HOME:-$HOME/.config}/iutui"
