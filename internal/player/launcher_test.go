@@ -485,3 +485,57 @@ func TestStartMPVProcess(t *testing.T) {
 		}
 	})
 }
+
+func TestBuildMPVArgs_PerFileOptionScoping(t *testing.T) {
+	t.Run("scopes title, startPos, startPaused, and audioFile inside --{ ... --}", func(t *testing.T) {
+		url := "https://www.youtube.com/watch?v=abc123"
+		got := BuildMPVArgs(LaunchOpts{
+			Mode:        "window",
+			URL:         url,
+			Title:       "Song One",
+			StartPos:    24.5,
+			StartPaused: true,
+			AudioFile:   "https://cdn.example.com/audio.m4a",
+		})
+
+		openIdx := slices.Index(got, "--{")
+		closeIdx := slices.Index(got, "--}")
+		if openIdx < 0 || closeIdx <= openIdx+1 {
+			t.Fatalf("expected --{ <url> per-file-args --}, got %v", got)
+		}
+		if got[openIdx+1] != url {
+			t.Fatalf("expected URL immediately after --{, got %v", got[openIdx:closeIdx+1])
+		}
+
+		group := got[openIdx+1 : closeIdx]
+		for _, want := range []string{
+			"--force-media-title=Song One",
+			"--start=24.5",
+			"--pause=yes",
+			"--audio-file=https://cdn.example.com/audio.m4a",
+		} {
+			if !slices.Contains(group, want) {
+				t.Errorf("per-file group %v missing %q", group, want)
+			}
+		}
+		if slices.Contains(got[:openIdx], "--") {
+			t.Errorf("unexpected -- before --{ in %v", got)
+		}
+	})
+
+	t.Run("dash-prefixed URL preserves -- guard instead of --{", func(t *testing.T) {
+		got := BuildMPVArgs(LaunchOpts{
+			Mode:     "window",
+			URL:      "--evil-flag",
+			Title:    "Guard Test",
+			StartPos: 12.0,
+		})
+		if slices.Contains(got, "--{") || slices.Contains(got, "--}") {
+			t.Fatalf("expected dash-prefixed URL to avoid --{ ... --}, got %v", got)
+		}
+		sepIdx := slices.Index(got, "--")
+		if sepIdx < 0 || sepIdx+1 >= len(got) || got[sepIdx+1] != "--evil-flag" {
+			t.Fatalf("expected -- before dash-prefixed URL, got %v", got)
+		}
+	})
+}

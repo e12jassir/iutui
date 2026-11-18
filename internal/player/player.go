@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/e12jassir/iutui/internal/model"
+	"github.com/e12jassir/iutui/internal/platform"
 )
 
 // Status represents the current mpv playback state.
@@ -67,6 +68,12 @@ func resolveYtBin() string {
 // FindSocket locates the active mpv.sock.
 func FindSocket() string {
 	if sock := os.Getenv("YT_SOCK"); sock != "" {
+		if _, err := os.Stat(sock); err == nil {
+			return sock
+		}
+	}
+
+	if sock := platform.ResolvePaths().SocketPath; sock != "" {
 		if _, err := os.Stat(sock); err == nil {
 			return sock
 		}

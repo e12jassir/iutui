@@ -29,7 +29,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var version = "0.4.4"
+var version = "0.4.5"
 
 type nativeThumbs struct {
 	backend thumbs.Backend

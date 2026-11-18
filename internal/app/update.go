@@ -1084,6 +1084,7 @@ func (s *State) playVideo(v model.Video, mode string) (*State, tea.Cmd) {
 	s.PlayLoadingTitle = v.Title
 	s.PlayerStatus.Title = v.Title
 	s.PlayerStatus.TimePos = 0
+	s.PlayerStatus.Duration = 0
 	s.RegisterUserActivity()
 	s.lastTrackTitle = v.Title
 

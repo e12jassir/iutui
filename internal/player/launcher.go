@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"syscall"
 )
 
@@ -53,8 +54,9 @@ func BuildMPVArgs(opts LaunchOpts) []string {
 	if opts.Volume > 0 {
 		args = append(args, fmt.Sprintf("--volume=%d", opts.Volume))
 	}
+	var perFileArgs []string
 	if opts.Title != "" {
-		args = append(args, "--force-media-title="+opts.Title)
+		perFileArgs = append(perFileArgs, "--force-media-title="+opts.Title)
 	}
 
 	winFlag := "--force-window=yes"
@@ -87,10 +89,10 @@ func BuildMPVArgs(opts LaunchOpts) []string {
 	}
 
 	if opts.StartPos > 0.5 {
-		args = append(args, fmt.Sprintf("--start=%.1f", opts.StartPos))
+		perFileArgs = append(perFileArgs, fmt.Sprintf("--start=%.1f", opts.StartPos))
 	}
 	if opts.StartPaused {
-		args = append(args, "--pause=yes")
+		perFileArgs = append(perFileArgs, "--pause=yes")
 	}
 
 	playlistOpt := "no-playlist="
@@ -109,11 +111,20 @@ func BuildMPVArgs(opts LaunchOpts) []string {
 	}
 
 	if opts.AudioFile != "" {
-		args = append(args, "--audio-file="+opts.AudioFile)
+		perFileArgs = append(perFileArgs, "--audio-file="+opts.AudioFile)
 	}
 
-	if opts.URL != "" {
-		args = append(args, "--", opts.URL)
+	// Scope per-file launch options inside --{ ... --} so start offsets,
+	// pause state, titles, and split audio never leak to subsequent tracks.
+	if opts.URL != "" && !strings.HasPrefix(opts.URL, "-") && len(perFileArgs) > 0 {
+		args = append(args, "--{", opts.URL)
+		args = append(args, perFileArgs...)
+		args = append(args, "--}")
+	} else {
+		args = append(args, perFileArgs...)
+		if opts.URL != "" {
+			args = append(args, "--", opts.URL)
+		}
 	}
 
 	return args

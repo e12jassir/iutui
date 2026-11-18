@@ -1060,17 +1060,6 @@ func (c *IPCClient) playWithResume(ctx context.Context, v model.Video, mode stri
 	c.lastMode = mode
 	c.launchMu.Unlock()
 
-	if v.Title != "" {
-		c.statusMu.Lock()
-		c.status.Title = v.Title
-		c.status.TimePos = startPos
-		st := c.status
-		c.statusMu.Unlock()
-		if st.IsRunning {
-			c.broadcast(st)
-		}
-	}
-
 	c.playMu.Lock()
 	seq := c.playSeq.Add(1)
 	prevCancel := c.playCancel
@@ -1093,6 +1082,20 @@ func (c *IPCClient) playWithResume(ctx context.Context, v model.Video, mode stri
 	skipReconnect, ok := c.cutActivePlayback(waitCtx, seq)
 	if !ok {
 		return nil
+	}
+
+	if v.Title != "" {
+		c.statusMu.Lock()
+		c.status.Title = v.Title
+		c.status.TimePos = startPos
+		if startPos <= 0.5 {
+			c.status.Duration = 0
+		}
+		st := c.status
+		c.statusMu.Unlock()
+		if st.IsRunning {
+			c.broadcast(st)
+		}
 	}
 
 	plan := c.resolvePlayTarget(waitCtx, v, mode)
@@ -1331,19 +1334,20 @@ func (c *IPCClient) tryPlayViaIPC(waitCtx context.Context, seq uint64, v model.V
 	if c.hasManagedProc() && c.isProcAudioOnly() != wantAudioOnly {
 		return false
 	}
+	_, _ = c.sendCommand(waitCtx, "set_property", "start", "none")
 	_, _ = c.sendCommand(waitCtx, "set_property", "vid", wantVid)
 	_, _ = c.sendCommand(waitCtx, "set_property", "ytdl-format", formatSelectorForVideo(quality, wantAudioOnly, v.IsLive))
 	_, _ = c.sendCommand(waitCtx, "set_property", "audio-files", []string{})
-	if c.hasManagedProc() {
-		_, _ = c.sendCommand(waitCtx, "set_property", "force-media-title", "")
-	}
+	_, _ = c.sendCommand(waitCtx, "set_property", "force-media-title", "")
 	if !c.isCurrentPlay(seq) || c.ctx.Err() != nil {
 		return true
 	}
 
 	var err error
-	perFileOpts := map[string]any{}
-	if v.Title != "" && c.hasManagedProc() {
+	perFileOpts := map[string]any{
+		"start": "none",
+	}
+	if v.Title != "" {
 		perFileOpts["force-media-title"] = v.Title
 	}
 	if plan.audioFile != "" {
@@ -1356,10 +1360,8 @@ func (c *IPCClient) tryPlayViaIPC(waitCtx context.Context, seq uint64, v model.V
 			_, err = c.sendCommand(waitCtx, "loadfile", plan.fallbackURL, "replace")
 		}
 	} else {
-		if len(perFileOpts) > 0 {
-			_, err = c.sendCommand(waitCtx, "loadfile", plan.url, "replace", -1, perFileOpts)
-		}
-		if (len(perFileOpts) == 0 || err != nil) && c.isCurrentPlay(seq) && c.ctx.Err() == nil && c.isConnected() {
+		_, err = c.sendCommand(waitCtx, "loadfile", plan.url, "replace", -1, perFileOpts)
+		if err != nil && c.isCurrentPlay(seq) && c.ctx.Err() == nil && c.isConnected() {
 			_, err = c.sendCommand(waitCtx, "loadfile", plan.url, "replace")
 		}
 		if err != nil && plan.url != plan.fallbackURL && c.isCurrentPlay(seq) && c.ctx.Err() == nil && c.isConnected() {
@@ -1374,16 +1376,15 @@ func (c *IPCClient) tryPlayViaIPC(waitCtx context.Context, seq uint64, v model.V
 		return false
 	}
 
-	if v.Title != "" && !c.hasManagedProc() {
-		_, _ = c.sendCommand(waitCtx, "set_property", "force-media-title", v.Title)
-	}
+	c.statusMu.Lock()
 	if v.Title != "" {
-		c.statusMu.Lock()
 		c.status.Title = v.Title
-		st := c.status
-		c.statusMu.Unlock()
-		c.broadcast(st)
 	}
+	c.status.TimePos = 0
+	c.status.Duration = 0
+	st := c.status
+	c.statusMu.Unlock()
+	c.broadcast(st)
 	if c.isCurrentPlay(seq) {
 		_, _ = c.sendCommand(waitCtx, "set_property", "pause", false)
 	}

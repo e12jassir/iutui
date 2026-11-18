@@ -1845,3 +1845,20 @@ func TestApp_NextPrevSeekBarOptimisticSeekAndLyricsWheel(t *testing.T) {
 		t.Fatalf("wheel up over lyrics panel got scroll=%d idx=%d, want scroll=0 idx=%d", s.LyricsScroll, s.SelectedIdx, selBefore)
 	}
 }
+
+func TestPlayVideoResetsTimePosAndDuration(t *testing.T) {
+	s, _, _, _ := newTestState()
+	s.PlayerStatus = player.Status{
+		IsRunning: true,
+		Title:     "Old Song",
+		TimePos:   25.0,
+		Duration:  210.0,
+	}
+
+	var cmd tea.Cmd
+	s, cmd = s.playVideo(model.Video{ID: "new01", Title: "New Song", Channel: "Chan"}, "auto")
+	if s.PlayerStatus.Title != "New Song" || s.PlayerStatus.TimePos != 0 || s.PlayerStatus.Duration != 0 {
+		t.Fatalf("expected reset Title/TimePos/Duration for new track, got %+v", s.PlayerStatus)
+	}
+	_ = collectNonTickMsgs(cmd, 100*time.Millisecond)
+}

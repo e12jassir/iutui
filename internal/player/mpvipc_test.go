@@ -2456,3 +2456,86 @@ func TestIPCClient_TryPlayUpdatesYtdlFormatOnQualityChange(t *testing.T) {
 		t.Fatalf("expected set_property ytdl-format=%q before loadfile, cmds=%v", wantFmt, gotCmds)
 	}
 }
+
+func TestIPCClient_PlayResetsGlobalStartAndPassesPerFileStartNone(t *testing.T) {
+	var (
+		mu   sync.Mutex
+		cmds [][]any
+	)
+	srv := startTestMPVServer(t, func(conn net.Conn, cmd []any, reqID int64) {
+		cp := make([]any, len(cmd))
+		copy(cp, cmd)
+		mu.Lock()
+		cmds = append(cmds, cp)
+		mu.Unlock()
+		_ = json.NewEncoder(conn).Encode(map[string]any{
+			"error":      "success",
+			"request_id": reqID,
+		})
+	})
+
+	client := NewIPCClient(
+		WithSocketPath(srv.sockPath),
+		WithCommandTimeout(2*time.Second),
+		WithLaunchDefaults(LaunchOpts{
+			SocketPath: srv.sockPath,
+			Mode:       "window",
+			Quality:    720,
+		}),
+	)
+	defer client.Close()
+
+	// Seed stale playback metrics as if an outgoing track was at 00:25 / 03:00.
+	client.applyPropertyChange("time-pos", 25.0)
+	client.applyPropertyChange("duration", 180.0)
+
+	if client.hasManagedProc() {
+		t.Fatal("expected reattached test client without managed proc")
+	}
+
+	if err := client.Play(context.Background(), model.Video{ID: "reset123456", Title: "Fresh Song"}, "window"); err != nil {
+		t.Fatalf("Play failed: %v", err)
+	}
+
+	mu.Lock()
+	gotCmds := slices.Clone(cmds)
+	mu.Unlock()
+
+	resetStartIdx, clearTitleIdx, loadIdx := -1, -1, -1
+	var loadOpts map[string]any
+	for i, c := range gotCmds {
+		if len(c) >= 3 && fmt.Sprint(c[0]) == "set_property" && fmt.Sprint(c[1]) == "start" && fmt.Sprint(c[2]) == "none" {
+			if resetStartIdx < 0 {
+				resetStartIdx = i
+			}
+		}
+		if len(c) >= 3 && fmt.Sprint(c[0]) == "set_property" && fmt.Sprint(c[1]) == "force-media-title" {
+			val := fmt.Sprint(c[2])
+			if val == "" && clearTitleIdx < 0 {
+				clearTitleIdx = i
+			}
+			if val == "Fresh Song" {
+				t.Fatalf("unexpected global set_property force-media-title=%q in %v", val, gotCmds)
+			}
+		}
+		if len(c) >= 5 && fmt.Sprint(c[0]) == "loadfile" && strings.Contains(fmt.Sprint(c[1]), "reset123456") {
+			loadIdx = i
+			loadOpts, _ = c[4].(map[string]any)
+		}
+	}
+
+	if resetStartIdx < 0 || loadIdx <= resetStartIdx {
+		t.Fatalf("expected set_property start none before loadfile, cmds=%v", gotCmds)
+	}
+	if clearTitleIdx < 0 || loadIdx <= clearTitleIdx {
+		t.Fatalf("expected set_property force-media-title \"\" before loadfile, cmds=%v", gotCmds)
+	}
+	if loadOpts == nil || fmt.Sprint(loadOpts["start"]) != "none" || fmt.Sprint(loadOpts["force-media-title"]) != "Fresh Song" {
+		t.Fatalf("expected loadfile per-file opts start=none & force-media-title='Fresh Song', got %#v", loadOpts)
+	}
+
+	st := client.Status()
+	if st.Title != "Fresh Song" || st.TimePos != 0 || st.Duration != 0 {
+		t.Fatalf("expected clean reset status for Fresh Song, got %+v", st)
+	}
+}
