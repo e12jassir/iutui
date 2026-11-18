@@ -170,7 +170,7 @@ func (s *State) AdjustSetting(idx, delta int) (*State, tea.Cmd) {
 		if nextQ > 0 {
 			lbl = fmt.Sprintf("%dp", nextQ)
 		}
-		return s.applyPlaybackProfile(nextQ, s.AudioOnly, lbl)
+		return s.applyPlaybackProfile(nextQ, false, lbl)
 
 	case 3: // Default playback mode (window, audio, pip, fs)
 		modes := []string{"window", "audio", "pip", "fs"}

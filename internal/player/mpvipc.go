@@ -582,6 +582,19 @@ func formatSelector(quality int, audioOnly bool) string {
 	return "bestvideo+bestaudio/best"
 }
 
+func formatSelectorForVideo(quality int, audioOnly, isLive bool) string {
+	if audioOnly {
+		return "bestaudio/best"
+	}
+	if isLive {
+		if quality <= 0 {
+			return "best/bestvideo+bestaudio"
+		}
+		return fmt.Sprintf("best[height<=%d]/bestvideo[height<=%d]+bestaudio/best", quality, quality)
+	}
+	return formatSelector(quality, false)
+}
+
 // SetQuality updates the preferred max vertical resolution (0 = best available)
 // for future launches, clears stale stream prefetch cache, and updates a live mpv.
 func (c *IPCClient) SetQuality(ctx context.Context, quality int) {
@@ -622,7 +635,7 @@ func (c *IPCClient) SetPlaybackProfile(ctx context.Context, quality int, audioOn
 
 	if !c.hasManagedProc() {
 		if c.isConnected() {
-			_, _ = c.sendCommand(ctx, "set_property", "ytdl-format", formatSelector(quality, audioOnly))
+			_, _ = c.sendCommand(ctx, "set_property", "ytdl-format", formatSelectorForVideo(quality, audioOnly, lastVid.IsLive))
 			wantVid := "auto"
 			if audioOnly {
 				wantVid = "no"
@@ -635,8 +648,21 @@ func (c *IPCClient) SetPlaybackProfile(ctx context.Context, quality int, audioOn
 
 	st := c.Status()
 	if lastVid.ID == "" {
+		if c.isConnected() {
+			_, _ = c.sendCommand(ctx, "set_property", "ytdl-format", formatSelector(quality, audioOnly))
+			wantVid := "auto"
+			if audioOnly {
+				wantVid = "no"
+			}
+			_, err := c.sendCommand(ctx, "set_property", "vid", wantVid)
+			return err
+		}
 		return nil
 	}
+	if conn := c.getConn(); conn != nil {
+		c.handleDisconnect(conn)
+	}
+	c.killManagedMPV()
 	mode := "video"
 	if audioOnly {
 		mode = "audio"
@@ -1281,6 +1307,7 @@ func (c *IPCClient) tryPlayViaIPC(waitCtx context.Context, seq uint64, v model.V
 	}
 	c.launchMu.RLock()
 	audioOnly := c.launchDefaults.AudioOnly
+	quality := c.launchDefaults.Quality
 	c.launchMu.RUnlock()
 
 	wantAudioOnly := false
@@ -1305,6 +1332,7 @@ func (c *IPCClient) tryPlayViaIPC(waitCtx context.Context, seq uint64, v model.V
 		return false
 	}
 	_, _ = c.sendCommand(waitCtx, "set_property", "vid", wantVid)
+	_, _ = c.sendCommand(waitCtx, "set_property", "ytdl-format", formatSelectorForVideo(quality, wantAudioOnly, v.IsLive))
 	_, _ = c.sendCommand(waitCtx, "set_property", "audio-files", []string{})
 	if c.hasManagedProc() {
 		_, _ = c.sendCommand(waitCtx, "set_property", "force-media-title", "")

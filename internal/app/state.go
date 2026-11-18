@@ -340,6 +340,87 @@ type streamPrefetcher interface {
 	Prefetch(v model.Video)
 }
 
+// BodyHeight returns the vertical height in rows available for cards/rows in the main panel.
+func (s *State) BodyHeight() int {
+	if s.Height <= 0 {
+		return 0
+	}
+	if s.HasPlayerBar() {
+		return max(1, s.Height-11)
+	}
+	return max(1, s.Height-6)
+}
+
+// VisibleGridRows returns the number of complete card rows visible in the home grid.
+func (s *State) VisibleGridRows() int {
+	bh := s.BodyHeight()
+	if bh <= 0 {
+		return 0
+	}
+	return max(1, bh/s.gridCardHeight())
+}
+
+// VisibleListRows returns the number of complete rows visible in search/channel views.
+func (s *State) VisibleListRows() int {
+	bh := s.BodyHeight()
+	if bh <= 0 {
+		return 0
+	}
+	return max(1, bh/searchRowH)
+}
+
+func (s *State) syncScrollToSelection() {
+	if s.Height <= 0 {
+		return
+	}
+	switch s.View {
+	case ViewSearch:
+		vis := s.VisibleListRows()
+		if vis <= 0 {
+			return
+		}
+		if s.ResultIdx < s.ResultScroll {
+			s.ResultScroll = s.ResultIdx
+		} else if s.ResultIdx >= s.ResultScroll+vis {
+			s.ResultScroll = s.ResultIdx - vis + 1
+		}
+		if s.ResultScroll < 0 {
+			s.ResultScroll = 0
+		}
+	case ViewChannel:
+		vis := s.VisibleListRows()
+		if vis <= 0 {
+			return
+		}
+		if s.ChannelIdx < s.ChannelScroll {
+			s.ChannelScroll = s.ChannelIdx
+		} else if s.ChannelIdx >= s.ChannelScroll+vis {
+			s.ChannelScroll = s.ChannelIdx - vis + 1
+		}
+		if s.ChannelScroll < 0 {
+			s.ChannelScroll = 0
+		}
+	default:
+		cols := s.GridCols()
+		if cols <= 0 {
+			cols = 1
+		}
+		vis := s.VisibleGridRows()
+		if vis <= 0 {
+			return
+		}
+		selRow := s.SelectedIdx / cols
+		if selRow < s.ScrollOffset {
+			s.ScrollOffset = selRow
+		} else if selRow >= s.ScrollOffset+vis {
+			s.ScrollOffset = selRow - vis + 1
+		}
+		if s.ScrollOffset < 0 {
+			s.ScrollOffset = 0
+		}
+	}
+}
+
 // SetSelection updates the active cursor clamped to bounds.
 func (s *State) SetSelection(idx int) {
 	items := s.VisibleItems()
@@ -347,10 +428,13 @@ func (s *State) SetSelection(idx int) {
 		switch s.View {
 		case ViewSearch:
 			s.ResultIdx = 0
+			s.ResultScroll = 0
 		case ViewChannel:
 			s.ChannelIdx = 0
+			s.ChannelScroll = 0
 		default:
 			s.SelectedIdx = 0
+			s.ScrollOffset = 0
 		}
 		return
 	}
@@ -368,6 +452,7 @@ func (s *State) SetSelection(idx int) {
 	default:
 		s.SelectedIdx = idx
 	}
+	s.syncScrollToSelection()
 	if p, ok := s.Deps.Engine.(streamPrefetcher); ok {
 		p.Prefetch(items[idx])
 		if idx+1 < len(items) {

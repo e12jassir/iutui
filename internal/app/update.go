@@ -152,6 +152,7 @@ func (s *State) Update(msg tea.Msg) (*State, tea.Cmd) {
 		s.Width = msg.Width
 		s.Height = msg.Height
 		s.Ready = true
+		s.syncScrollToSelection()
 		return s, nil
 
 	case FeedLoadedMsg:
@@ -293,6 +294,11 @@ func (s *State) Update(msg tea.Msg) (*State, tea.Cmd) {
 			return s, s.toastCmd(fmt.Sprintf("Error alternando video: %v", msg.Err))
 		}
 		s.AudioOnly = !msg.VideoOn
+		if s.AudioOnly {
+			s.DefaultMode = "audio"
+		} else if s.DefaultMode == "audio" || s.DefaultMode == "" {
+			s.DefaultMode = "window"
+		}
 		var saveCmd tea.Cmd
 		if s.Deps.OnAudioOnlyChange != nil {
 			fn := s.Deps.OnAudioOnlyChange
@@ -868,11 +874,13 @@ func (s *State) CycleChip(delta int) *State {
 		n := len(SearchChips)
 		s.SearchChip = (s.SearchChip + delta + n) % n
 		s.ResultIdx = 0
+		s.ResultScroll = 0
 		return s
 	}
 	n := len(HomeChips)
 	s.HomeChip = (s.HomeChip + delta + n) % n
 	s.SelectedIdx = 0
+	s.ScrollOffset = 0
 	return s
 }
 
@@ -1165,6 +1173,11 @@ func (s *State) ApplyQualityOption(idx int) (*State, tea.Cmd) {
 func (s *State) applyPlaybackProfile(quality int, audioOnly bool, label string) (*State, tea.Cmd) {
 	s.Quality = quality
 	s.AudioOnly = audioOnly
+	if audioOnly {
+		s.DefaultMode = "audio"
+	} else if s.DefaultMode == "audio" || s.DefaultMode == "" {
+		s.DefaultMode = "window"
+	}
 
 	var cmds []tea.Cmd
 	if label == "" {
@@ -1182,23 +1195,31 @@ func (s *State) applyPlaybackProfile(quality int, audioOnly bool, label string) 
 	}
 	cmds = append(cmds, s.toastCmd(toastPrefix+label))
 
+	selVid, hasSel := s.SelectedVideo()
+	prefetcher, hasPrefetch := s.Deps.Engine.(streamPrefetcher)
+
 	if ps, ok := s.Deps.Engine.(playbackProfileSetter); ok {
 		q := quality
 		ao := audioOnly
 		cmds = append(cmds, func() tea.Msg {
 			if err := ps.SetPlaybackProfile(s.appCtx, q, ao); err != nil {
+				if hasSel && hasPrefetch {
+					prefetcher.Prefetch(selVid)
+				}
 				return ActionResultMsg{Err: err}
+			}
+			if hasSel && hasPrefetch {
+				prefetcher.Prefetch(selVid)
 			}
 			return nil
 		})
 	} else if qs, ok := s.Deps.Engine.(qualitySetter); ok {
 		qs.SetQuality(s.appCtx, quality)
-	}
-
-	if v, ok := s.SelectedVideo(); ok {
-		if p, ok := s.Deps.Engine.(streamPrefetcher); ok {
-			p.Prefetch(v)
+		if hasSel && hasPrefetch {
+			prefetcher.Prefetch(selVid)
 		}
+	} else if hasSel && hasPrefetch {
+		prefetcher.Prefetch(selVid)
 	}
 
 	if s.Deps.OnQualityChange != nil {

@@ -110,7 +110,7 @@ play_video() { # mode id url title channel dur
     if [ "${#COOKIE_ARGS[@]}" -ge 2 ] && [ "${COOKIE_ARGS[0]}" = "--cookies" ]; then
         mo+=(--ytdl-raw-options-append="cookies=${COOKIE_ARGS[1]}")
     else
-        mo+=(--ytdl-raw-options-append="extractor-args=youtube:player_client=android,web")
+        mo+=(--ytdl-raw-options-append="extractor-args=youtube:player_client=visionos,web")
     fi
     case $mode in
         pip)   mo+=(--no-terminal --no-fs --ontop --title="Picture-in-Picture" --geometry=30%x30%-20-20 --autofit=28% --force-window=immediate) ;;

@@ -113,7 +113,7 @@ func (s *State) handleMouseMotion(x, y int) *State {
 		}
 	}
 
-	if idx, ok := s.videoIndexAt(x, y); ok {
+	if idx, ok := s.videoIndexAt(x, y, false); ok {
 		s.Focus = FocusMain
 		s.HoverSelection(idx)
 	}
@@ -315,7 +315,7 @@ func (s *State) handleLeftClick(x, y int) (*State, tea.Cmd) {
 	}
 
 	// 5. Main content inside panel (y >= 5)
-	if idx, ok := s.videoIndexAt(x, y); ok {
+	if idx, ok := s.videoIndexAt(x, y, true); ok {
 		if idx == s.ActiveListIndex() {
 			return s.PlaySelected("auto")
 		}
@@ -324,7 +324,7 @@ func (s *State) handleLeftClick(x, y int) (*State, tea.Cmd) {
 	return s, nil
 }
 
-func (s *State) videoIndexAt(x, y int) (int, bool) {
+func (s *State) videoIndexAt(x, y int, allowPartialBottom bool) (int, bool) {
 	if y < 5 {
 		return 0, false
 	}
@@ -349,15 +349,12 @@ func (s *State) videoIndexAt(x, y int) (int, bool) {
 
 	if s.View == ViewSearch || s.View == ViewChannel {
 		visibleCount := max(1, bodyH/searchRowH)
-		curIdx := s.ActiveListIndex()
-		startIdx := s.ActiveListScroll()
-		if curIdx < startIdx {
-			startIdx = curIdx
+		rowOffset := relY / searchRowH
+		if rowOffset < 0 || (!allowPartialBottom && rowOffset >= visibleCount) {
+			return 0, false
 		}
-		if curIdx >= startIdx+visibleCount {
-			startIdx = curIdx - visibleCount + 1
-		}
-		idx := startIdx + relY/searchRowH
+		startIdx := max(0, s.ActiveListScroll())
+		idx := startIdx + rowOffset
 		if idx >= 0 && idx < len(items) {
 			return idx, true
 		}
@@ -372,19 +369,12 @@ func (s *State) videoIndexAt(x, y int) (int, bool) {
 	}
 	cH := s.gridCardHeight()
 	visibleRows := max(1, bodyH/cH)
-	selRow := s.SelectedIdx / cols
-	startRow := s.ScrollOffset
-	if selRow < startRow {
-		startRow = selRow
+	rowOffset := relY / cH
+	if rowOffset < 0 || (!allowPartialBottom && rowOffset >= visibleRows) {
+		return 0, false
 	}
-	if selRow >= startRow+visibleRows {
-		startRow = selRow - visibleRows + 1
-	}
-	if startRow < 0 {
-		startRow = 0
-	}
-
-	row := startRow + relY/cH
+	startRow := max(0, s.ScrollOffset)
+	row := startRow + rowOffset
 	idx := row*cols + col
 	if idx >= 0 && idx < len(items) {
 		return idx, true

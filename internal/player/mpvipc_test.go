@@ -2404,3 +2404,55 @@ func TestFakeEngine_SponsorBlockVideoModeChaptersAndSeekAbsolute(t *testing.T) {
 		t.Fatalf("FakeEngine recorded calls = %v, want %v", methods, wantMethods)
 	}
 }
+
+func TestIPCClient_TryPlayUpdatesYtdlFormatOnQualityChange(t *testing.T) {
+	var (
+		mu   sync.Mutex
+		cmds [][]any
+	)
+	srv := startTestMPVServer(t, func(conn net.Conn, cmd []any, reqID int64) {
+		cp := make([]any, len(cmd))
+		copy(cp, cmd)
+		mu.Lock()
+		cmds = append(cmds, cp)
+		mu.Unlock()
+		_ = json.NewEncoder(conn).Encode(map[string]any{
+			"error":      "success",
+			"request_id": reqID,
+		})
+	})
+
+	client := NewIPCClient(
+		WithSocketPath(srv.sockPath),
+		WithCommandTimeout(2*time.Second),
+		WithLaunchDefaults(LaunchOpts{
+			SocketPath: srv.sockPath,
+			Mode:       "window",
+			Quality:    1080,
+		}),
+	)
+	defer client.Close()
+
+	client.SetQuality(context.Background(), 360)
+	if err := client.Play(context.Background(), model.Video{ID: "vid360test1", Title: "Low Data Video"}, "window"); err != nil {
+		t.Fatalf("Play failed: %v", err)
+	}
+
+	mu.Lock()
+	gotCmds := slices.Clone(cmds)
+	mu.Unlock()
+
+	wantFmt := "bestvideo[height<=360]+bestaudio/best[height<=360]/best"
+	fmtIdx, loadIdx := -1, -1
+	for i, c := range gotCmds {
+		if len(c) >= 3 && fmt.Sprint(c[0]) == "set_property" && fmt.Sprint(c[1]) == "ytdl-format" && fmt.Sprint(c[2]) == wantFmt {
+			fmtIdx = i
+		}
+		if len(c) >= 2 && fmt.Sprint(c[0]) == "loadfile" && strings.Contains(fmt.Sprint(c[1]), "vid360test1") {
+			loadIdx = i
+		}
+	}
+	if fmtIdx < 0 || loadIdx <= fmtIdx {
+		t.Fatalf("expected set_property ytdl-format=%q before loadfile, cmds=%v", wantFmt, gotCmds)
+	}
+}

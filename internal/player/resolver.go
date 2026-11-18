@@ -349,7 +349,7 @@ func runResolve(ctx context.Context, bin, videoID, fmtStr, cookieJar string) (Re
 	if cookieJar != "" {
 		args = append(args, "--cookies", cookieJar)
 	} else {
-		args = append(args, "--extractor-args", "youtube:player_client=android")
+		args = append(args, "--extractor-args", "youtube:player_client=visionos")
 	}
 	args = append(args, "-f", fmtStr, "-g", target)
 

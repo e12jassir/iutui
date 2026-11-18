@@ -1628,3 +1628,122 @@ func TestApp_SettingsStudioLiveChipAndStaleTitleGuard(t *testing.T) {
 		t.Fatal("expected click on Autoplay row to toggle Autoplay OFF")
 	}
 }
+
+type profileOrderSpy struct {
+	*player.FakeEngine
+	mu     sync.Mutex
+	events []string
+}
+
+func (e *profileOrderSpy) SetPlaybackProfile(ctx context.Context, quality int, audioOnly bool) error {
+	e.mu.Lock()
+	e.events = append(e.events, fmt.Sprintf("SetPlaybackProfile:%d:%v", quality, audioOnly))
+	e.mu.Unlock()
+	return e.FakeEngine.SetPlaybackProfile(ctx, quality, audioOnly)
+}
+
+func (e *profileOrderSpy) Prefetch(v model.Video) {
+	e.mu.Lock()
+	e.events = append(e.events, "Prefetch:"+v.ID)
+	e.mu.Unlock()
+}
+
+func (e *profileOrderSpy) snapshotEvents() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]string(nil), e.events...)
+}
+
+func TestApp_MouseHoverDoesNotScrollAndSettingsQualityClearsAudioOnly(t *testing.T) {
+	videos := make([]model.Video, 12)
+	for i := range videos {
+		videos[i] = model.Video{
+			ID:       fmt.Sprintf("vid%02d", i),
+			Title:    fmt.Sprintf("Track %02d", i),
+			Channel:  "Channel",
+			Duration: "03:30",
+		}
+	}
+	cat := &catalog.FakeCatalog{
+		Feeds: map[model.Tab][]model.Video{model.TabHome: videos},
+	}
+	spy := &profileOrderSpy{FakeEngine: player.NewFakeEngine()}
+	s := NewState(Dependencies{
+		Catalog:            cat,
+		Engine:             spy,
+		Store:              store.NewFakeStore(),
+		InitialQuality:     1080,
+		InitialDefaultMode: "audio",
+		InitialAudioOnly:   true,
+	})
+	defer s.Close()
+
+	// Size 120x38 with no player bar -> bodyH=32, gridCardHeight=15 => 2 full visible rows
+	// (y=5..19 and y=20..34), with row 2 partially visible at y=35..36.
+	s, _ = s.Update(tea.WindowSizeMsg{Width: 120, Height: 38})
+	s, _ = s.Update(FeedLoadedMsg{Tab: model.TabHome, Videos: videos})
+
+	if vis := s.VisibleGridRows(); vis != 2 {
+		t.Fatalf("VisibleGridRows = %d, want 2 at 120x38", vis)
+	}
+
+	// Hovering over the full visible rows and moving down into the partial bottom row must NEVER scroll.
+	col0X := s.mainOriginX() + 2
+	col1X := s.mainOriginX() + s.gridCardWidth() + 4
+	s, _ = s.Update(tea.MouseMsg{X: col1X, Y: 7, Action: tea.MouseActionMotion})
+	if s.SelectedIdx != 1 || s.ScrollOffset != 0 {
+		t.Fatalf("after hover row 0 col 1: idx=%d scroll=%d, want (1, 0)", s.SelectedIdx, s.ScrollOffset)
+	}
+	s, _ = s.Update(tea.MouseMsg{X: col0X, Y: 22, Action: tea.MouseActionMotion})
+	if s.SelectedIdx != s.GridCols() || s.ScrollOffset != 0 {
+		t.Fatalf("after hover row 1 col 0: idx=%d scroll=%d, want (%d, 0)", s.SelectedIdx, s.ScrollOffset, s.GridCols())
+	}
+	for y := 34; y <= 37; y++ {
+		s, _ = s.Update(tea.MouseMsg{X: col0X, Y: y, Action: tea.MouseActionMotion})
+		if s.ScrollOffset != 0 {
+			t.Fatalf("mouse motion at y=%d mutated ScrollOffset to %d, want 0", y, s.ScrollOffset)
+		}
+		if s.SelectedIdx >= 2*s.GridCols() {
+			t.Fatalf("mouse motion into partial row y=%d leaked SelectedIdx=%d across viewport boundary", y, s.SelectedIdx)
+		}
+	}
+
+	// Explicit WheelDown scrolls forward by one grid row, and subsequent hovers do not change ScrollOffset.
+	s, _ = s.Update(tea.MouseMsg{X: col0X, Y: 22, Button: tea.MouseButtonWheelDown})
+	if s.ScrollOffset != 1 {
+		t.Fatalf("ScrollOffset after WheelDown = %d, want 1", s.ScrollOffset)
+	}
+	s, _ = s.Update(tea.MouseMsg{X: col1X, Y: 7, Action: tea.MouseActionMotion})
+	if s.ScrollOffset != 1 || s.SelectedIdx != s.GridCols()+1 {
+		t.Fatalf("hover after WheelDown = (idx=%d, scroll=%d), want (idx=%d, scroll=1)",
+			s.SelectedIdx, s.ScrollOffset, s.GridCols()+1)
+	}
+
+	// Adjusting "Resolución máxima" (row 2) in Settings clears AudioOnly, switches DefaultMode to window,
+	// and executes SetPlaybackProfile before Prefetch.
+	spy.mu.Lock()
+	spy.events = nil
+	spy.mu.Unlock()
+	s.ShowSettings = true
+	s, cmd := s.AdjustSetting(2, 1) // 1080 -> 720
+	_ = collectNonTickMsgs(cmd, 150*time.Millisecond)
+	if s.AudioOnly || s.DefaultMode != "window" || s.Quality != 720 {
+		t.Fatalf("expected AudioOnly=false DefaultMode=window Quality=720, got audio=%v mode=%q q=%d",
+			s.AudioOnly, s.DefaultMode, s.Quality)
+	}
+	events := spy.snapshotEvents()
+	wantSet := "SetPlaybackProfile:720:false"
+	wantPrefetchPrefix := "Prefetch:"
+	setIdx, prefIdx := -1, -1
+	for i, ev := range events {
+		if ev == wantSet && setIdx < 0 {
+			setIdx = i
+		}
+		if strings.HasPrefix(ev, wantPrefetchPrefix) && prefIdx < 0 {
+			prefIdx = i
+		}
+	}
+	if setIdx < 0 || prefIdx <= setIdx {
+		t.Fatalf("expected %s before %s*, events=%v", wantSet, wantPrefetchPrefix, events)
+	}
+}
