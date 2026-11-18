@@ -18,14 +18,6 @@ const (
 	searchRowH      = 9
 )
 
-// ActionPill describes a clickable pill button with exact screen X bounds [Start, End).
-type ActionPill struct {
-	ID    string
-	Label string
-	Start int
-	End   int
-}
-
 func (s *State) handleMouse(msg tea.MouseMsg) (*State, tea.Cmd) {
 	switch {
 	case msg.Button == tea.MouseButtonWheelDown:
@@ -36,6 +28,10 @@ func (s *State) handleMouse(msg tea.MouseMsg) (*State, tea.Cmd) {
 			if s.QualityIdx < len(QualityOptions)-1 {
 				s.QualityIdx++
 			}
+			return s, nil
+		}
+		if s.ShowSettings {
+			s.SettingsIdx = (s.SettingsIdx + 1) % SettingsRowCount
 			return s, nil
 		}
 		if s.ShowChapters {
@@ -61,6 +57,10 @@ func (s *State) handleMouse(msg tea.MouseMsg) (*State, tea.Cmd) {
 			}
 			return s, nil
 		}
+		if s.ShowSettings {
+			s.SettingsIdx = (s.SettingsIdx + SettingsRowCount - 1) % SettingsRowCount
+			return s, nil
+		}
 		if s.ShowChapters {
 			if s.ChapterIdx > 0 {
 				s.ChapterIdx--
@@ -84,7 +84,13 @@ func (s *State) handleMouse(msg tea.MouseMsg) (*State, tea.Cmd) {
 }
 
 func (s *State) handleMouseMotion(x, y int) *State {
-	if s.ShowHelp || s.ShowSettings || s.ShowStillWatching {
+	if s.ShowHelp || s.ShowStillWatching {
+		return s
+	}
+	if s.ShowSettings {
+		if idx, inside := s.settingsModalRowAt(x, y); inside && idx >= 0 {
+			s.SettingsIdx = idx
+		}
 		return s
 	}
 	if s.ShowQualityModal {
@@ -149,7 +155,15 @@ func (s *State) handleLeftClick(x, y int) (*State, tea.Cmd) {
 		return s, nil
 	}
 	if s.ShowSettings {
-		s.ShowSettings = false
+		idx, inside := s.settingsModalRowAt(x, y)
+		if !inside {
+			s.ShowSettings = false
+			return s, nil
+		}
+		if idx >= 0 && idx < SettingsRowCount {
+			s.SettingsIdx = idx
+			return s.AdjustSetting(idx, 1)
+		}
 		return s, nil
 	}
 
@@ -220,11 +234,6 @@ func (s *State) handleLeftClick(x, y int) (*State, tea.Cmd) {
 			case x >= 46 && x <= 49:
 				return s.ToggleSaveSelected()
 			}
-			for _, pill := range s.PlayerActionPills() {
-				if x >= pill.Start && x < pill.End {
-					return s.triggerPillAction(pill.ID)
-				}
-			}
 		}
 		return s, nil
 	}
@@ -280,13 +289,8 @@ func (s *State) handleLeftClick(x, y int) (*State, tea.Cmd) {
 		return s, nil
 	}
 
-	// 4. Chips row inside Main panel (y == 4) + right action pills
+	// 4. Chips row inside Main panel (y == 4)
 	if y == 4 {
-		for _, pill := range s.ChipActionPills() {
-			if x >= pill.Start && x < pill.End {
-				return s.triggerPillAction(pill.ID)
-			}
-		}
 		chips := HomeChips
 		if s.View == ViewSearch {
 			chips = SearchChips
@@ -298,12 +302,12 @@ func (s *State) handleLeftClick(x, y int) (*State, tea.Cmd) {
 				if s.View == ViewSearch {
 					s.SearchChip = i
 					s.ResultIdx = 0
-				} else {
-					s.HomeChip = i
-					s.SelectedIdx = 0
-					s.ScrollOffset = 0
+					return s, nil
 				}
-				return s, nil
+				s.HomeChip = i
+				s.SelectedIdx = 0
+				s.ScrollOffset = 0
+				return s, s.maybeFetchLiveChip()
 			}
 			cx += cw + 1
 		}
@@ -316,22 +320,6 @@ func (s *State) handleLeftClick(x, y int) (*State, tea.Cmd) {
 			return s.PlaySelected("auto")
 		}
 		s.SetSelection(idx)
-	}
-	return s, nil
-}
-
-func (s *State) triggerPillAction(id string) (*State, tea.Cmd) {
-	switch id {
-	case "open_quality":
-		return s.OpenQualityModal(), nil
-	case "toggle_audio":
-		return s.ToggleVideoMode()
-	case "toggle_lyrics":
-		return s.ToggleLyrics()
-	case "open_chapters":
-		return s.OpenChapters()
-	case "cycle_theme":
-		return s.CycleTheme()
 	}
 	return s, nil
 }
@@ -402,108 +390,6 @@ func (s *State) videoIndexAt(x, y int) (int, bool) {
 		return idx, true
 	}
 	return 0, false
-}
-
-// ChipActionPills computes the clickable action pills on the right edge of y == 4.
-func (s *State) ChipActionPills() []ActionPill {
-	if s.View == ViewChannel || s.Width < 80 || (!s.HasPlayerBar() && s.Toast != "") {
-		return nil
-	}
-	chips := HomeChips
-	if s.View == ViewSearch {
-		chips = SearchChips
-	}
-	leftW := 1
-	for i, c := range chips {
-		if i > 0 {
-			leftW++
-		}
-		leftW += runewidth.StringWidth(c.Label) + 2
-	}
-
-	audioLabel := "[Audio]"
-	if s.AudioOnly {
-		audioLabel = "[Video]"
-	}
-	candidates := []ActionPill{
-		{ID: "open_quality", Label: "[Calidad: " + s.QualityLabel() + " ▾]"},
-		{ID: "toggle_audio", Label: audioLabel},
-		{ID: "toggle_lyrics", Label: "[Letra]"},
-	}
-
-	mainX := s.mainOriginX()
-	innerW := s.MainInnerWidth()
-	avail := innerW - leftW - 3
-	if avail <= 0 {
-		return nil
-	}
-
-	// Greedily keep prefix of candidates that fits in avail width.
-	for n := len(candidates); n >= 1; n-- {
-		subset := candidates[:n]
-		totalW := 0
-		for i, p := range subset {
-			if i > 0 {
-				totalW++
-			}
-			totalW += runewidth.StringWidth(p.Label)
-		}
-		if totalW <= avail {
-			x := mainX + innerW - 1 - totalW
-			out := make([]ActionPill, n)
-			for i, p := range subset {
-				w := runewidth.StringWidth(p.Label)
-				out[i] = ActionPill{
-					ID:    p.ID,
-					Label: p.Label,
-					Start: x,
-					End:   x + w,
-				}
-				x += w + 1
-			}
-			return out
-		}
-	}
-	return nil
-}
-
-// PlayerActionPills computes clickable feature pills on row 3 of the bottom player panel.
-func (s *State) PlayerActionPills() []ActionPill {
-	if !s.HasPlayerBar() || s.Width < 70 {
-		return nil
-	}
-	innerW := max(10, s.Width-2)
-	maxX := 1 + innerW - 1
-
-	audioLabel := "[x:Audio]"
-	if s.AudioOnly {
-		audioLabel = "[x:Video]"
-	}
-	candidates := []ActionPill{
-		{ID: "open_quality", Label: "[f:" + s.QualityLabel() + " ▾]"},
-		{ID: "toggle_audio", Label: audioLabel},
-		{ID: "toggle_lyrics", Label: "[l:Letra]"},
-		{ID: "open_chapters", Label: "[o:Caps]"},
-		{ID: "cycle_theme", Label: "[t:Tema]"},
-	}
-
-	// Transport buttons occupy x = 2..49; start pills at x = 51.
-	x := 51
-	var out []ActionPill
-	for _, p := range candidates {
-		w := runewidth.StringWidth(p.Label)
-		if x+w > maxX {
-			break
-		}
-		out = append(out, ActionPill{
-			ID:    p.ID,
-			Label: p.Label,
-			Start: x,
-			End:   x + w,
-		})
-		x += w + 1
-	}
-	return out
 }
 
 // QualityModalBounds returns the screen bounding rectangle (topX, topY, boxW, boxH)

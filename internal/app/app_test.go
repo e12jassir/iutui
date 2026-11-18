@@ -1542,3 +1542,89 @@ func TestApp_MouseHoverQualityModalAndLowercaseKeys(t *testing.T) {
 		t.Fatal("expected lowercase l to toggle ShowLyrics ON")
 	}
 }
+
+func TestApp_SettingsStudioLiveChipAndStaleTitleGuard(t *testing.T) {
+	cat := &catalog.FakeCatalog{
+		Feeds: map[model.Tab][]model.Video{
+			model.TabHome: {
+				{ID: "v1", Title: "Song A", Channel: "Ch1", Duration: "03:00"},
+				{ID: "v2", Title: "Song B", Channel: "Ch2", Duration: "04:00"},
+			},
+		},
+		Results: map[string][]model.Video{
+			"en vivo live": {
+				{ID: "live99", Title: "24/7 Radio Live", Channel: "Radio", IsLive: true},
+			},
+		},
+	}
+	eng := player.NewFakeEngine()
+	var themes []string
+	var mu sync.Mutex
+
+	s := NewState(Dependencies{
+		Catalog: cat,
+		Engine:  eng,
+		Store:   store.NewFakeStore(),
+		OnThemeChange: func(name string) error {
+			mu.Lock()
+			themes = append(themes, name)
+			mu.Unlock()
+			return nil
+		},
+	})
+	defer s.Close()
+	s.Width, s.Height = 120, 38
+	s, _ = s.Update(FeedLoadedMsg{Tab: model.TabHome, Videos: cat.Feeds[model.TabHome]})
+
+	// 1. Switching track keeps new title locked while old track status ticks are still in flight.
+	s.PlayerStatus = player.Status{IsRunning: true, Title: "Song A"}
+	s.SetSelection(1)
+	s, _ = s.PlaySelected("auto")
+	if s.PlayerStatus.Title != "Song B" {
+		t.Fatalf("expected immediate PlayerStatus.Title=Song B, got %q", s.PlayerStatus.Title)
+	}
+	s, _ = s.Update(PlayerStatusMsg{Status: player.Status{IsRunning: true, Title: "Song A", TimePos: 42}})
+	if s.PlayerStatus.Title != "Song B" || !s.PlayLoading {
+		t.Fatalf("stale Song A status overwrote UI during switch: title=%q loading=%v", s.PlayerStatus.Title, s.PlayLoading)
+	}
+	s, _ = s.Update(PlayStartedMsg{})
+	if s.PlayLoading {
+		t.Fatal("expected PlayLoading=false after PlayStartedMsg when mpv already running")
+	}
+
+	// 2. Clicking "En vivo" chip fetches live streams automatically when feed has no live items.
+	s.HomeChip = 0
+	// Second chip at y=4: " Todo " (width=6) at x=12..17, " En vivo " (width=9) at x=19..27
+	var cmd tea.Cmd
+	s, cmd = s.Update(tea.MouseMsg{X: 21, Y: 4, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	if s.HomeChip != 1 || cmd == nil {
+		t.Fatalf("expected HomeChip=1 and live search cmd, got chip=%d cmd=%v", s.HomeChip, cmd)
+	}
+	for _, msg := range collectNonTickMsgs(cmd, 200*time.Millisecond) {
+		s, _ = s.Update(msg)
+	}
+	if items := s.VisibleItems(); len(items) != 1 || items[0].ID != "live99" {
+		t.Fatalf("expected En vivo chip to load live99, got %+v", items)
+	}
+
+	// 3. Settings Studio supports keyboard nav + hover + click + cycling to "terminal" theme.
+	s.ShowSettings = true
+	s.SettingsIdx = 0
+	s, cmd = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'h'}}) // backward from youtube-dark -> terminal
+	_ = collectNonTickMsgs(cmd, 100*time.Millisecond)
+	if s.ThemeName != "terminal" {
+		t.Fatalf("expected ThemeName=terminal after backward step from youtube-dark, got %q", s.ThemeName)
+	}
+	leftX, topY, _, _ := s.SettingsModalBounds()
+	// Hover row 5 (Autoplay) and click it to toggle false.
+	rowY := topY + 1 + SettingsItemRowOffsets[5]
+	s, _ = s.Update(tea.MouseMsg{X: leftX + 6, Y: rowY, Action: tea.MouseActionMotion})
+	if s.SettingsIdx != 5 {
+		t.Fatalf("expected mouse hover to highlight SettingsIdx=5, got %d", s.SettingsIdx)
+	}
+	s, cmd = s.Update(tea.MouseMsg{X: leftX + 6, Y: rowY, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	_ = collectNonTickMsgs(cmd, 100*time.Millisecond)
+	if s.Autoplay {
+		t.Fatal("expected click on Autoplay row to toggle Autoplay OFF")
+	}
+}

@@ -99,6 +99,19 @@ func TestBuildMPVArgs_Modes(t *testing.T) {
 			}
 		}
 	})
+
+	t.Run("isLive uses single-mux live HLS format selector", func(t *testing.T) {
+		got := BuildMPVArgs(LaunchOpts{
+			Mode:    "window",
+			Quality: 720,
+			IsLive:  true,
+			URL:     baseURL,
+		})
+		want := "--ytdl-format=best[height<=720]/bestvideo[height<=720]+bestaudio/best"
+		if !slices.Contains(got, want) {
+			t.Errorf("BuildMPVArgs(IsLive=true) = %v, missing %q", got, want)
+		}
+	})
 }
 
 func TestBuildMPVArgs_Quality(t *testing.T) {

@@ -22,6 +22,7 @@ type LaunchOpts struct {
 	FastPlayback  bool
 	YtdlpBin      string
 	AllowPlaylist bool
+	IsLive        bool
 	StartPos      float64
 	StartPaused   bool
 }
@@ -72,7 +73,13 @@ func BuildMPVArgs(opts LaunchOpts) []string {
 		default: // "window", "auto", or unspecified
 			args = append(args, winFlag)
 		}
-		if opts.Quality <= 0 {
+		if opts.IsLive {
+			if opts.Quality <= 0 {
+				args = append(args, "--ytdl-format=best/bestvideo+bestaudio")
+			} else {
+				args = append(args, fmt.Sprintf("--ytdl-format=best[height<=%d]/bestvideo[height<=%d]+bestaudio/best", opts.Quality, opts.Quality))
+			}
+		} else if opts.Quality <= 0 {
 			args = append(args, "--ytdl-format=bestvideo+bestaudio/best")
 		} else {
 			args = append(args, fmt.Sprintf("--ytdl-format=bestvideo[height<=%d]+bestaudio/best[height<=%d]/best", opts.Quality, opts.Quality))

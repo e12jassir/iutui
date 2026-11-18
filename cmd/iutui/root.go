@@ -29,7 +29,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var version = "0.4.1"
+var version = "0.4.2"
 
 type nativeThumbs struct {
 	backend thumbs.Backend
@@ -243,6 +243,8 @@ func runTUI(paths platform.Paths) error {
 	dl := download.NewManager(paths.StateDir, dlDir, cfg.YtdlpBin)
 
 	sbEnabled := cfg.SponsorBlock
+	hideShorts := cfg.HideShorts
+	interleave := cfg.Interleave
 	state := app.NewState(app.Dependencies{
 		Catalog:             cat,
 		Engine:              eng,
@@ -251,6 +253,12 @@ func runTUI(paths platform.Paths) error {
 		LyricsClient:        lyrics.NewClient(),
 		InitialQuality:      cfg.Quality,
 		InitialAudioOnly:    cfg.DefaultMode == "audio",
+		InitialDefaultMode:  cfg.DefaultMode,
+		InitialVolume:       cfg.AudioVolume,
+		InitialPreview:      cfg.Preview,
+		InitialHideShorts:   &hideShorts,
+		InitialInterleave:   &interleave,
+		InitialCookies:      cfg.Cookies,
 		InitialTheme:        cfg.Theme,
 		InitialSponsorBlock: &sbEnabled,
 		OnQualityChange: func(q int) error {
@@ -272,6 +280,19 @@ func runTUI(paths platform.Paths) error {
 				val = "1"
 			}
 			return config.SaveVal(cfgPath, "YT_SPONSORBLOCK", val)
+		},
+		OnConfigChange: func(key, val string) error {
+			if err := config.SaveVal(cfgPath, key, val); err != nil {
+				return err
+			}
+			if key == "YT_PREVIEW" {
+				if val == "auto" {
+					_ = os.Unsetenv("YT_PREVIEW")
+				} else {
+					_ = os.Setenv("YT_PREVIEW", val)
+				}
+			}
+			return nil
 		},
 	})
 

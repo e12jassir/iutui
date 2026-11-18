@@ -367,9 +367,28 @@ func (c *IPCClient) handleLine(line []byte) {
 		c.statusMu.Unlock()
 		if msg.Reason == "eof" {
 			c.clearSponsorBlockState(0)
+			c.spawnClearForcedTitle()
 		}
 		c.broadcast(st)
 	}
+}
+
+func (c *IPCClient) spawnClearForcedTitle() {
+	c.subMu.Lock()
+	canSpawn := !c.closed && c.ctx.Err() == nil
+	if canSpawn {
+		c.wg.Add(1)
+	}
+	c.subMu.Unlock()
+	if !canSpawn {
+		return
+	}
+	go func() {
+		defer c.wg.Done()
+		ctx, cancel := context.WithTimeout(c.ctx, 400*time.Millisecond)
+		defer cancel()
+		_, _ = c.sendCommand(ctx, "set_property", "force-media-title", "")
+	}()
 }
 
 func (c *IPCClient) applyPropertyChange(name string, data any) {
@@ -406,8 +425,11 @@ func (c *IPCClient) applyPropertyChange(name string, data any) {
 		}
 	case "media-title":
 		if s, ok := data.(string); ok {
-			c.status.Title = s
-			changed = true
+			trimmed := strings.TrimSpace(s)
+			if trimmed != "" && !strings.HasPrefix(trimmed, "videoplayback") && trimmed != c.status.Title {
+				c.status.Title = trimmed
+				changed = true
+			}
 		} else if data == nil && c.status.Title != "" {
 			c.status.Title = ""
 			changed = true
@@ -1012,6 +1034,17 @@ func (c *IPCClient) playWithResume(ctx context.Context, v model.Video, mode stri
 	c.lastMode = mode
 	c.launchMu.Unlock()
 
+	if v.Title != "" {
+		c.statusMu.Lock()
+		c.status.Title = v.Title
+		c.status.TimePos = startPos
+		st := c.status
+		c.statusMu.Unlock()
+		if st.IsRunning {
+			c.broadcast(st)
+		}
+	}
+
 	c.playMu.Lock()
 	seq := c.playSeq.Add(1)
 	prevCancel := c.playCancel
@@ -1212,6 +1245,7 @@ func (c *IPCClient) playOnSingleMPV(ctx, waitCtx context.Context, seq uint64, v 
 	opts.URL = plan.url
 	opts.AudioFile = plan.audioFile
 	opts.AllowPlaylist = plan.launchAllowPlaylist
+	opts.IsLive = v.IsLive
 	opts.StartPos = startPos
 	opts.StartPaused = startPaused
 	if plan.effectiveMode != "" && plan.effectiveMode != "auto" {
@@ -1272,13 +1306,21 @@ func (c *IPCClient) tryPlayViaIPC(waitCtx context.Context, seq uint64, v model.V
 	}
 	_, _ = c.sendCommand(waitCtx, "set_property", "vid", wantVid)
 	_, _ = c.sendCommand(waitCtx, "set_property", "audio-files", []string{})
+	if c.hasManagedProc() {
+		_, _ = c.sendCommand(waitCtx, "set_property", "force-media-title", "")
+	}
 	if !c.isCurrentPlay(seq) || c.ctx.Err() != nil {
 		return true
 	}
 
 	var err error
+	perFileOpts := map[string]any{}
+	if v.Title != "" && c.hasManagedProc() {
+		perFileOpts["force-media-title"] = v.Title
+	}
 	if plan.audioFile != "" {
-		_, err = c.sendCommand(waitCtx, "loadfile", plan.url, "replace", -1, map[string]any{"audio-file": plan.audioFile})
+		perFileOpts["audio-file"] = plan.audioFile
+		_, err = c.sendCommand(waitCtx, "loadfile", plan.url, "replace", -1, perFileOpts)
 		if err != nil && c.isCurrentPlay(seq) && c.ctx.Err() == nil && c.isConnected() {
 			_, err = c.sendCommand(waitCtx, "loadfile", plan.url, "replace", 0, "audio-file="+plan.audioFile)
 		}
@@ -1286,7 +1328,12 @@ func (c *IPCClient) tryPlayViaIPC(waitCtx context.Context, seq uint64, v model.V
 			_, err = c.sendCommand(waitCtx, "loadfile", plan.fallbackURL, "replace")
 		}
 	} else {
-		_, err = c.sendCommand(waitCtx, "loadfile", plan.url, "replace")
+		if len(perFileOpts) > 0 {
+			_, err = c.sendCommand(waitCtx, "loadfile", plan.url, "replace", -1, perFileOpts)
+		}
+		if (len(perFileOpts) == 0 || err != nil) && c.isCurrentPlay(seq) && c.ctx.Err() == nil && c.isConnected() {
+			_, err = c.sendCommand(waitCtx, "loadfile", plan.url, "replace")
+		}
 		if err != nil && plan.url != plan.fallbackURL && c.isCurrentPlay(seq) && c.ctx.Err() == nil && c.isConnected() {
 			_, err = c.sendCommand(waitCtx, "loadfile", plan.fallbackURL, "replace")
 		}
@@ -1299,8 +1346,15 @@ func (c *IPCClient) tryPlayViaIPC(waitCtx context.Context, seq uint64, v model.V
 		return false
 	}
 
-	if v.Title != "" {
+	if v.Title != "" && !c.hasManagedProc() {
 		_, _ = c.sendCommand(waitCtx, "set_property", "force-media-title", v.Title)
+	}
+	if v.Title != "" {
+		c.statusMu.Lock()
+		c.status.Title = v.Title
+		st := c.status
+		c.statusMu.Unlock()
+		c.broadcast(st)
 	}
 	if c.isCurrentPlay(seq) {
 		_, _ = c.sendCommand(waitCtx, "set_property", "pause", false)
@@ -1503,6 +1557,11 @@ func parsePlaylistIDs(data []byte, limit int) []string {
 func (c *IPCClient) Enqueue(ctx context.Context, v model.Video) error {
 	url := fmt.Sprintf("https://www.youtube.com/watch?v=%s", v.ID)
 	if c.isConnected() {
+		if v.Title != "" {
+			if _, err := c.sendCommand(ctx, "loadfile", url, "append-play", -1, map[string]any{"force-media-title": v.Title}); err == nil {
+				return nil
+			}
+		}
 		_, err := c.sendCommand(ctx, "loadfile", url, "append-play")
 		return err
 	}
@@ -1531,12 +1590,18 @@ func (c *IPCClient) Pause(ctx context.Context) error {
 // Next skips to the next track in the playlist.
 func (c *IPCClient) Next(ctx context.Context) error {
 	_, err := c.sendCommand(ctx, "playlist-next")
+	if err == nil {
+		_, _ = c.sendCommand(ctx, "set_property", "force-media-title", "")
+	}
 	return err
 }
 
 // Prev skips to the previous track in the playlist.
 func (c *IPCClient) Prev(ctx context.Context) error {
 	_, err := c.sendCommand(ctx, "playlist-prev")
+	if err == nil {
+		_, _ = c.sendCommand(ctx, "set_property", "force-media-title", "")
+	}
 	return err
 }
 

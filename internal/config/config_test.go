@@ -384,6 +384,12 @@ func TestLoadThemeAndSponsorBlock(t *testing.T) {
 			wantSponsorBlock: true,
 		},
 		{
+			name:             "terminal native theme valid",
+			content:          "YT_THEME=terminal\n",
+			wantTheme:        "terminal",
+			wantSponsorBlock: true,
+		},
+		{
 			name:             "invalid theme and invalid bool fall back to defaults",
 			content:          "YT_THEME=solarized\nYT_SPONSORBLOCK=true\n",
 			wantTheme:        "youtube-dark",

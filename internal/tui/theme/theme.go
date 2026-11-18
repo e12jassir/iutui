@@ -139,6 +139,7 @@ var paletteOrder = []string{
 	"tokyonight",
 	"gruvbox",
 	"kanagawa",
+	"terminal",
 }
 
 var palettesByName = map[string]Palette{
@@ -242,6 +243,26 @@ var palettesByName = map[string]Palette{
 		Accent:    lipgloss.Color("#957fb8"),
 		Secondary: lipgloss.Color("#7fb4ca"),
 	},
+	"terminal": {
+		Name:      "terminal",
+		Bg:        lipgloss.Color("0"),
+		Panel:     lipgloss.Color("0"),
+		Surf:      lipgloss.Color("0"),
+		SurfHi:    lipgloss.Color("8"),
+		Border:    lipgloss.Color("8"),
+		Rule:      lipgloss.Color("8"),
+		Text:      lipgloss.Color("7"),
+		White:     lipgloss.Color("15"),
+		Muted:     lipgloss.Color("7"),
+		Dim:       lipgloss.Color("8"),
+		Red:       lipgloss.Color("1"),
+		Live:      lipgloss.Color("9"),
+		Blue:      lipgloss.Color("4"),
+		Yellow:    lipgloss.Color("3"),
+		Track:     lipgloss.Color("8"),
+		Accent:    lipgloss.Color("6"),
+		Secondary: lipgloss.Color("14"),
+	},
 }
 
 var noColorPalette = Palette{
@@ -300,6 +321,26 @@ func NextTheme(current string) string {
 
 // ThemeFromPalette constructs a complete Theme using the provided Palette.
 func ThemeFromPalette(p Palette) Theme {
+	sidebarBase := lipgloss.NewStyle().
+		Foreground(p.Muted).
+		Padding(0, 1)
+	if p.Name != "terminal" && p.Name != "no-color" {
+		sidebarBase = sidebarBase.Background(p.Bg)
+	}
+	chipBase := lipgloss.NewStyle().
+		Foreground(p.Text).
+		Padding(0, 1)
+	if p.Name != "terminal" && p.Name != "no-color" {
+		chipBase = chipBase.Background(p.Surf)
+	} else {
+		chipBase = chipBase.Background(lipgloss.Color("0"))
+	}
+	badgeDur := lipgloss.NewStyle().
+		Foreground(p.White).
+		Padding(0, 1)
+	if p.Name != "terminal" && p.Name != "no-color" {
+		badgeDur = badgeDur.Background(p.Bg)
+	}
 	return Theme{
 		HeaderLogo: lipgloss.NewStyle().
 			Foreground(p.White).
@@ -314,10 +355,7 @@ func ThemeFromPalette(p Palette) Theme {
 			Background(p.SurfHi).
 			Foreground(p.White).
 			Padding(0, 1),
-		Chip: lipgloss.NewStyle().
-			Background(p.Surf).
-			Foreground(p.Text).
-			Padding(0, 1),
+		Chip: chipBase,
 		ChipActive: lipgloss.NewStyle().
 			Background(p.White).
 			Foreground(p.Bg).
@@ -338,10 +376,7 @@ func ThemeFromPalette(p Palette) Theme {
 			Foreground(p.White).
 			Bold(true).
 			Padding(0, 1),
-		BadgeDuration: lipgloss.NewStyle().
-			Background(p.Bg).
-			Foreground(p.White).
-			Padding(0, 1),
+		BadgeDuration: badgeDur,
 		StatusBadge: lipgloss.NewStyle().
 			Background(p.SurfHi).
 			Foreground(p.Muted).
@@ -352,10 +387,7 @@ func ThemeFromPalette(p Palette) Theme {
 			Background(p.Surf).
 			Foreground(p.White).
 			Padding(0, 1),
-		SidebarItem: lipgloss.NewStyle().
-			Foreground(p.Muted).
-			Background(p.Bg).
-			Padding(0, 1),
+		SidebarItem: sidebarBase,
 		SidebarItemActive: lipgloss.NewStyle().
 			Foreground(p.White).
 			Background(p.Surf).

@@ -34,6 +34,13 @@ type FeedLoadedMsg struct {
 	Err    error
 }
 
+// LiveLoadedMsg arrives when background live stream lookup for the En vivo chip finishes.
+type LiveLoadedMsg struct {
+	Tab    model.Tab
+	Videos []model.Video
+	Err    error
+}
+
 // SearchDoneMsg arrives when an asynchronous search finishes.
 type SearchDoneMsg struct {
 	Query  string
@@ -227,10 +234,46 @@ func (s *State) Update(msg tea.Msg) (*State, tea.Cmd) {
 		}
 		return s, nil
 
+	case LiveLoadedMsg:
+		delete(s.LiveLoading, msg.Tab)
+		if msg.Err != nil {
+			return s, s.toastCmd(fmt.Sprintf("Error buscando directos: %v", msg.Err))
+		}
+		if len(msg.Videos) == 0 {
+			return s, s.toastCmd("Sin directos en vivo ahora mismo")
+		}
+		existing := s.Feeds[msg.Tab]
+		seen := make(map[string]bool, len(existing))
+		merged := make([]model.Video, 0, len(existing)+len(msg.Videos))
+		for _, v := range existing {
+			seen[v.ID] = true
+			merged = append(merged, v)
+		}
+		for _, v := range msg.Videos {
+			v.IsLive = true
+			if v.Duration == "" {
+				v.Duration = "LIVE"
+			}
+			if !seen[v.ID] {
+				seen[v.ID] = true
+				merged = append(merged, v)
+			}
+		}
+		s.Feeds[msg.Tab] = merged
+		if msg.Tab == s.ActiveTab && len(s.VisibleItems()) > 0 {
+			s.SetSelection(0)
+			s.prefetchTop(s.VisibleItems(), 4)
+		}
+		return s, nil
+
 	case PlayStartedMsg:
+		s.playInFlight = false
 		if msg.Err != nil {
 			s.PlayLoading = false
 			return s, s.toastCmd(fmt.Sprintf("Error: %v", msg.Err))
+		}
+		if s.PlayerStatus.IsRunning {
+			s.PlayLoading = false
 		}
 		return s, nil
 
@@ -340,9 +383,16 @@ func (s *State) Update(msg tea.Msg) (*State, tea.Cmd) {
 
 	case PlayerStatusMsg:
 		wasPlaying := s.PlayerStatus.IsRunning && !s.PlayerStatus.Paused
+		isStaleTitle := s.playInFlight && s.PlayLoadingTitle != "" && msg.Status.Title != "" && msg.Status.Title != s.PlayLoadingTitle
+		if isStaleTitle {
+			// Avoid flashing the outgoing track title/position while switching to the new video.
+			msg.Status.Title = s.PlayLoadingTitle
+			msg.Status.TimePos = 0
+		}
 		s.PlayerStatus = msg.Status
-		if msg.Status.IsRunning {
+		if !isStaleTitle && msg.Status.IsRunning && (!s.playInFlight || msg.Status.Title == "" || msg.Status.Title == s.PlayLoadingTitle) {
 			s.PlayLoading = false
+			s.playInFlight = false
 		}
 		if msg.Status.IsRunning && msg.Status.Title != "" && msg.Status.Title != s.lastTrackTitle {
 			if s.lastTrackTitle != "" && time.Since(s.LastInteractionAt) > 12*time.Second {
@@ -505,10 +555,20 @@ func (s *State) handleKey(msg tea.KeyMsg) (*State, tea.Cmd) {
 		case "esc", "S", "q":
 			s.ShowSettings = false
 			return s, nil
+		case "j", "down":
+			s.SettingsIdx = (s.SettingsIdx + 1) % SettingsRowCount
+			return s, nil
+		case "k", "up":
+			s.SettingsIdx = (s.SettingsIdx + SettingsRowCount - 1) % SettingsRowCount
+			return s, nil
+		case "enter", " ", "right", "l":
+			return s.AdjustSetting(s.SettingsIdx, 1)
+		case "left", "h":
+			return s.AdjustSetting(s.SettingsIdx, -1)
 		case "f", "F":
 			s.ShowSettings = false
 			return s.OpenQualityModal(), nil
-		case "c", "enter", " ", "right":
+		case "c":
 			return s.CycleQuality()
 		case "a", "A":
 			return s.ToggleAutoplay()
@@ -645,9 +705,11 @@ func (s *State) handleKey(msg tea.KeyMsg) (*State, tea.Cmd) {
 	case "5":
 		return s.SwitchTab(model.TabDownloads)
 	case "[":
-		return s.CycleChip(-1), nil
+		s.CycleChip(-1)
+		return s, s.maybeFetchLiveChip()
 	case "]":
-		return s.CycleChip(1), nil
+		s.CycleChip(1)
+		return s, s.maybeFetchLiveChip()
 	case "enter":
 		if s.Focus == FocusSidebar {
 			s.Focus = FocusMain
@@ -966,8 +1028,11 @@ func (s *State) PlaySelected(mode string) (*State, tea.Cmd) {
 		return s, nil
 	}
 	upcomingIDs := s.upcomingFallbackIDs(15)
+	s.playInFlight = true
 	s.PlayLoading = true
 	s.PlayLoadingTitle = v.Title
+	s.PlayerStatus.Title = v.Title
+	s.PlayerStatus.TimePos = 0
 	s.RegisterUserActivity()
 	s.lastTrackTitle = v.Title
 
@@ -1213,6 +1278,31 @@ func (s *State) ToggleSaveSelected() (*State, tea.Cmd) {
 
 type feedRefresher interface {
 	RefreshFeed(ctx context.Context, tab model.Tab) ([]model.Video, error)
+}
+
+func (s *State) maybeFetchLiveChip() tea.Cmd {
+	if s.View != ViewHome || s.HomeChip != 1 || s.Deps.Catalog == nil || s.Syncing {
+		return nil
+	}
+	if s.ActiveTab != model.TabHome && s.ActiveTab != model.TabMusic {
+		return nil
+	}
+	if len(s.VisibleItems()) > 0 || len(s.Feeds[s.ActiveTab]) == 0 || s.LiveLoading[s.ActiveTab] {
+		return nil
+	}
+	s.LiveLoading[s.ActiveTab] = true
+	tab := s.ActiveTab
+	query := "en vivo live"
+	if tab == model.TabMusic {
+		query = "music live radio 24/7"
+	}
+	liveCmd := func() tea.Msg {
+		ctx, cancel := context.WithTimeout(s.appCtx, feedTimeout)
+		defer cancel()
+		videos, err := s.Deps.Catalog.Search(ctx, query)
+		return LiveLoadedMsg{Tab: tab, Videos: videos, Err: err}
+	}
+	return tea.Batch(liveCmd, s.ensureAnimTick())
 }
 
 func (s *State) loadFeedCmd(tab model.Tab, forceRefresh bool) tea.Cmd {

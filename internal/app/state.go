@@ -67,12 +67,19 @@ type Dependencies struct {
 	LyricsClient         *lyrics.Client
 	InitialQuality       int
 	InitialAudioOnly     bool
+	InitialDefaultMode   string
+	InitialVolume        int
+	InitialPreview       string
+	InitialHideShorts    *bool
+	InitialInterleave    *bool
+	InitialCookies       string
 	InitialTheme         string
 	InitialSponsorBlock  *bool
 	OnQualityChange      func(int) error
 	OnAudioOnlyChange    func(bool) error
 	OnThemeChange        func(string) error
 	OnSponsorBlockChange func(bool) error
+	OnConfigChange       func(key, val string) error
 }
 
 // State holds the pure application state decoupled from terminal rendering.
@@ -114,6 +121,7 @@ type State struct {
 
 	ShowHelp          bool
 	ShowSettings      bool
+	SettingsIdx       int
 	ShowQualityModal  bool
 	QualityIdx        int
 	ShowStillWatching bool
@@ -129,11 +137,19 @@ type State struct {
 	Autoplay     bool
 	SponsorBlock bool
 	AudioOnly    bool
+	DefaultMode  string
+	AudioVolume  int
+	PreviewMode  string
+	HideShorts   bool
+	Interleave   bool
+	CookiesMode  string
 	ThemeName    string
 	Quality      int
 	Width        int
 	Height       int
 	Ready        bool
+
+	LiveLoading map[model.Tab]bool
 
 	LastInteractionAt        time.Time
 	AutoplayTracksSinceInput int
@@ -141,6 +157,7 @@ type State struct {
 
 	PlayLoading      bool
 	PlayLoadingTitle string
+	playInFlight     bool
 	AnimFrame        int
 	animActive       bool
 
@@ -166,6 +183,34 @@ func NewState(deps Dependencies) *State {
 	if deps.InitialSponsorBlock != nil {
 		sponsorBlock = *deps.InitialSponsorBlock
 	}
+	hideShorts := true
+	if deps.InitialHideShorts != nil {
+		hideShorts = *deps.InitialHideShorts
+	}
+	interleave := true
+	if deps.InitialInterleave != nil {
+		interleave = *deps.InitialInterleave
+	}
+	defMode := strings.TrimSpace(deps.InitialDefaultMode)
+	if defMode == "" {
+		if deps.InitialAudioOnly {
+			defMode = "audio"
+		} else {
+			defMode = "window"
+		}
+	}
+	vol := deps.InitialVolume
+	if vol <= 0 {
+		vol = 75
+	}
+	preview := strings.TrimSpace(deps.InitialPreview)
+	if preview == "" {
+		preview = "auto"
+	}
+	cookiesMode := strings.TrimSpace(deps.InitialCookies)
+	if cookiesMode == "" {
+		cookiesMode = "auto"
+	}
 	return &State{
 		Deps:              deps,
 		View:              ViewHome,
@@ -174,12 +219,19 @@ func NewState(deps Dependencies) *State {
 		Focus:             FocusMain,
 		Autoplay:          true,
 		SponsorBlock:      sponsorBlock,
-		AudioOnly:         deps.InitialAudioOnly,
+		AudioOnly:         deps.InitialAudioOnly || defMode == "audio",
+		DefaultMode:       defMode,
+		AudioVolume:       vol,
+		PreviewMode:       preview,
+		HideShorts:        hideShorts,
+		Interleave:        interleave,
+		CookiesMode:       cookiesMode,
 		ThemeName:         themeName,
 		Quality:           deps.InitialQuality,
 		Feeds:             make(map[model.Tab][]model.Video),
 		SavedIDs:          make(map[string]bool),
 		HistoryIDs:        make(map[string]bool),
+		LiveLoading:       make(map[model.Tab]bool),
 		LastInteractionAt: time.Now(),
 		appCtx:            ctx,
 		appCancel:         cancel,
@@ -193,7 +245,7 @@ func (s *State) HasPlayerBar() bool {
 
 // IsAnimating reports whether any loading/syncing animation is active.
 func (s *State) IsAnimating() bool {
-	return s.Syncing || s.SearchPending || s.PlayLoading || s.ChannelPending || s.LyricsLoading
+	return s.Syncing || s.SearchPending || s.PlayLoading || s.ChannelPending || s.LyricsLoading || s.LiveLoading[s.ActiveTab]
 }
 
 // RegisterUserActivity records a user interaction and resets the idle autoplay counter.

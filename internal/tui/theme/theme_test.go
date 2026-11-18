@@ -92,7 +92,7 @@ func TestDefaultTheme(t *testing.T) {
 }
 
 func TestPalettesOrder(t *testing.T) {
-	want := []string{"youtube-dark", "catppuccin", "tokyonight", "gruvbox", "kanagawa"}
+	want := []string{"youtube-dark", "catppuccin", "tokyonight", "gruvbox", "kanagawa", "terminal"}
 	got := Palettes()
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("Palettes() = %v, want %v", got, want)
@@ -190,7 +190,8 @@ func TestNextTheme(t *testing.T) {
 		{in: "catppuccin", want: "tokyonight"},
 		{in: "tokyonight", want: "gruvbox"},
 		{in: "gruvbox", want: "kanagawa"},
-		{in: "kanagawa", want: "youtube-dark"},
+		{in: "kanagawa", want: "terminal"},
+		{in: "terminal", want: "youtube-dark"},
 		{in: "  Catppuccin  ", want: "tokyonight"},
 		{in: "unknown", want: "youtube-dark"},
 		{in: "", want: "youtube-dark"},

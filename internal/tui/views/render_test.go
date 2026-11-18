@@ -478,6 +478,20 @@ func TestRenderChannelChaptersLyricsAndThemes(t *testing.T) {
 		outCat := Render(s, th, tr)
 		assertBounds(t, outCat, 120, 36)
 
+		s.ThemeName = "terminal"
+		outTerminal := Render(s, th, tr)
+		assertBounds(t, outTerminal, 120, 36)
+
+		s.ShowSettings = true
+		outSettings := Render(s, th, tr)
+		assertBounds(t, outSettings, 120, 36)
+		for _, want := range []string{"APARIENCIA & TERMINAL", "Tema interfaz", "terminal (Nativo)", "REPRODUCCIÓN & CONSUMO"} {
+			if !strings.Contains(outSettings, want) {
+				t.Fatalf("expected %q in upgraded settings overlay, got:\n%s", want, outSettings)
+			}
+		}
+		s.ShowSettings = false
+
 		t.Setenv("NO_COLOR", "1")
 		outNoColor := Render(s, th, tr)
 		assertBounds(t, outNoColor, 120, 36)

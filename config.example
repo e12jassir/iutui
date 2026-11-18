@@ -29,7 +29,7 @@ YT_BROWSERS="zen firefox librewolf brave chromium chrome"   # detection order
 # YT_COOKIES_FILE=~/cookies.txt          # or use an exported Netscape cookies file
 
 # ── interface & downloads ────────────────────────────────
-YT_THEME=youtube-dark       # youtube-dark | catppuccin | tokyonight | gruvbox | kanagawa
+YT_THEME=youtube-dark       # youtube-dark | catppuccin | tokyonight | gruvbox | kanagawa | terminal
 YT_LANG=auto                # auto | es | en
 YT_PREVIEW=auto             # auto | kitty | chafa | none
 YT_HEIGHT=95%
