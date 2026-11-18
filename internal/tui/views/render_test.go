@@ -72,7 +72,7 @@ func fixedVideos() []model.Video {
 }
 
 func newTestState(view app.ViewMode, w, h int) *app.State {
-	s := app.NewState(app.Dependencies{})
+	s := app.NewState(app.Dependencies{AppVersion: "1.0.0"})
 	videos := fixedVideos()
 	s.View = view
 	s.ActiveTab = model.TabHome
@@ -539,4 +539,35 @@ func TestRenderChannelChaptersLyricsAndThemes(t *testing.T) {
 			t.Fatalf("expected plain lyrics near end of track to auto-scroll to line 35, got:\n%s", outPlain)
 		}
 	})
+}
+
+func TestRenderBrandVersionAndNoItemCounter(t *testing.T) {
+	th := theme.DefaultTheme()
+	tr := thumbs.NewTextRenderer()
+
+	s := newTestState(app.ViewHome, 156, 45)
+	defer s.Close()
+	s.AppVersion = "0.4.6"
+
+	outHome := Render(s, th, tr)
+	assertBounds(t, outHome, 156, 45)
+	if !strings.Contains(outHome, "iutui · v0.4.6") {
+		t.Fatalf("expected version badge 'iutui · v0.4.6' in wide top bar, got:\n%s", outHome)
+	}
+	if strings.Contains(outHome, "· tui") {
+		t.Fatalf("unexpected legacy '· tui' label in top bar, got:\n%s", outHome)
+	}
+	if strings.Contains(outHome, "(1/6)") || strings.Contains(outHome, "(1/") {
+		t.Fatalf("expected Home panel title without item counter, got:\n%s", outHome)
+	}
+
+	s.View = app.ViewSearch
+	outSearch := Render(s, th, tr)
+	assertBounds(t, outSearch, 156, 45)
+	if !strings.Contains(outSearch, "Búsqueda: soda stereo") {
+		t.Fatalf("expected clean search panel title, got:\n%s", outSearch)
+	}
+	if strings.Contains(outSearch, "(1/4)") {
+		t.Fatalf("expected Search panel title without item counter, got:\n%s", outSearch)
+	}
 }

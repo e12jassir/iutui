@@ -9,6 +9,7 @@ import (
 	"unicode"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/e12jassir/iutui/internal/catalog"
 	"github.com/e12jassir/iutui/internal/lyrics"
 	"github.com/e12jassir/iutui/internal/model"
 	"github.com/e12jassir/iutui/internal/player"
@@ -132,6 +133,11 @@ type LyricsLoadedMsg struct {
 	Err    error
 }
 
+// MetadataEnrichedMsg delivers asynchronously enriched views and publish dates.
+type MetadataEnrichedMsg struct {
+	Meta map[string]catalog.VideoMeta
+}
+
 // Init starts initial feed/store loading and subscribes to player status push updates.
 func (s *State) Init() tea.Cmd {
 	if s.Deps.Catalog != nil {
@@ -164,8 +170,9 @@ func (s *State) Update(msg tea.Msg) (*State, tea.Cmd) {
 		if msg.Tab == s.ActiveTab {
 			s.SetSelection(s.SelectedIdx)
 			s.prefetchTop(msg.Videos, 4)
+			return s, s.enrichVisibleMetadataCmd(msg.Videos, s.SelectedIdx)
 		}
-		return s, nil
+		return s, s.enrichVisibleMetadataCmd(msg.Videos, 0)
 
 	case SearchDoneMsg:
 		if (msg.Seq != 0 && msg.Seq != s.searchSeq) || msg.Query != s.SearchQuery {
@@ -183,7 +190,7 @@ func (s *State) Update(msg tea.Msg) (*State, tea.Cmd) {
 		s.ResultScroll = 0
 		s.SetSelection(0)
 		s.prefetchTop(msg.Videos, 4)
-		return s, nil
+		return s, s.enrichVisibleMetadataCmd(msg.Videos, 0)
 
 	case SavedLoadedMsg:
 		s.SavedIDs = make(map[string]bool, len(msg.Saved))
@@ -204,7 +211,7 @@ func (s *State) Update(msg tea.Msg) (*State, tea.Cmd) {
 		if _, ok := s.Feeds[model.TabLiked]; !ok {
 			s.Feeds[model.TabLiked] = append([]model.Video(nil), msg.Saved...)
 		}
-		return s, nil
+		return s, s.enrichVisibleMetadataCmd(s.VisibleItems(), s.SelectedIdx)
 
 	case ToggledSaveMsg:
 		if msg.Err != nil {
@@ -264,8 +271,9 @@ func (s *State) Update(msg tea.Msg) (*State, tea.Cmd) {
 		if msg.Tab == s.ActiveTab && len(s.VisibleItems()) > 0 {
 			s.SetSelection(0)
 			s.prefetchTop(s.VisibleItems(), 4)
+			return s, s.enrichVisibleMetadataCmd(s.VisibleItems(), 0)
 		}
-		return s, nil
+		return s, s.enrichVisibleMetadataCmd(s.Feeds[msg.Tab], 0)
 
 	case PlayStartedMsg:
 		s.playInFlight = false
@@ -331,7 +339,7 @@ func (s *State) Update(msg tea.Msg) (*State, tea.Cmd) {
 		s.ChannelScroll = 0
 		s.SetSelection(0)
 		s.prefetchTop(msg.Videos, 4)
-		return s, nil
+		return s, s.enrichVisibleMetadataCmd(msg.Videos, 0)
 
 	case SubscriptionToggledMsg:
 		if msg.Err != nil {
@@ -385,6 +393,10 @@ func (s *State) Update(msg tea.Msg) (*State, tea.Cmd) {
 		}
 		s.Lyrics = msg.Lyrics
 		s.LyricsErr = ""
+		return s, nil
+
+	case MetadataEnrichedMsg:
+		s.applyEnrichedMetadata(msg.Meta)
 		return s, nil
 
 	case PlayerStatusMsg:
@@ -675,7 +687,7 @@ func (s *State) handleKey(msg tea.KeyMsg) (*State, tea.Cmd) {
 			step = s.GridCols()
 		}
 		s.SetSelection(s.activeIdx() + step)
-		return s, nil
+		return s, s.enrichVisibleMetadataCmd(s.VisibleItems(), s.activeIdx())
 	case "k", "up":
 		if s.Focus == FocusSidebar {
 			return s.cycleSidebarTab(-1)
@@ -685,21 +697,21 @@ func (s *State) handleKey(msg tea.KeyMsg) (*State, tea.Cmd) {
 			step = s.GridCols()
 		}
 		s.SetSelection(s.activeIdx() - step)
-		return s, nil
+		return s, s.enrichVisibleMetadataCmd(s.VisibleItems(), s.activeIdx())
 	case "right":
 		if s.Focus == FocusSidebar {
 			s.Focus = FocusMain
 			return s, nil
 		}
 		s.SetSelection(s.activeIdx() + 1)
-		return s, nil
+		return s, s.enrichVisibleMetadataCmd(s.VisibleItems(), s.activeIdx())
 	case "h", "left":
 		if s.Focus == FocusMain && s.Width >= miniGuideMinW && s.activeIdx() == 0 {
 			s.Focus = FocusSidebar
 			return s, nil
 		}
 		s.SetSelection(s.activeIdx() - 1)
-		return s, nil
+		return s, s.enrichVisibleMetadataCmd(s.VisibleItems(), s.activeIdx())
 	case "1":
 		return s.SwitchTab(model.TabHome)
 	case "2":
@@ -813,13 +825,13 @@ func (s *State) SwitchTab(tab model.Tab) (*State, tea.Cmd) {
 			}
 		}
 		s.Feeds[model.TabPlaylists] = pls
-		return s, nil
+		return s, s.enrichVisibleMetadataCmd(pls, 0)
 	}
 	if tab == model.TabWatchLater || tab == model.TabLiked {
-		return s, nil
+		return s, s.enrichVisibleMetadataCmd(s.VisibleItems(), 0)
 	}
 	if _, ok := s.Feeds[tab]; ok {
-		return s, nil
+		return s, s.enrichVisibleMetadataCmd(s.VisibleItems(), 0)
 	}
 	s.Syncing = true
 	return s, tea.Batch(s.loadFeedCmd(tab, false), s.ensureAnimTick())
@@ -1835,4 +1847,87 @@ func activeChapterIndex(chapters []player.Chapter, pos float64) int {
 		}
 	}
 	return idx
+}
+
+func (s *State) enrichVisibleMetadataCmd(items []model.Video, centerIdx int) tea.Cmd {
+	me, ok := s.Deps.Catalog.(metadataEnricher)
+	if !ok || len(items) == 0 {
+		return nil
+	}
+	if centerIdx < 0 {
+		centerIdx = 0
+	}
+	start := max(0, centerIdx-6)
+	end := min(len(items), start+24)
+	if end-start < min(24, len(items)) && len(items) >= 24 {
+		start = max(0, len(items)-24)
+		end = len(items)
+	}
+	if s.metaRequested == nil {
+		s.metaRequested = make(map[string]bool)
+	}
+	var ids []string
+	for _, v := range items[start:end] {
+		if (v.Views != "" && v.Published != "") || len(v.ID) != 11 || model.IsPlaylistID(v.ID) {
+			continue
+		}
+		if s.metaRequested[v.ID] {
+			continue
+		}
+		s.metaRequested[v.ID] = true
+		ids = append(ids, v.ID)
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(s.appCtx, 10*time.Second)
+		defer cancel()
+		meta, _ := me.EnrichMetadata(ctx, ids)
+		if len(meta) == 0 {
+			return nil
+		}
+		return MetadataEnrichedMsg{Meta: meta}
+	}
+}
+
+func (s *State) applyEnrichedMetadata(meta map[string]catalog.VideoMeta) {
+	if len(meta) == 0 {
+		return
+	}
+	for tab, list := range s.Feeds {
+		if applyMetaSlice(list, meta) {
+			s.Feeds[tab] = list
+		}
+	}
+	applyMetaSlice(s.SearchResults, meta)
+	applyMetaSlice(s.ChannelVideos, meta)
+	applyMetaSlice(s.Queue, meta)
+	if m, ok := meta[s.CurrentPlaying.ID]; ok {
+		if s.CurrentPlaying.Views == "" && m.Views != "" {
+			s.CurrentPlaying.Views = m.Views
+		}
+		if s.CurrentPlaying.Published == "" && m.Published != "" {
+			s.CurrentPlaying.Published = m.Published
+		}
+	}
+}
+
+func applyMetaSlice(list []model.Video, meta map[string]catalog.VideoMeta) bool {
+	changed := false
+	for i := range list {
+		m, ok := meta[list[i].ID]
+		if !ok {
+			continue
+		}
+		if list[i].Views == "" && m.Views != "" {
+			list[i].Views = m.Views
+			changed = true
+		}
+		if list[i].Published == "" && m.Published != "" {
+			list[i].Published = m.Published
+			changed = true
+		}
+	}
+	return changed
 }

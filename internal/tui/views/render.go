@@ -326,7 +326,13 @@ func renderTopPanels(s *app.State, th theme.Theme, tr thumbs.Renderer, width int
 	dimBrand := lipgloss.NewStyle().Foreground(pal.dim)
 	var brandText string
 	if sideW >= fullSidebarW {
-		brandText = accentBrand.Render("▶") + " " + whiteBrand.Render("iutui") + dimBrand.Render(" · tui")
+		brandText = accentBrand.Render("▶") + " " + whiteBrand.Render("iutui")
+		if ver := strings.TrimSpace(s.AppVersion); ver != "" {
+			if !strings.HasPrefix(ver, "v") {
+				ver = "v" + ver
+			}
+			brandText += dimBrand.Render(" · " + ver)
+		}
 	} else {
 		brandText = accentBrand.Render("▶") + " " + whiteBrand.Render("iutui")
 	}
@@ -473,27 +479,14 @@ func renderMain(s *app.State, th theme.Theme, tr thumbs.Renderer, width, height 
 	innerW := max(10, width-2)
 	innerH := max(2, height-2)
 
-	items := s.VisibleItems()
 	var title string
 	switch s.View {
 	case app.ViewSearch:
-		pos := 0
-		if len(items) > 0 {
-			pos = s.ResultIdx + 1
-		}
-		title = fmt.Sprintf("Búsqueda: %s (%d/%d)", s.SearchQuery, pos, len(items))
+		title = "Búsqueda: " + s.SearchQuery
 	case app.ViewChannel:
-		pos := 0
-		if len(items) > 0 {
-			pos = s.ChannelIdx + 1
-		}
-		title = fmt.Sprintf("Canal: %s (%d/%d)", s.ChannelTitle, pos, len(items))
+		title = "Canal: " + s.ChannelTitle
 	default:
-		pos := 0
-		if len(items) > 0 {
-			pos = s.SelectedIdx + 1
-		}
-		title = fmt.Sprintf("%s (%d/%d)", s.ActiveTab.String(), pos, len(items))
+		title = s.ActiveTab.String()
 	}
 	if s.Syncing || s.SearchPending || s.ChannelPending {
 		title += " · " + loadingSpinner(s.AnimFrame)

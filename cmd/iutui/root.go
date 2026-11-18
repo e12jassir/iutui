@@ -29,7 +29,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var version = "0.4.5"
+var version = "0.4.6"
 
 type nativeThumbs struct {
 	backend thumbs.Backend
@@ -218,6 +218,8 @@ func runTUI(paths platform.Paths) error {
 
 	bashCat := catalog.NewBashCatalog(paths.CacheDir, paths.StateDir, "")
 	ytdlpCat := catalog.NewYTDLPCatalog(paths.CacheDir, time.Duration(cfg.CacheTTL)*time.Second, cfg.YtdlpBin)
+	ytdlpCat.FeedSize = cfg.FeedSize
+	ytdlpCat.SearchSize = cfg.SearchSize
 	catalogCookieJar := cookieJar
 	if catalogCookieJar == "" && !isCookiesDisabled(cfg.Cookies) && paths.CacheDir != "" {
 		catalogCookieJar = filepath.Join(paths.CacheDir, "cookies.txt")
@@ -261,6 +263,7 @@ func runTUI(paths platform.Paths) error {
 		InitialCookies:      cfg.Cookies,
 		InitialTheme:        cfg.Theme,
 		InitialSponsorBlock: &sbEnabled,
+		AppVersion:          version,
 		OnQualityChange: func(q int) error {
 			return config.SaveVal(cfgPath, "YT_QUALITY", strconv.Itoa(q))
 		},

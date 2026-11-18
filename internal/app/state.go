@@ -12,6 +12,10 @@ import (
 	"github.com/e12jassir/iutui/internal/store"
 )
 
+type metadataEnricher interface {
+	EnrichMetadata(ctx context.Context, ids []string) (map[string]catalog.VideoMeta, error)
+}
+
 // ViewMode represents the active top-level screen.
 type ViewMode int
 
@@ -75,6 +79,7 @@ type Dependencies struct {
 	InitialCookies       string
 	InitialTheme         string
 	InitialSponsorBlock  *bool
+	AppVersion           string
 	OnQualityChange      func(int) error
 	OnAudioOnlyChange    func(bool) error
 	OnThemeChange        func(string) error
@@ -149,11 +154,13 @@ type State struct {
 	CookiesMode  string
 	ThemeName    string
 	Quality      int
+	AppVersion   string
 	Width        int
 	Height       int
 	Ready        bool
 
-	LiveLoading map[model.Tab]bool
+	LiveLoading   map[model.Tab]bool
+	metaRequested map[string]bool
 
 	LastInteractionAt        time.Time
 	AutoplayTracksSinceInput int
@@ -232,10 +239,12 @@ func NewState(deps Dependencies) *State {
 		CookiesMode:       cookiesMode,
 		ThemeName:         themeName,
 		Quality:           deps.InitialQuality,
+		AppVersion:        strings.TrimSpace(deps.AppVersion),
 		Feeds:             make(map[model.Tab][]model.Video),
 		SavedIDs:          make(map[string]bool),
 		HistoryIDs:        make(map[string]bool),
 		LiveLoading:       make(map[model.Tab]bool),
+		metaRequested:     make(map[string]bool),
 		LastInteractionAt: time.Now(),
 		appCtx:            ctx,
 		appCancel:         cancel,

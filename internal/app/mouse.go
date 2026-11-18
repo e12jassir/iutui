@@ -50,7 +50,7 @@ func (s *State) handleMouse(msg tea.MouseMsg) (*State, tea.Cmd) {
 			step = s.GridCols()
 		}
 		s.SetSelection(s.activeIdx() + step)
-		return s, nil
+		return s, s.enrichVisibleMetadataCmd(s.VisibleItems(), s.activeIdx())
 
 	case msg.Button == tea.MouseButtonWheelUp:
 		if s.Focus == FocusSearch && s.SearchDraft == "" {
@@ -81,7 +81,7 @@ func (s *State) handleMouse(msg tea.MouseMsg) (*State, tea.Cmd) {
 			step = s.GridCols()
 		}
 		s.SetSelection(s.activeIdx() - step)
-		return s, nil
+		return s, s.enrichVisibleMetadataCmd(s.VisibleItems(), s.activeIdx())
 
 	case msg.Action == tea.MouseActionMotion:
 		return s.handleMouseMotion(msg.X, msg.Y), nil

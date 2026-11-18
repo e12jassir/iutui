@@ -1862,3 +1862,76 @@ func TestPlayVideoResetsTimePosAndDuration(t *testing.T) {
 	}
 	_ = collectNonTickMsgs(cmd, 100*time.Millisecond)
 }
+
+type fakeMetaCatalog struct {
+	*catalog.FakeCatalog
+	calls [][]string
+	reply map[string]catalog.VideoMeta
+}
+
+func (f *fakeMetaCatalog) EnrichMetadata(_ context.Context, ids []string) (map[string]catalog.VideoMeta, error) {
+	cp := append([]string(nil), ids...)
+	f.calls = append(f.calls, cp)
+	out := make(map[string]catalog.VideoMeta, len(ids))
+	for _, id := range ids {
+		if m, ok := f.reply[id]; ok {
+			out[id] = m
+		}
+	}
+	return out, nil
+}
+
+func TestMetadataEnrichmentAndDeduplication(t *testing.T) {
+	cat := &fakeMetaCatalog{
+		FakeCatalog: &catalog.FakeCatalog{},
+		reply: map[string]catalog.VideoMeta{
+			"vidAAAAAAA1": {Views: "2.6M vistas", Published: "2026-11-17"},
+			"vidBBBBBBB2": {Views: "90K vistas", Published: "2026-11-10"},
+		},
+	}
+	s := NewState(Dependencies{Catalog: cat})
+	defer s.Close()
+
+	videos := []model.Video{
+		{ID: "RDmix00000001", Title: "Mix"},
+		{ID: "vidAAAAAAA1", Title: "Song A"},
+		{ID: "vidBBBBBBB2", Title: "Song B", Views: "100 vistas"},
+		{ID: "vidCCCCCCC3", Title: "Song C", Views: "5K vistas", Published: "2026-10-01"},
+	}
+
+	var cmd tea.Cmd
+	s, cmd = s.Update(FeedLoadedMsg{Tab: model.TabHome, Videos: videos})
+	if cmd == nil {
+		t.Fatal("expected metadata enrichment cmd after FeedLoadedMsg")
+	}
+	msg := cmd()
+	enriched, ok := msg.(MetadataEnrichedMsg)
+	if !ok {
+		t.Fatalf("expected MetadataEnrichedMsg, got %T", msg)
+	}
+	if len(cat.calls) != 1 || !slices.Equal(cat.calls[0], []string{"vidAAAAAAA1", "vidBBBBBBB2"}) {
+		t.Fatalf("expected enrichment only for unpopulated 11-char single IDs, got calls=%v", cat.calls)
+	}
+
+	s.SearchResults = []model.Video{{ID: "vidAAAAAAA1", Title: "Song A"}}
+	s.ChannelVideos = []model.Video{{ID: "vidAAAAAAA1", Title: "Song A"}}
+	s.CurrentPlaying = model.Video{ID: "vidAAAAAAA1", Title: "Song A"}
+
+	s, _ = s.Update(enriched)
+
+	home := s.Feeds[model.TabHome]
+	if home[1].Views != "2.6M vistas" || home[1].Published != "2026-11-17" {
+		t.Fatalf("expected Song A Views & Published merged, got %+v", home[1])
+	}
+	if home[2].Views != "100 vistas" || home[2].Published != "2026-11-10" {
+		t.Fatalf("expected Song B existing Views preserved and Published merged, got %+v", home[2])
+	}
+	if s.SearchResults[0].Views != "2.6M vistas" || s.ChannelVideos[0].Views != "2.6M vistas" || s.CurrentPlaying.Published != "2026-11-17" {
+		t.Fatalf("expected Views/Published merged across search, channel, and CurrentPlaying: search=%+v chan=%+v cur=%+v", s.SearchResults[0], s.ChannelVideos[0], s.CurrentPlaying)
+	}
+
+	// Second trigger on the same items must deduplicate cleanly without re-fetching.
+	if dupCmd := s.enrichVisibleMetadataCmd(s.Feeds[model.TabHome], 0); dupCmd != nil {
+		t.Fatal("expected nil cmd on repeated enrichment request for already requested IDs")
+	}
+}

@@ -669,3 +669,33 @@ fi
 		}
 	})
 }
+
+func TestYTDLPCatalog_HonorsCustomFeedAndSearchSizes(t *testing.T) {
+	tmp := t.TempDir()
+	argsFile := filepath.Join(tmp, "args.log")
+	script := fmt.Sprintf(`
+printf '%%s\0' "$@" >> %s
+printf '{"id":"vid12345678","title":"Item","channel":"Chan","duration":60}\n'
+`, shellQuote(argsFile))
+
+	bin := writeFakeYTDLP(t, tmp, script)
+	cat := NewYTDLPCatalog(filepath.Join(tmp, "cache"), 5*time.Minute, bin)
+	cat.FeedSize = 100
+	cat.SearchSize = 40
+	defer cat.Wait()
+
+	if _, err := cat.Feed(context.Background(), model.TabHome); err != nil {
+		t.Fatalf("Feed error = %v", err)
+	}
+	if _, err := cat.Search(context.Background(), "jazz"); err != nil {
+		t.Fatalf("Search error = %v", err)
+	}
+
+	args := readRecordedArgs(t, argsFile)
+	if !hasArgPair(args, "--playlist-end", "100") {
+		t.Fatalf("expected --playlist-end 100 for custom FeedSize, got %v", args)
+	}
+	if !slices.Contains(args, "ytsearch40:jazz") {
+		t.Fatalf("expected ytsearch40:jazz for custom SearchSize, got %v", args)
+	}
+}

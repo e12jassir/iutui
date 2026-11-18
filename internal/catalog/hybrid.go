@@ -46,6 +46,9 @@ func (h *HybridCatalog) Feed(ctx context.Context, tab model.Tab) ([]model.Video,
 	if h.Feeds != nil {
 		videos, err := h.Feeds.Feed(ctx, tab)
 		if err == nil {
+			if h.Direct != nil {
+				h.Direct.applyCachedMeta(videos)
+			}
 			return videos, nil
 		}
 		if ctx.Err() != nil {
@@ -86,6 +89,9 @@ func (h *HybridCatalog) RefreshFeed(ctx context.Context, tab model.Tab) ([]model
 	if h.Feeds != nil {
 		videos, err := h.Feeds.RefreshFeed(ctx, tab)
 		if err == nil {
+			if h.Direct != nil {
+				h.Direct.applyCachedMeta(videos)
+			}
 			return videos, nil
 		}
 		if ctx.Err() != nil {
@@ -115,7 +121,19 @@ func (h *HybridCatalog) Search(ctx context.Context, query string) ([]model.Video
 		}
 	}
 	if h.Feeds != nil {
-		return h.Feeds.Search(ctx, query)
+		videos, err := h.Feeds.Search(ctx, query)
+		if err == nil && h.Direct != nil {
+			h.Direct.applyCachedMeta(videos)
+		}
+		return videos, err
 	}
 	return nil, nil
+}
+
+// EnrichMetadata delegates per-video view/date enrichment to the underlying Direct catalog.
+func (h *HybridCatalog) EnrichMetadata(ctx context.Context, ids []string) (map[string]VideoMeta, error) {
+	if h == nil || h.Direct == nil {
+		return nil, nil
+	}
+	return h.Direct.EnrichMetadata(ctx, ids)
 }

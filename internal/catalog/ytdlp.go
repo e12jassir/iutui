@@ -116,7 +116,10 @@ type YTDLPCatalog struct {
 	CacheDir      string
 	CacheTTL      time.Duration
 	Quality       int
+	FeedSize      int
+	SearchSize    int
 	CookieJarPath string
+	Meta          *MetadataEnricher
 
 	searchMu       sync.RWMutex
 	searchCache    map[string]searchCacheEntry
@@ -139,6 +142,7 @@ func NewYTDLPCatalog(cacheDir string, cacheTTL time.Duration, binPath string) *Y
 		BinPath:  binPath,
 		CacheDir: cacheDir,
 		CacheTTL: cacheTTL,
+		Meta:     NewMetadataEnricher(cacheDir),
 	}
 }
 
@@ -165,6 +169,7 @@ func (c *YTDLPCatalog) Feed(ctx context.Context, tab model.Tab) ([]model.Video, 
 	cachePath := c.cacheFilePath(cacheFile)
 	if cachePath != "" {
 		if videos, modTime, err := readCacheFile(cachePath); err == nil && len(videos) > 0 {
+			c.applyCachedMeta(videos)
 			if c.CacheTTL > 0 && time.Since(modTime) <= c.CacheTTL {
 				return videos, nil
 			}
@@ -190,6 +195,7 @@ func (c *YTDLPCatalog) Feed(ctx context.Context, tab model.Tab) ([]model.Video, 
 	if err != nil {
 		return nil, err
 	}
+	c.applyCachedMeta(videos)
 	if cachePath != "" && len(videos) > 0 {
 		c.feedMu.Lock()
 		if c.feedGeneration[tab] == generation {
@@ -223,6 +229,7 @@ func (c *YTDLPCatalog) RefreshFeed(ctx context.Context, tab model.Tab) ([]model.
 	if err != nil {
 		return nil, err
 	}
+	c.applyCachedMeta(videos)
 
 	cachePath := c.cacheFilePath(cacheFile)
 	if cachePath != "" && len(videos) > 0 {
@@ -235,7 +242,7 @@ func (c *YTDLPCatalog) RefreshFeed(ctx context.Context, tab model.Tab) ([]model.
 	return videos, nil
 }
 
-// Search queries YouTube via yt-dlp's ytsearch20 extractor with an in-memory TTL cache.
+// Search queries YouTube via yt-dlp's ytsearch extractor with an in-memory TTL cache.
 func (c *YTDLPCatalog) Search(ctx context.Context, query string) ([]model.Video, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -255,14 +262,20 @@ func (c *YTDLPCatalog) Search(ctx context.Context, query string) ([]model.Video,
 		videos := make([]model.Video, len(entry.videos))
 		copy(videos, entry.videos)
 		c.searchMu.RUnlock()
+		c.applyCachedMeta(videos)
 		return videos, nil
 	}
 	c.searchMu.RUnlock()
 
-	videos, err := c.fetchTarget(ctx, "ytsearch20:"+query)
+	searchLimit := c.SearchSize
+	if searchLimit <= 0 {
+		searchLimit = 20
+	}
+	videos, err := c.fetchTarget(ctx, fmt.Sprintf("ytsearch%d:%s", searchLimit, query))
 	if err != nil {
 		return nil, err
 	}
+	c.applyCachedMeta(videos)
 
 	c.searchMu.Lock()
 	if c.searchCache == nil {
@@ -285,7 +298,11 @@ func (c *YTDLPCatalog) fetchTarget(ctx context.Context, target string) ([]model.
 		"--socket-timeout", "8",
 	}
 	if strings.HasPrefix(target, "http://") || strings.HasPrefix(target, "https://") {
-		args = append(args, "--playlist-end", "30")
+		feedLimit := c.FeedSize
+		if feedLimit <= 0 {
+			feedLimit = 30
+		}
+		args = append(args, "--playlist-end", strconv.Itoa(feedLimit))
 	}
 	if c.CookieJarPath != "" {
 		if info, err := os.Stat(c.CookieJarPath); err == nil && !info.IsDir() && info.Size() > 0 {
@@ -556,6 +573,22 @@ func formatDurationSeconds(total int) string {
 		return fmt.Sprintf("%d:%02d:%02d", h, m, s)
 	}
 	return fmt.Sprintf("%02d:%02d", m, s)
+}
+
+// applyCachedMeta populates missing Views/Published fields from c.Meta without network I/O.
+func (c *YTDLPCatalog) applyCachedMeta(videos []model.Video) {
+	if c == nil || c.Meta == nil {
+		return
+	}
+	c.Meta.ApplyCached(videos)
+}
+
+// EnrichMetadata fetches missing view counts and publish dates for video IDs.
+func (c *YTDLPCatalog) EnrichMetadata(ctx context.Context, ids []string) (map[string]VideoMeta, error) {
+	if c == nil || c.Meta == nil {
+		return nil, nil
+	}
+	return c.Meta.Enrich(ctx, ids)
 }
 
 // IsErrKind reports whether err is or wraps a YTDLPError of kind k.
