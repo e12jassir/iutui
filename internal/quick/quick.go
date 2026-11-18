@@ -8,7 +8,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/mattn/go-runewidth"
 
-	"github.com/e12jassir/ytx/internal/model"
+	"github.com/e12jassir/iutui/internal/model"
 )
 
 const defaultMaxVisible = 15

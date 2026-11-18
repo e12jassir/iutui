@@ -3,7 +3,7 @@ package player
 import (
 	"context"
 
-	"github.com/e12jassir/ytx/internal/model"
+	"github.com/e12jassir/iutui/internal/model"
 )
 
 // Engine defines the playback control and status observation interface for a media player.

@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 )
 
-// Paths holds resolved XDG base directories and runtime socket path for ytx.
+// Paths holds resolved XDG base directories and runtime socket path for iutui.
 type Paths struct {
 	ConfigDir  string
 	CacheDir   string
@@ -15,7 +15,7 @@ type Paths struct {
 	SocketPath string
 }
 
-// ResolvePaths resolves XDG Base Directory paths for ytx, falling back to
+// ResolvePaths resolves XDG Base Directory paths for iutui, falling back to
 // standard user directories when XDG environment variables are unset.
 func ResolvePaths() Paths {
 	home, err := os.UserHomeDir()
@@ -29,9 +29,9 @@ func ResolvePaths() Paths {
 
 	var runtimeDir string
 	if xdgRuntime := os.Getenv("XDG_RUNTIME_DIR"); xdgRuntime != "" {
-		runtimeDir = filepath.Join(xdgRuntime, "ytx")
+		runtimeDir = filepath.Join(xdgRuntime, "iutui")
 	} else {
-		runtimeDir = fmt.Sprintf("/tmp/ytx-%d", os.Getuid())
+		runtimeDir = fmt.Sprintf("/tmp/iutui-%d", os.Getuid())
 	}
 
 	return Paths{
@@ -45,7 +45,7 @@ func ResolvePaths() Paths {
 
 func resolveXDGDir(envVar, fallbackBase string) string {
 	if base := os.Getenv(envVar); base != "" {
-		return filepath.Join(base, "ytx")
+		return filepath.Join(base, "iutui")
 	}
-	return filepath.Join(fallbackBase, "ytx")
+	return filepath.Join(fallbackBase, "iutui")
 }

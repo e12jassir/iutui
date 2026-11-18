@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/e12jassir/ytx/internal/model"
+	"github.com/e12jassir/iutui/internal/model"
 )
 
 func writeFakeYTDLP(t *testing.T, body string) string {

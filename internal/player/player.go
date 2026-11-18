@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/e12jassir/ytx/internal/model"
+	"github.com/e12jassir/iutui/internal/model"
 )
 
 // Status represents the current mpv playback state.

@@ -8,12 +8,12 @@ import (
 	"testing"
 
 	"github.com/charmbracelet/lipgloss"
-	"github.com/e12jassir/ytx/internal/app"
-	"github.com/e12jassir/ytx/internal/lyrics"
-	"github.com/e12jassir/ytx/internal/model"
-	"github.com/e12jassir/ytx/internal/player"
-	"github.com/e12jassir/ytx/internal/tui/theme"
-	"github.com/e12jassir/ytx/internal/tui/thumbs"
+	"github.com/e12jassir/iutui/internal/app"
+	"github.com/e12jassir/iutui/internal/lyrics"
+	"github.com/e12jassir/iutui/internal/model"
+	"github.com/e12jassir/iutui/internal/player"
+	"github.com/e12jassir/iutui/internal/tui/theme"
+	"github.com/e12jassir/iutui/internal/tui/thumbs"
 )
 
 var update = flag.Bool("update", false, "update golden files")

@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="520" height="120" viewBox="0 0 520 120">
+  <defs>
+    <linearGradient id="iuGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#BD93F9"/>
+      <stop offset="100%" stop-color="#FF2E63"/>
+    </linearGradient>
+    <radialGradient id="dotGlow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#FF2E63" stop-opacity="0.58"/>
+      <stop offset="55%" stop-color="#BD93F9" stop-opacity="0.24"/>
+      <stop offset="100%" stop-color="#BD93F9" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <!-- Left Squircle Emblem (x=8..104, y=12..108) -->
+  <rect x="8" y="12" width="96" height="96" rx="24" fill="#181825" stroke="url(#iuGrad)" stroke-width="5.5"/>
+  <path d="M40 35 L83 60 L40 85 L52 60 Z" fill="url(#iuGrad)"/>
+  <polygon points="40,35 83,60 52,60" fill="#FFFFFF" fill-opacity="0.16"/>
+
+  <!-- Centered Palindrome Wordmark: i u t u i (axis cx=316, y=26..96) -->
+  <!-- Left i (cx=158) -->
+  <circle cx="158" cy="32.5" r="13" fill="url(#dotGlow)"/>
+  <circle cx="158" cy="32.5" r="6.5" fill="url(#iuGrad)"/>
+  <rect x="152" y="46" width="12" height="50" rx="6" fill="#F8F8F2"/>
+
+  <!-- Left u (x=202..266) -->
+  <path d="M208 52 V64 A26 26 0 0 0 260 64 V52" fill="none" stroke="#F8F8F2" stroke-width="12" stroke-linecap="round"/>
+
+  <!-- Central t Keystone (cx=316) -->
+  <rect x="310" y="30" width="12" height="66" rx="6" fill="#BD93F9"/>
+  <rect x="297" y="46" width="38" height="12" rx="6" fill="#BD93F9"/>
+
+  <!-- Right u (x=366..430) -->
+  <path d="M372 52 V64 A26 26 0 0 0 424 64 V52" fill="none" stroke="#F8F8F2" stroke-width="12" stroke-linecap="round"/>
+
+  <!-- Right i (cx=474) -->
+  <circle cx="474" cy="32.5" r="13" fill="url(#dotGlow)"/>
+  <circle cx="474" cy="32.5" r="6.5" fill="url(#iuGrad)"/>
+  <rect x="468" y="46" width="12" height="50" rx="6" fill="#F8F8F2"/>
+</svg>

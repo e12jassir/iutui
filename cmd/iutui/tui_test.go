@@ -10,15 +10,15 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/exp/teatest"
-	"github.com/e12jassir/ytx/internal/app"
-	"github.com/e12jassir/ytx/internal/catalog"
-	"github.com/e12jassir/ytx/internal/config"
-	"github.com/e12jassir/ytx/internal/model"
-	"github.com/e12jassir/ytx/internal/platform"
-	"github.com/e12jassir/ytx/internal/player"
-	"github.com/e12jassir/ytx/internal/store"
-	"github.com/e12jassir/ytx/internal/tui/theme"
-	"github.com/e12jassir/ytx/internal/tui/thumbs"
+	"github.com/e12jassir/iutui/internal/app"
+	"github.com/e12jassir/iutui/internal/catalog"
+	"github.com/e12jassir/iutui/internal/config"
+	"github.com/e12jassir/iutui/internal/model"
+	"github.com/e12jassir/iutui/internal/platform"
+	"github.com/e12jassir/iutui/internal/player"
+	"github.com/e12jassir/iutui/internal/store"
+	"github.com/e12jassir/iutui/internal/tui/theme"
+	"github.com/e12jassir/iutui/internal/tui/thumbs"
 )
 
 func TestCobraSubcommandsRegistered(t *testing.T) {
@@ -188,23 +188,34 @@ func TestResolveCookieJar(t *testing.T) {
 		}
 	})
 
-	t.Run("falls back to sibling yt_terminal cookies.txt when ytx jar missing", func(t *testing.T) {
+	t.Run("falls back to sibling ytx or yt_terminal cookies.txt when iutui jar missing", func(t *testing.T) {
 		base := t.TempDir()
+		iutuiCache := filepath.Join(base, "iutui")
 		ytxCache := filepath.Join(base, "ytx")
 		ytTermCache := filepath.Join(base, "yt_terminal")
-		if err := os.MkdirAll(ytxCache, 0o700); err != nil {
+		for _, d := range []string{iutuiCache, ytxCache, ytTermCache} {
+			if err := os.MkdirAll(d, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		ytxJar := filepath.Join(ytxCache, "cookies.txt")
+		if err := os.WriteFile(ytxJar, []byte(".youtube.com\tTRUE\t/\tTRUE\t0\tSAPISID\tytx\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.MkdirAll(ytTermCache, 0o700); err != nil {
-			t.Fatal(err)
+		got := resolveCookieJar(config.Config{Cookies: "auto"}, platform.Paths{CacheDir: iutuiCache})
+		if got != ytxJar {
+			t.Fatalf("resolveCookieJar = %q, want ytx sibling %q", got, ytxJar)
 		}
+
 		sibJar := filepath.Join(ytTermCache, "cookies.txt")
 		if err := os.WriteFile(sibJar, []byte(".youtube.com\tTRUE\t/\tTRUE\t0\tSAPISID\tsibling\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		got := resolveCookieJar(config.Config{Cookies: "auto"}, platform.Paths{CacheDir: ytxCache})
+		older := time.Now().Add(-1 * time.Hour)
+		_ = os.Chtimes(ytxJar, older, older)
+		got = resolveCookieJar(config.Config{Cookies: "auto"}, platform.Paths{CacheDir: iutuiCache})
 		if got != sibJar {
-			t.Fatalf("resolveCookieJar = %q, want sibling %q", got, sibJar)
+			t.Fatalf("resolveCookieJar = %q, want newer sibling %q", got, sibJar)
 		}
 	})
 

@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/e12jassir/ytx/internal/model"
+	"github.com/e12jassir/iutui/internal/model"
 )
 
 func TestFetchChannelVideos_TargetAndArgs(t *testing.T) {

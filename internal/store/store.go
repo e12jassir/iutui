@@ -3,7 +3,7 @@ package store
 import (
 	"context"
 
-	"github.com/e12jassir/ytx/internal/model"
+	"github.com/e12jassir/iutui/internal/model"
 )
 
 // Store persists user watch-later, playback history, and subscription state.

@@ -3,7 +3,7 @@ package catalog
 import (
 	"context"
 
-	"github.com/e12jassir/ytx/internal/model"
+	"github.com/e12jassir/iutui/internal/model"
 )
 
 // Catalog provides access to video feeds and search results.

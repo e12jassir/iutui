@@ -5,7 +5,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/e12jassir/ytx/internal/model"
+	"github.com/e12jassir/iutui/internal/model"
 )
 
 // FakeCatalog is an in-memory Catalog implementation for deterministic tests.

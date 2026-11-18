@@ -17,6 +17,7 @@ PROPUESTAS*.md
 repomix*
 
 # Build artifacts
+bin/iutui
 bin/ytx
 bin/yt-tui
 

@@ -1,25 +1,26 @@
-# yt configuration — ~/.config/yt/config
+# iutui configuration — ~/.config/iutui/config
 # Plain KEY=value lines. Nothing here is executed. Environment variables win.
 
 # ── content ──────────────────────────────────────────────
-YT_FEED_SIZE=100            # items fetched for "for you" / subscriptions
+YT_FEED_SIZE=100            # items fetched for "home" / subscriptions
 YT_SEARCH_SIZE=40           # results per search
 YT_HIDE_SHORTS=1            # 1 = hide Shorts
-YT_INTERLEAVE=1             # 1 = mix channels in "for you" so none floods the list
+YT_INTERLEAVE=1             # 1 = mix channels in "home" so none floods the list
 YT_HOME=auto                # auto | foryou | music | subs | later | history | search
 
 # ── speed ────────────────────────────────────────────────
 YT_CACHE_TTL=900            # seconds a feed is considered fresh (stale data still shows instantly)
 YT_COOKIE_TTL=21600         # seconds between reads of your browser's cookie database
 YT_PREFETCH=24              # thumbnails pre-downloaded in parallel (0 = off)
-YT_THUMB_QUALITY=max         # max (HD maxresdefault with hq fallback) | hq | mq
+YT_THUMB_QUALITY=max        # max (HD maxresdefault with hq fallback) | hq | mq
 
 # ── playback & music ─────────────────────────────────────
 YT_DEFAULT_MODE=window      # window | pip | fs | audio
-YT_QUALITY=1080             # max video height (0 = no limit, 1080, 720, 480)
+YT_QUALITY=720              # max video height (0 = no limit, 1080, 720, 480, 360)
 YT_AUDIO_VOLUME=75          # initial mpv volume (0-150)
 YT_MUSIC_MODE=bg            # bg (background detached + notification) | term (foreground interactive)
 YT_PLAYBACK=auto            # auto (native direct, pipe fallback on 403) | direct | pipe
+YT_SPONSORBLOCK=1           # 1 = skip sponsor/selfpromo segments automatically via mpv IPC, 0 = off
 
 # ── login (cookies) ──────────────────────────────────────
 YT_COOKIES=auto             # auto | off (guest: search + RSS subscriptions)
@@ -28,13 +29,13 @@ YT_BROWSERS="zen firefox librewolf brave chromium chrome"   # detection order
 # YT_COOKIES_FILE=~/cookies.txt          # or use an exported Netscape cookies file
 
 # ── interface & downloads ────────────────────────────────
+YT_THEME=youtube-dark       # youtube-dark | catppuccin | tokyonight | gruvbox | kanagawa
 YT_LANG=auto                # auto | es | en
 YT_PREVIEW=auto             # auto | kitty | chafa | none
 YT_HEIGHT=95%
 YT_NOTIFY=1
-# YT_BROWSER_CMD=firefox    # ^o opens this (default: $BROWSER, xdg-open or open)
+# YT_BROWSER_CMD=firefox    # open-in-browser command (default: $BROWSER, xdg-open or open)
 # YT_DOWNLOAD_DIR=~/Videos
 # YT_DOWNLOAD_AUDIO=0       # 1 = download audio-only (mp3/m4a), 0 = video
 # YT_YTDLP_ARGS="--js-runtimes deno"   # extra yt-dlp flags
 # YT_FZF_OPTS=""
-

@@ -9,10 +9,10 @@ import (
 	"unicode"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/e12jassir/ytx/internal/lyrics"
-	"github.com/e12jassir/ytx/internal/model"
-	"github.com/e12jassir/ytx/internal/player"
-	"github.com/e12jassir/ytx/internal/tui/theme"
+	"github.com/e12jassir/iutui/internal/lyrics"
+	"github.com/e12jassir/iutui/internal/model"
+	"github.com/e12jassir/iutui/internal/player"
+	"github.com/e12jassir/iutui/internal/tui/theme"
 )
 
 const (
@@ -981,7 +981,7 @@ type qualitySetter interface {
 	SetQuality(ctx context.Context, quality int)
 }
 
-var qualityPresets = []int{0, 1080, 720, 480}
+var qualityPresets = []int{0, 1080, 720, 480, 360}
 
 // QualityLabel returns a human-readable badge for the current max vertical resolution.
 func (s *State) QualityLabel() string {
@@ -991,7 +991,7 @@ func (s *State) QualityLabel() string {
 	return fmt.Sprintf("%dp", s.Quality)
 }
 
-// CycleQuality rotates through quality presets (MAX -> 1080p -> 720p -> 480p),
+// CycleQuality rotates through quality presets (MAX -> 1080p -> 720p -> 480p -> 360p),
 // updates the player engine, persists config, and re-prefetches the current item.
 func (s *State) CycleQuality() (*State, tea.Cmd) {
 	next := qualityPresets[0]

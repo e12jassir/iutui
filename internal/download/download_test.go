@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/e12jassir/ytx/internal/model"
+	"github.com/e12jassir/iutui/internal/model"
 )
 
 func TestNewManager(t *testing.T) {

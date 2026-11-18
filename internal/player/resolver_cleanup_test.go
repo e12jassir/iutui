@@ -3,7 +3,7 @@ package player
 import (
 	"context"
 	"fmt"
-	"github.com/e12jassir/ytx/internal/model"
+	"github.com/e12jassir/iutui/internal/model"
 	"os"
 	"path/filepath"
 	"strings"

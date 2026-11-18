@@ -7,7 +7,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/e12jassir/ytx/internal/model"
+	"github.com/e12jassir/iutui/internal/model"
 )
 
 // FakeStore is an in-memory Store implementation for deterministic tests.

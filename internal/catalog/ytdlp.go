@@ -16,7 +16,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/e12jassir/ytx/internal/model"
+	"github.com/e12jassir/iutui/internal/model"
 )
 
 // BuildFormat returns a yt-dlp format selector string for the requested

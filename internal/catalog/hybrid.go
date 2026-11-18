@@ -3,7 +3,7 @@ package catalog
 import (
 	"context"
 
-	"github.com/e12jassir/ytx/internal/model"
+	"github.com/e12jassir/iutui/internal/model"
 )
 
 // HybridCatalog prioritizes native Go YTDLPCatalog for remote feeds and search

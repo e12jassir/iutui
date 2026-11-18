@@ -9,11 +9,11 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
-	"github.com/e12jassir/ytx/internal/app"
-	"github.com/e12jassir/ytx/internal/lyrics"
-	"github.com/e12jassir/ytx/internal/model"
-	"github.com/e12jassir/ytx/internal/tui/theme"
-	"github.com/e12jassir/ytx/internal/tui/thumbs"
+	"github.com/e12jassir/iutui/internal/app"
+	"github.com/e12jassir/iutui/internal/lyrics"
+	"github.com/e12jassir/iutui/internal/model"
+	"github.com/e12jassir/iutui/internal/tui/theme"
+	"github.com/e12jassir/iutui/internal/tui/thumbs"
 	"github.com/mattn/go-runewidth"
 )
 
@@ -365,10 +365,10 @@ func renderTopPanels(s *app.State, th theme.Theme, tr thumbs.Renderer, width int
 			brand = br.RenderBrand(sideW, 3)
 		}
 		if brand == "" {
-			brand = red.Render("▶") + white.Render("  ytx")
+			brand = red.Render("▶") + white.Render("  iutui")
 		}
 	} else {
-		brand = red.Render("▶") + white.Render(" ytx")
+		brand = red.Render("▶") + white.Render(" iutui")
 	}
 	brandBox := lipgloss.NewStyle().
 		Width(sideW).
@@ -920,7 +920,7 @@ func renderPlayerPanel(s *app.State, th theme.Theme, width int, pal renderPalett
 }
 
 func renderSettingsOverlay(s *app.State, width, height int, th theme.Theme, pal renderPalette) string {
-	title := lipgloss.NewStyle().Foreground(pal.spotAccent).Bold(true).Render("Configuración (ytx)")
+	title := lipgloss.NewStyle().Foreground(pal.spotAccent).Bold(true).Render("Configuración (iutui)")
 	qLabel := "Máxima (best)"
 	if s.Quality > 0 {
 		qLabel = fmt.Sprintf("%dp", s.Quality)
@@ -944,7 +944,7 @@ func renderSettingsOverlay(s *app.State, width, height int, th theme.Theme, pal 
 		fmt.Sprintf("  Autoplay [A]:         %s", autoplayLabel),
 		fmt.Sprintf("  SponsorBlock [B]:     %s", sbLabel),
 		fmt.Sprintf("  Tema [t]:             %s", themeLabel),
-		"  Config archivo:       ~/.config/yt/config",
+		"  Config archivo:       ~/.config/iutui/config",
 		"  Carpeta descargas:    ~/Videos/yt",
 		"  Reproductor:          mpv IPC + prefetch HD",
 		"",
@@ -989,7 +989,7 @@ func renderStillWatchingOverlay(s *app.State, width, height int, th theme.Theme,
 }
 
 func renderHelpOverlay(_ string, width, height int, th theme.Theme, pal renderPalette) string {
-	title := lipgloss.NewStyle().Foreground(pal.white).Bold(true).Render("Atajos de teclado (ytx)")
+	title := lipgloss.NewStyle().Foreground(pal.white).Bold(true).Render("Atajos de teclado (iutui)")
 	rows := []string{
 		title,
 		"",

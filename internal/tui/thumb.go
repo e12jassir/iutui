@@ -2,6 +2,7 @@ package tui
 
 import (
 	"bytes"
+	_ "embed"
 	"encoding/base64"
 	"fmt"
 	"hash/fnv"
@@ -16,7 +17,7 @@ import (
 	"sync"
 
 	"github.com/charmbracelet/lipgloss"
-	"github.com/e12jassir/ytx/internal/data"
+	"github.com/e12jassir/iutui/internal/data"
 )
 
 var (
@@ -263,7 +264,7 @@ func RenderBrandLogo(cols, rows int) string {
 		return cached
 	}
 
-	const brandImgID uint32 = 0x595458 // "YTX"
+	const brandImgID uint32 = 0x495554 // "IUT"
 	kittyUploadMu.Lock()
 	uploaded := kittyUploaded[brandImgID]
 	kittyUploadMu.Unlock()
@@ -288,34 +289,14 @@ func RenderBrandLogo(cols, rows int) string {
 	return out
 }
 
+//go:embed logo.png
+var embeddedBrandLogoPNG []byte
+
 func renderYouTubeBrandPNG() ([]byte, error) {
-	if _, err := exec.LookPath("rsvg-convert"); err != nil {
-		return nil, err
+	if len(embeddedBrandLogoPNG) == 0 {
+		return nil, fmt.Errorf("empty embedded brand logo")
 	}
-	const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="260" height="60" viewBox="0 0 260 60">
-  <defs>
-    <linearGradient id="ytxGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#BD93F9"/>
-      <stop offset="100%" stop-color="#FF2E63"/>
-    </linearGradient>
-  </defs>
-  <rect x="4" y="6" width="50" height="48" rx="13" fill="#181825" stroke="url(#ytxGrad)" stroke-width="3"/>
-  <path d="M21 19 L43 30 L21 41 L26 30 Z" fill="url(#ytxGrad)"/>
-  <text x="68" y="47" font-family="Noto Sans, Inter, sans-serif" font-weight="800" font-size="50" letter-spacing="-1" fill="#F8F8F2">yt<tspan fill="#BD93F9">x</tspan></text>
-  <rect x="176" y="15" width="76" height="30" rx="8" fill="#1E1E2E" stroke="#374151" stroke-width="1.8"/>
-  <text x="214" y="37" text-anchor="middle" font-family="Noto Sans, Inter, sans-serif" font-weight="700" font-size="19" letter-spacing="3" fill="#9CA3AF">TUI</text>
-</svg>`
-	cmd := exec.Command("rsvg-convert", "-w", "520", "-h", "120", "-f", "png")
-	cmd.Stdin = strings.NewReader(svg)
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	if err := cmd.Run(); err != nil {
-		return nil, err
-	}
-	if out.Len() == 0 {
-		return nil, fmt.Errorf("empty svg render")
-	}
-	return out.Bytes(), nil
+	return embeddedBrandLogoPNG, nil
 }
 
 // uploadKittyImage decodes the JPEG, scales it cleanly to 320x180 PNG in memory, and sends it to /dev/tty

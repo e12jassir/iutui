@@ -12,7 +12,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/e12jassir/ytx/internal/model"
+	"github.com/e12jassir/iutui/internal/model"
 )
 
 // BashCatalog implements Catalog by reading cached TSV feeds and falling back

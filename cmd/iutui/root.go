@@ -12,24 +12,24 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/e12jassir/ytx/internal/app"
-	"github.com/e12jassir/ytx/internal/catalog"
-	"github.com/e12jassir/ytx/internal/config"
-	"github.com/e12jassir/ytx/internal/cookies"
-	"github.com/e12jassir/ytx/internal/download"
-	"github.com/e12jassir/ytx/internal/lyrics"
-	"github.com/e12jassir/ytx/internal/model"
-	"github.com/e12jassir/ytx/internal/platform"
-	"github.com/e12jassir/ytx/internal/player"
-	"github.com/e12jassir/ytx/internal/quick"
-	"github.com/e12jassir/ytx/internal/store"
-	"github.com/e12jassir/ytx/internal/tui"
-	"github.com/e12jassir/ytx/internal/tui/theme"
-	"github.com/e12jassir/ytx/internal/tui/thumbs"
+	"github.com/e12jassir/iutui/internal/app"
+	"github.com/e12jassir/iutui/internal/catalog"
+	"github.com/e12jassir/iutui/internal/config"
+	"github.com/e12jassir/iutui/internal/cookies"
+	"github.com/e12jassir/iutui/internal/download"
+	"github.com/e12jassir/iutui/internal/lyrics"
+	"github.com/e12jassir/iutui/internal/model"
+	"github.com/e12jassir/iutui/internal/platform"
+	"github.com/e12jassir/iutui/internal/player"
+	"github.com/e12jassir/iutui/internal/quick"
+	"github.com/e12jassir/iutui/internal/store"
+	"github.com/e12jassir/iutui/internal/tui"
+	"github.com/e12jassir/iutui/internal/tui/theme"
+	"github.com/e12jassir/iutui/internal/tui/thumbs"
 	"github.com/spf13/cobra"
 )
 
-var version = "0.3.0-dev"
+var version = "0.4.0"
 
 type nativeThumbs struct {
 	backend thumbs.Backend
@@ -73,7 +73,7 @@ func newRootCmd() *cobra.Command {
 	var quickMode bool
 
 	root := &cobra.Command{
-		Use:     "ytx",
+		Use:     "iutui",
 		Short:   "YouTube TUI & CLI powered by mpv IPC and yt-dlp",
 		Version: version,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -130,6 +130,7 @@ func resolveCookieJar(cfg config.Config, paths platform.Paths) string {
 	if paths.CacheDir != "" {
 		candidates := []string{
 			filepath.Join(paths.CacheDir, "cookies.txt"),
+			filepath.Join(filepath.Dir(paths.CacheDir), "ytx", "cookies.txt"),
 			filepath.Join(filepath.Dir(paths.CacheDir), "yt_terminal", "cookies.txt"),
 		}
 		var bestPath string
@@ -509,7 +510,7 @@ func newQueueCmd() *cobra.Command {
 func newDoctorCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "doctor",
-		Short: "Check system dependencies and ytx paths",
+		Short: "Check system dependencies and iutui paths",
 		Run: func(cmd *cobra.Command, args []string) {
 			paths := platform.ResolvePaths()
 			out := cmd.OutOrStdout()

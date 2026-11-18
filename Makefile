@@ -1,26 +1,26 @@
 PREFIX ?= $(HOME)/.local
 BINDIR ?= $(PREFIX)/bin
 LIBDIR ?= $(PREFIX)/lib/yt
-FILES  := yt yt-fmt yt-thumb-preview ytx
+FILES  := yt yt-fmt yt-thumb-preview iutui
 
 .PHONY: install uninstall test test-bash test-go build clean lint verify
 
 build:
-	@go build -o bin/ytx ./cmd/ytx
+	@go build -o bin/iutui ./cmd/iutui
 
 clean:
-	@rm -f bin/ytx
+	@rm -f bin/iutui bin/ytx
 
 install: build
 	@mkdir -p $(BINDIR) $(LIBDIR)
 	@for f in $(FILES); do install -m 755 bin/$$f $(BINDIR)/$$f; done
 	@install -m 644 lib/*.sh $(LIBDIR)/
-	@echo "yt installed in $(BINDIR) (libs in $(LIBDIR))"
+	@echo "iutui installed in $(BINDIR) (libs in $(LIBDIR))"
 
 uninstall:
 	@for f in $(FILES); do rm -f $(BINDIR)/$$f; done
 	@rm -rf $(LIBDIR)
-	@echo "yt removed from $(BINDIR)"
+	@echo "iutui removed from $(BINDIR)"
 
 test-bash:
 	@bash tests/smoke.sh

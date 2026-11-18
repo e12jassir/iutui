@@ -1,0 +1,73 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="920" height="220" viewBox="0 0 920 220">
+  <defs>
+    <linearGradient id="iuGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#BD93F9"/>
+      <stop offset="100%" stop-color="#FF2E63"/>
+    </linearGradient>
+    <linearGradient id="topBarGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#BD93F9" stop-opacity="0.15"/>
+      <stop offset="20%" stop-color="#BD93F9"/>
+      <stop offset="80%" stop-color="#FF2E63"/>
+      <stop offset="100%" stop-color="#FF2E63" stop-opacity="0.15"/>
+    </linearGradient>
+    <linearGradient id="topGlowFade" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#BD93F9" stop-opacity="0.22"/>
+      <stop offset="100%" stop-color="#BD93F9" stop-opacity="0"/>
+    </linearGradient>
+    <radialGradient id="ambientGlow" cx="50%" cy="0%" r="65%">
+      <stop offset="0%" stop-color="#BD93F9" stop-opacity="0.12"/>
+      <stop offset="50%" stop-color="#FF2E63" stop-opacity="0.05"/>
+      <stop offset="100%" stop-color="#0f0f0f" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="dotGlow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#FF2E63" stop-opacity="0.58"/>
+      <stop offset="55%" stop-color="#BD93F9" stop-opacity="0.24"/>
+      <stop offset="100%" stop-color="#BD93F9" stop-opacity="0"/>
+    </radialGradient>
+    <clipPath id="cardClip">
+      <rect x="1" y="1" width="918" height="218" rx="20"/>
+    </clipPath>
+  </defs>
+
+  <!-- Dark Surface Card -->
+  <rect x="1" y="1" width="918" height="218" rx="20" fill="#0f0f0f"/>
+
+  <!-- Clipped Top Ambient & Accent Glow Bar -->
+  <g clip-path="url(#cardClip)">
+    <rect x="1" y="1" width="918" height="140" fill="url(#ambientGlow)"/>
+    <rect x="1" y="1" width="918" height="20" fill="url(#topGlowFade)"/>
+    <rect x="1" y="1" width="918" height="4" fill="url(#topBarGrad)"/>
+  </g>
+
+  <!-- Crisp Card Stroke -->
+  <rect x="1" y="1" width="918" height="218" rx="20" fill="none" stroke="#272727" stroke-width="2"/>
+
+  <!-- Centered Pure-Vector iutui Lockup (scaled 1.28x, optical midpoint 243,60 -> 460,112) -->
+  <g transform="translate(149, 35.2) scale(1.28)">
+    <!-- Squircle Emblem -->
+    <rect x="8" y="12" width="96" height="96" rx="24" fill="#181825" stroke="url(#iuGrad)" stroke-width="5.5"/>
+    <path d="M40 35 L83 60 L40 85 L52 60 Z" fill="url(#iuGrad)"/>
+    <polygon points="40,35 83,60 52,60" fill="#FFFFFF" fill-opacity="0.16"/>
+
+    <!-- Palindrome Wordmark: i u t u i -->
+    <!-- Left i -->
+    <circle cx="158" cy="32.5" r="13" fill="url(#dotGlow)"/>
+    <circle cx="158" cy="32.5" r="6.5" fill="url(#iuGrad)"/>
+    <rect x="152" y="46" width="12" height="50" rx="6" fill="#F8F8F2"/>
+
+    <!-- Left u -->
+    <path d="M208 52 V64 A26 26 0 0 0 260 64 V52" fill="none" stroke="#F8F8F2" stroke-width="12" stroke-linecap="round"/>
+
+    <!-- Central t Keystone -->
+    <rect x="310" y="30" width="12" height="66" rx="6" fill="#BD93F9"/>
+    <rect x="297" y="46" width="38" height="12" rx="6" fill="#BD93F9"/>
+
+    <!-- Right u -->
+    <path d="M372 52 V64 A26 26 0 0 0 424 64 V52" fill="none" stroke="#F8F8F2" stroke-width="12" stroke-linecap="round"/>
+
+    <!-- Right i -->
+    <circle cx="474" cy="32.5" r="13" fill="url(#dotGlow)"/>
+    <circle cx="474" cy="32.5" r="6.5" fill="url(#iuGrad)"/>
+    <rect x="468" y="46" width="12" height="50" rx="6" fill="#F8F8F2"/>
+  </g>
+</svg>

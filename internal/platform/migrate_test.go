@@ -86,6 +86,21 @@ func TestMigrateFromYT(t *testing.T) {
 				assertNotExists(t, filepath.Join(p.ConfigDir, "config.toml"))
 			},
 		},
+		{
+			name: "prefers ytx over legacy yt when both exist",
+			setup: func(t *testing.T, home string, p Paths) {
+				writeTestFile(t, filepath.Join(home, ".config", "yt", "config"), "YT_QUALITY=\"1080\"\n")
+				writeTestFile(t, filepath.Join(home, ".config", "ytx", "config"), "YT_QUALITY=\"720\"\n")
+				writeTestFile(t, filepath.Join(home, ".config", "ytx", ".migrated"), "migrated\n")
+				writeTestFile(t, filepath.Join(home, ".local", "state", "ytx", "history.tsv"), "vidYTX\tNewest\n")
+			},
+			wantMigrated:  true,
+			wantSecondRun: false,
+			checkPostState: func(t *testing.T, home string, p Paths) {
+				assertFileContent(t, filepath.Join(p.ConfigDir, "config"), "YT_QUALITY=\"720\"\n")
+				assertFileContent(t, filepath.Join(p.StateDir, "history.tsv"), "vidYTX\tNewest\n")
+			},
+		},
 	}
 
 	for _, tc := range tests {

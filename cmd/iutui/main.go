@@ -5,10 +5,10 @@ import (
 	"os"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/e12jassir/ytx/internal/app"
-	"github.com/e12jassir/ytx/internal/tui/theme"
-	"github.com/e12jassir/ytx/internal/tui/thumbs"
-	"github.com/e12jassir/ytx/internal/tui/views"
+	"github.com/e12jassir/iutui/internal/app"
+	"github.com/e12jassir/iutui/internal/tui/theme"
+	"github.com/e12jassir/iutui/internal/tui/thumbs"
+	"github.com/e12jassir/iutui/internal/tui/views"
 )
 
 type teaModel struct {
@@ -33,7 +33,7 @@ func (m teaModel) View() string {
 
 func main() {
 	if err := newRootCmd().Execute(); err != nil {
-		fmt.Fprintf(os.Stderr, "ytx: %v\n", err)
+		fmt.Fprintf(os.Stderr, "iutui: %v\n", err)
 		os.Exit(1)
 	}
 }

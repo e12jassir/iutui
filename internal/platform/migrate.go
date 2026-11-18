@@ -16,9 +16,10 @@ type migrationPair struct {
 	dst string
 }
 
-// MigrateFromYT performs a one-time copy of user data from legacy yt/yt_terminal
-// directories into the resolved ytx XDG directories. Legacy files are never
-// moved or deleted, and any file or directory matching *cookie* is skipped.
+// MigrateFromYT performs a one-time copy of user data from prior ytx or legacy
+// yt/yt_terminal directories into the resolved iutui XDG directories. Legacy
+// files are never moved or deleted, and any file or directory matching *cookie*
+// is skipped. When ytx directories exist, they take precedence over older yt ones.
 // It returns true if at least one directory was migrated.
 func MigrateFromYT(p Paths) (bool, error) {
 	home, err := os.UserHomeDir()
@@ -27,6 +28,9 @@ func MigrateFromYT(p Paths) (bool, error) {
 	}
 
 	pairs := []migrationPair{
+		{src: filepath.Join(home, ".local", "state", "ytx"), dst: p.StateDir},
+		{src: filepath.Join(home, ".cache", "ytx"), dst: p.CacheDir},
+		{src: filepath.Join(home, ".config", "ytx"), dst: p.ConfigDir},
 		{src: filepath.Join(home, ".local", "state", "yt"), dst: p.StateDir},
 		{src: filepath.Join(home, ".cache", "yt_terminal"), dst: p.CacheDir},
 		{src: filepath.Join(home, ".config", "yt"), dst: p.ConfigDir},
@@ -82,7 +86,7 @@ func migrateDir(src, dst string) (bool, error) {
 			return nil
 		}
 
-		if isCookieName(d.Name()) {
+		if d.Name() == migratedMarker || isCookieName(d.Name()) {
 			if d.IsDir() {
 				return filepath.SkipDir
 			}

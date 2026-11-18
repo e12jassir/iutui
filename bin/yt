@@ -371,7 +371,9 @@ main() {
         -*)               usage >&2; return 2 ;;
         "")
             if [ -t 1 ] && [ "${YT_UI:-spotatui}" != "fzf" ]; then
-                local tui_bin="$BIN_DIR/ytx"
+                local tui_bin="$BIN_DIR/iutui"
+                [ -x "$tui_bin" ] || tui_bin="$(command -v iutui 2>/dev/null || true)"
+                [ -x "$tui_bin" ] || tui_bin="$BIN_DIR/ytx"
                 [ -x "$tui_bin" ] || tui_bin="$(command -v ytx 2>/dev/null || true)"
                 if [ -x "$tui_bin" ]; then
                     exec "$tui_bin"

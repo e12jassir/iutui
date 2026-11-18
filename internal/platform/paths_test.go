@@ -8,7 +8,7 @@ import (
 )
 
 func TestResolvePaths(t *testing.T) {
-	uidFallback := fmt.Sprintf("/tmp/ytx-%d", os.Getuid())
+	uidFallback := fmt.Sprintf("/tmp/iutui-%d", os.Getuid())
 
 	tests := []struct {
 		name           string
@@ -23,9 +23,9 @@ func TestResolvePaths(t *testing.T) {
 	}{
 		{
 			name:           "defaults when XDG vars unset",
-			wantConfigSub:  filepath.Join(".config", "ytx"),
-			wantCacheSub:   filepath.Join(".cache", "ytx"),
-			wantStateSub:   filepath.Join(".local", "state", "ytx"),
+			wantConfigSub:  filepath.Join(".config", "iutui"),
+			wantCacheSub:   filepath.Join(".cache", "iutui"),
+			wantStateSub:   filepath.Join(".local", "state", "iutui"),
 			wantRuntimeAbs: uidFallback,
 		},
 		{
@@ -34,18 +34,18 @@ func TestResolvePaths(t *testing.T) {
 			xdgCacheHome:   "custom-cache",
 			xdgStateHome:   "custom-state",
 			xdgRuntimeDir:  "custom-runtime",
-			wantConfigSub:  filepath.Join("custom-config", "ytx"),
-			wantCacheSub:   filepath.Join("custom-cache", "ytx"),
-			wantStateSub:   filepath.Join("custom-state", "ytx"),
+			wantConfigSub:  filepath.Join("custom-config", "iutui"),
+			wantCacheSub:   filepath.Join("custom-cache", "iutui"),
+			wantStateSub:   filepath.Join("custom-state", "iutui"),
 			wantRuntimeAbs: "", // computed relative to temp dir
 		},
 		{
 			name:           "partial XDG vars set",
 			xdgConfigHome:  "only-config",
 			xdgRuntimeDir:  "only-runtime",
-			wantConfigSub:  filepath.Join("only-config", "ytx"),
-			wantCacheSub:   filepath.Join(".cache", "ytx"),
-			wantStateSub:   filepath.Join(".local", "state", "ytx"),
+			wantConfigSub:  filepath.Join("only-config", "iutui"),
+			wantCacheSub:   filepath.Join(".cache", "iutui"),
+			wantStateSub:   filepath.Join(".local", "state", "iutui"),
 			wantRuntimeAbs: "",
 		},
 	}
@@ -77,7 +77,7 @@ func TestResolvePaths(t *testing.T) {
 			wantState := filepath.Join(home, tc.wantStateSub)
 			wantRuntime := tc.wantRuntimeAbs
 			if runtimeBase != "" {
-				wantRuntime = filepath.Join(runtimeBase, "ytx")
+				wantRuntime = filepath.Join(runtimeBase, "iutui")
 			}
 			wantSocket := filepath.Join(wantRuntime, "mpv.sock")
 

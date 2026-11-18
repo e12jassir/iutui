@@ -15,11 +15,11 @@ import (
 	"slices"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/e12jassir/ytx/internal/catalog"
-	"github.com/e12jassir/ytx/internal/lyrics"
-	"github.com/e12jassir/ytx/internal/model"
-	"github.com/e12jassir/ytx/internal/player"
-	"github.com/e12jassir/ytx/internal/store"
+	"github.com/e12jassir/iutui/internal/catalog"
+	"github.com/e12jassir/iutui/internal/lyrics"
+	"github.com/e12jassir/iutui/internal/model"
+	"github.com/e12jassir/iutui/internal/player"
+	"github.com/e12jassir/iutui/internal/store"
 )
 
 func newTestState() (*State, *catalog.FakeCatalog, *player.FakeEngine, *store.FakeStore) {

@@ -13,7 +13,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/e12jassir/ytx/internal/model"
+	"github.com/e12jassir/iutui/internal/model"
 )
 
 // Status represents the lifecycle state of a download item.

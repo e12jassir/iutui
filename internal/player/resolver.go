@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/e12jassir/ytx/internal/model"
+	"github.com/e12jassir/iutui/internal/model"
 )
 
 const (

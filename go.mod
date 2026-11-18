@@ -1,4 +1,4 @@
-module github.com/e12jassir/ytx
+module github.com/e12jassir/iutui
 
 go 1.27.3
 
