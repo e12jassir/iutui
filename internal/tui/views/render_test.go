@@ -2,6 +2,7 @@ package views
 
 import (
 	"flag"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -495,5 +496,47 @@ func TestRenderChannelChaptersLyricsAndThemes(t *testing.T) {
 		t.Setenv("NO_COLOR", "1")
 		outNoColor := Render(s, th, tr)
 		assertBounds(t, outNoColor, 120, 36)
+	})
+
+	t.Run("lyrics_word_wrap_and_plain_scroll", func(t *testing.T) {
+		s := newTestState(app.ViewHome, 120, 36)
+		defer s.Close()
+		s.ShowLyrics = true
+		s.LyricsTrack = "Wrap Test"
+		s.PlayerStatus.TimePos = 10
+		s.PlayerStatus.Duration = 100
+		longVerse := "Esta noche vamos a cantar toda la cancion completa sin cortarse"
+		s.Lyrics = lyrics.TrackLyrics{
+			TrackName:  "Track",
+			ArtistName: "Artist",
+			Synced: []lyrics.Line{
+				{Time: 5, Text: longVerse},
+				{Time: 25, Text: "Siguiente estrofa"},
+			},
+		}
+		outSynced := Render(s, th, tr)
+		assertBounds(t, outSynced, 120, 36)
+		for _, part := range []string{
+			"▶ Esta noche vamos a cantar toda",
+			"la cancion completa sin",
+			"  cortarse",
+			"Siguiente estrofa",
+		} {
+			if !strings.Contains(outSynced, part) {
+				t.Fatalf("expected long synced lyric to word-wrap cleanly (missing %q), got:\n%s", part, outSynced)
+			}
+		}
+
+		var plain []string
+		for i := 1; i <= 35; i++ {
+			plain = append(plain, fmt.Sprintf("Verso plain numero %02d con palabras completas", i))
+		}
+		s.Lyrics = lyrics.TrackLyrics{TrackName: "Track", ArtistName: "Artist", Plain: plain}
+		s.PlayerStatus.TimePos = 98
+		outPlain := Render(s, th, tr)
+		assertBounds(t, outPlain, 120, 36)
+		if !strings.Contains(outPlain, "Verso plain numero 35") {
+			t.Fatalf("expected plain lyrics near end of track to auto-scroll to line 35, got:\n%s", outPlain)
+		}
 	})
 }

@@ -1109,36 +1109,132 @@ func buildLyricsContent(s *app.State, innerW, bodyH int, pal renderPalette) []st
 	availLines := max(1, bodyH-len(lines))
 	if len(s.Lyrics.Synced) > 0 {
 		active := lyrics.ActiveLineIndex(s.Lyrics.Synced, s.PlayerStatus.TimePos)
-		start := 0
-		if active > availLines/2 {
-			start = active - availLines/2
-		}
-		if start+availLines > len(s.Lyrics.Synced) {
-			start = max(0, len(s.Lyrics.Synced)-availLines)
-		}
-		end := min(len(s.Lyrics.Synced), start+availLines)
-		for i := start; i < end; i++ {
-			txt := truncatePlain(s.Lyrics.Synced[i].Text, max(1, innerW-3))
+		wrapW := max(8, innerW-4)
+		activeStyle := lipgloss.NewStyle().Foreground(pal.spotAccent).Bold(true)
+		pastStyle := lipgloss.NewStyle().Foreground(pal.dim)
+		futureStyle := lipgloss.NewStyle().Foreground(pal.text)
+
+		var displayRows []string
+		activeStartRow := 0
+		for i, l := range s.Lyrics.Synced {
 			if i == active {
-				lines = append(lines, " "+lipgloss.NewStyle().Foreground(pal.spotAccent).Bold(true).Render("▶ "+txt))
-			} else if i < active {
-				lines = append(lines, " "+lipgloss.NewStyle().Foreground(pal.dim).Render("  "+txt))
-			} else {
-				lines = append(lines, " "+lipgloss.NewStyle().Foreground(pal.text).Render("  "+txt))
+				activeStartRow = len(displayRows)
+			}
+			wrapped := wrapLyricLine(l.Text, wrapW)
+			for wi, wline := range wrapped {
+				switch {
+				case i == active:
+					prefix := "  "
+					if wi == 0 {
+						prefix = "▶ "
+					}
+					displayRows = append(displayRows, " "+activeStyle.Render(prefix+wline))
+				case i < active:
+					displayRows = append(displayRows, " "+pastStyle.Render("  "+wline))
+				default:
+					displayRows = append(displayRows, " "+futureStyle.Render("  "+wline))
+				}
 			}
 		}
-		return lines
+		if len(displayRows) == 0 {
+			return append(lines, " "+lipgloss.NewStyle().Foreground(pal.muted).Render("Sin letra disponible"))
+		}
+		maxStart := max(0, len(displayRows)-availLines)
+		start := activeStartRow - availLines/3 + s.LyricsScroll
+		if start < 0 {
+			start = 0
+		}
+		if start > maxStart {
+			start = maxStart
+		}
+		end := min(len(displayRows), start+availLines)
+		return append(lines, displayRows[start:end]...)
 	}
 
 	if len(s.Lyrics.Plain) > 0 {
-		end := min(len(s.Lyrics.Plain), availLines)
-		for i := 0; i < end; i++ {
-			lines = append(lines, " "+lipgloss.NewStyle().Foreground(pal.text).Render(truncatePlain(s.Lyrics.Plain[i], max(1, innerW-2))))
+		wrapW := max(8, innerW-2)
+		plainStyle := lipgloss.NewStyle().Foreground(pal.text)
+		var displayRows []string
+		for _, l := range s.Lyrics.Plain {
+			for _, wline := range wrapLyricLine(l, wrapW) {
+				displayRows = append(displayRows, " "+plainStyle.Render(wline))
+			}
 		}
-		return lines
+		if len(displayRows) == 0 {
+			return append(lines, " "+lipgloss.NewStyle().Foreground(pal.muted).Render("Sin letra disponible"))
+		}
+		maxStart := max(0, len(displayRows)-availLines)
+		start := s.LyricsScroll
+		if s.PlayerStatus.Duration > 0 && maxStart > 0 {
+			ratio := s.PlayerStatus.TimePos / s.PlayerStatus.Duration
+			if ratio < 0 {
+				ratio = 0
+			}
+			if ratio > 1 {
+				ratio = 1
+			}
+			start = int(ratio*float64(maxStart)) + s.LyricsScroll
+		}
+		if start < 0 {
+			start = 0
+		}
+		if start > maxStart {
+			start = maxStart
+		}
+		end := min(len(displayRows), start+availLines)
+		return append(lines, displayRows[start:end]...)
 	}
 
 	return append(lines, " "+lipgloss.NewStyle().Foreground(pal.muted).Render("Sin letra disponible"))
+}
+
+func wrapLyricLine(text string, maxW int) []string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return nil
+	}
+	if maxW <= 0 || runewidth.StringWidth(text) <= maxW {
+		return []string{text}
+	}
+	words := strings.Fields(text)
+	if len(words) == 0 {
+		return nil
+	}
+	var out []string
+	var cur strings.Builder
+	curW := 0
+	flush := func() {
+		if cur.Len() > 0 {
+			out = append(out, cur.String())
+			cur.Reset()
+			curW = 0
+		}
+	}
+	for _, w := range words {
+		ww := runewidth.StringWidth(w)
+		if cur.Len() > 0 && curW+1+ww <= maxW {
+			cur.WriteByte(' ')
+			cur.WriteString(w)
+			curW += 1 + ww
+			continue
+		}
+		flush()
+		rem := w
+		for runewidth.StringWidth(rem) > maxW {
+			part := runewidth.Truncate(rem, maxW, "")
+			if part == "" {
+				break
+			}
+			out = append(out, part)
+			rem = strings.TrimPrefix(rem, part)
+		}
+		if rem != "" {
+			cur.WriteString(rem)
+			curW = runewidth.StringWidth(rem)
+		}
+	}
+	flush()
+	return out
 }
 
 func renderLyricsPanel(s *app.State, _ theme.Theme, width, height int, pal renderPalette) string {

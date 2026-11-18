@@ -110,11 +110,14 @@ type State struct {
 	ResultIdx    int
 	ResultScroll int
 
-	SavedIDs      map[string]bool
-	HistoryIDs    map[string]bool
-	Subscriptions []string
-	Queue         []model.Video
-	PlayerStatus  player.Status
+	SavedIDs        map[string]bool
+	HistoryIDs      map[string]bool
+	Subscriptions   []string
+	Queue           []model.Video
+	PlayStack       []model.Video
+	CurrentPlaying  model.Video
+	skipHistoryPush bool
+	PlayerStatus    player.Status
 
 	Toast   string
 	ToastID int
@@ -133,6 +136,7 @@ type State struct {
 	Lyrics            lyrics.TrackLyrics
 	LyricsErr         string
 	LyricsTrack       string
+	LyricsScroll      int
 
 	Autoplay     bool
 	SponsorBlock bool

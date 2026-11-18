@@ -411,3 +411,51 @@ func TestClientFetch_FallbackStripsAllParens(t *testing.T) {
 		t.Fatalf("expected 2 search calls (primary + fallback), got %d: %v", len(queries), queries)
 	}
 }
+
+func TestClientFetch_UpgradesUnsyncedAndCoreQuery(t *testing.T) {
+	if got := CoreQuery("Bad Bunny - Titi Me Pregunto ft. Someone - Video Oficial", "BadBunnyVEVO"); got != "Bad Bunny - Titi Me Pregunto" {
+		t.Fatalf("CoreQuery double hyphen/ft = %q", got)
+	}
+	if got := CoreQuery("Song Title (Audio)", "ArtistVEVO"); got != "Artist Song Title" {
+		t.Fatalf("CoreQuery VEVO = %q", got)
+	}
+
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		q := r.URL.Query().Get("q")
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(q, "Argentina") {
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{
+					"trackName":   "De Música Ligera",
+					"artistName":  "Soda Stereo",
+					"plainLyrics": "Ella durmió",
+				},
+			})
+			return
+		}
+		_ = json.NewEncoder(w).Encode([]map[string]any{
+			{
+				"trackName":    "De Música Ligera",
+				"artistName":   "Soda Stereo",
+				"syncedLyrics": "[00:05.00] Ella durmió",
+			},
+		})
+	}))
+	defer srv.Close()
+
+	client := NewClient()
+	client.BaseURL = srv.URL
+
+	got, err := client.Fetch(context.Background(), "upgrade-1", "Soda Stereo - De Música Ligera (Argentina 1997)", "Soda Stereo")
+	if err != nil {
+		t.Fatalf("Fetch error: %v", err)
+	}
+	if len(got.Synced) != 1 || got.Synced[0].Text != "Ella durmió" {
+		t.Fatalf("expected upgrade to synced lyrics via FallbackQuery, got %+v", got)
+	}
+	if calls != 2 {
+		t.Fatalf("expected 2 search calls (unsynced primary -> synced fallback), got %d", calls)
+	}
+}

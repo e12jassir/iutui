@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"fmt"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/e12jassir/iutui/internal/model"
@@ -40,6 +41,10 @@ func (s *State) handleMouse(msg tea.MouseMsg) (*State, tea.Cmd) {
 			}
 			return s, nil
 		}
+		if s.ShowLyrics && (s.LyricsSideWidth() == 0 || msg.X >= s.Width-s.LyricsSideWidth()) {
+			s.LyricsScroll += 2
+			return s, nil
+		}
 		step := 1
 		if s.View == ViewHome {
 			step = s.GridCols()
@@ -65,6 +70,10 @@ func (s *State) handleMouse(msg tea.MouseMsg) (*State, tea.Cmd) {
 			if s.ChapterIdx > 0 {
 				s.ChapterIdx--
 			}
+			return s, nil
+		}
+		if s.ShowLyrics && (s.LyricsSideWidth() == 0 || msg.X >= s.Width-s.LyricsSideWidth()) {
+			s.LyricsScroll -= 2
 			return s, nil
 		}
 		step := 1
@@ -215,18 +224,36 @@ func (s *State) handleLeftClick(x, y int) (*State, tea.Cmd) {
 
 	// 2. Bottom Player panel (y == s.Height-5 .. s.Height-1) when visible
 	if s.HasPlayerBar() && y >= s.Height-5 {
+		if y == s.Height-3 && s.PlayerStatus.Duration > 0 {
+			posLen := len(formatClockApp(s.PlayerStatus.TimePos))
+			durLen := len(formatClockApp(s.PlayerStatus.Duration))
+			innerW := max(10, s.Width-2)
+			barW := max(8, innerW-posLen-durLen-6)
+			barStart := 4 + posLen
+			if x >= barStart && x < barStart+barW {
+				ratio := float64(x-barStart) / float64(max(1, barW-1))
+				if ratio < 0 {
+					ratio = 0
+				}
+				if ratio > 1 {
+					ratio = 1
+				}
+				target := ratio * s.PlayerStatus.Duration
+				return s.SeekAbsolutePos(target, "⏩ "+formatClockApp(target))
+			}
+		}
 		if y == s.Height-2 {
 			switch {
 			case x >= 2 && x <= 5:
-				return s, s.engineCmd(func(ctx context.Context) error { return s.Deps.Engine.Prev(ctx) }, "⏮ Anterior")
+				return s.PrevTrack()
 			case x >= 7 && x <= 11:
 				return s, s.engineCmd(func(ctx context.Context) error { return s.Deps.Engine.TogglePause(ctx) }, "")
 			case x >= 13 && x <= 16:
-				return s, s.engineCmd(func(ctx context.Context) error { return s.Deps.Engine.Next(ctx) }, "⏭ Siguiente")
+				return s.NextTrack()
 			case x >= 18 && x <= 23:
-				return s, s.engineCmd(func(ctx context.Context) error { return s.Deps.Engine.Seek(ctx, -10) }, "-10s")
+				return s.SeekRelative(-10)
 			case x >= 25 && x <= 30:
-				return s, s.engineCmd(func(ctx context.Context) error { return s.Deps.Engine.Seek(ctx, 10) }, "+10s")
+				return s.SeekRelative(10)
 			case x >= 32 && x <= 37:
 				return s, s.engineCmd(func(ctx context.Context) error { return s.Deps.Engine.AddVolume(ctx, -5) }, "Vol -5%")
 			case x >= 39 && x <= 44:
@@ -510,4 +537,18 @@ func (s *State) headerSearchBounds() (btnStart, btnEnd, barStart int) {
 	btnStart = sideW + searchPanelW - 5
 	btnEnd = sideW + searchPanelW - 2
 	return btnStart, btnEnd, barStart
+}
+
+func formatClockApp(seconds float64) string {
+	if seconds <= 0 {
+		return "00:00"
+	}
+	total := int(seconds)
+	h := total / 3600
+	m := (total % 3600) / 60
+	sec := total % 60
+	if h > 0 {
+		return fmt.Sprintf("%d:%02d:%02d", h, m, sec)
+	}
+	return fmt.Sprintf("%02d:%02d", m, sec)
 }

@@ -351,7 +351,7 @@ func runResolve(ctx context.Context, bin, videoID, fmtStr, cookieJar string) (Re
 	} else {
 		args = append(args, "--extractor-args", "youtube:player_client=visionos")
 	}
-	args = append(args, "-f", fmtStr, "-g", target)
+	args = append(args, "-S", "proto:https", "-f", fmtStr, "-g", target)
 
 	cmd := exec.CommandContext(ctx, bin, args...)
 	var out bytes.Buffer

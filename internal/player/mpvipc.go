@@ -1431,7 +1431,9 @@ func (c *IPCClient) appendMixTracks(mixCtx context.Context, seq uint64, targetUR
 	}
 
 	if c.resolver != nil {
-		c.resolver.Prefetch(mixCtx, model.Video{ID: remaining[0]})
+		for i := 0; i < len(remaining) && i < 2; i++ {
+			c.resolver.Prefetch(mixCtx, model.Video{ID: remaining[i]})
+		}
 	}
 
 	if !c.isConnected() && !c.tryConnectImmediateCtx(mixCtx, 2*time.Second) {
@@ -1489,6 +1491,7 @@ func (c *IPCClient) fetchPlaylistIDs(ctx context.Context, targetURL string, limi
 
 	args := []string{
 		"--flat-playlist",
+		"--yes-playlist",
 		"--dump-json",
 		"--no-warnings",
 		"--ignore-errors",
@@ -1633,9 +1636,23 @@ func (c *IPCClient) Prev(ctx context.Context) error {
 	return err
 }
 
-// Seek seeks relative seconds in mpv.
+// Seek seeks relative seconds in mpv and optimistically updates cached position.
 func (c *IPCClient) Seek(ctx context.Context, seconds int) error {
 	_, err := c.sendCommand(ctx, "seek", seconds)
+	if err == nil {
+		c.statusMu.Lock()
+		nextPos := c.status.TimePos + float64(seconds)
+		if nextPos < 0 {
+			nextPos = 0
+		}
+		if c.status.Duration > 0 && nextPos > c.status.Duration {
+			nextPos = c.status.Duration
+		}
+		c.status.TimePos = nextPos
+		st := c.status
+		c.statusMu.Unlock()
+		c.broadcast(st)
+	}
 	return err
 }
 

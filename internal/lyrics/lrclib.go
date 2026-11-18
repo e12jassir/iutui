@@ -123,12 +123,26 @@ func (c *Client) Fetch(ctx context.Context, videoID, title, channel string) (Tra
 	if err != nil {
 		return TrackLyrics{}, err
 	}
+	fb := FallbackQuery(title, channel)
+	if (!found || len(lyrics.Synced) == 0) && fb != "" && !strings.EqualFold(fb, query) {
+		fbLyrics, fbFound, _, fbErr := c.searchOnce(ctx, baseURL, ua, httpClient, fb)
+		if fbErr != nil && !found {
+			return TrackLyrics{}, fbErr
+		}
+		if fbFound && (len(fbLyrics.Synced) > 0 || !found) {
+			lyrics = fbLyrics
+			found = true
+		}
+	}
 	if !found {
-		if fb := FallbackQuery(title, channel); fb != "" && !strings.EqualFold(fb, query) {
-			var fbErr error
-			lyrics, found, statusNotFound, fbErr = c.searchOnce(ctx, baseURL, ua, httpClient, fb)
-			if fbErr != nil {
-				return TrackLyrics{}, fbErr
+		if core := CoreQuery(title, channel); core != "" && !strings.EqualFold(core, query) && !strings.EqualFold(core, fb) {
+			coreLyrics, coreFound, _, coreErr := c.searchOnce(ctx, baseURL, ua, httpClient, core)
+			if coreErr != nil {
+				return TrackLyrics{}, coreErr
+			}
+			if coreFound {
+				lyrics = coreLyrics
+				found = true
 			}
 		}
 	}
@@ -291,7 +305,40 @@ var (
 	trailingPipeRe    = regexp.MustCompile(`(?i)(?:\s+[\|\-–—]\s*)(?:official(?:\s+(?:music\s+)?(?:video|audio|lyric\s+video|visualizer))?|video\s+oficial|audio\s+oficial|lyrics?|hd|4k|en\s+vivo)\s*$`)
 	trailingPipeAnyRe = regexp.MustCompile(`\s*\|.*$`)
 	channelSuffixRe   = regexp.MustCompile(`(?i)(?:\s+-\s*topic|\s+(?:oficial|official))$`)
+	vevoSuffixRe      = regexp.MustCompile(`(?i)vevo$`)
+	featClauseRe      = regexp.MustCompile(`(?i)\b(?:ft\.?|feat\.?|featuring|prod\.?\s+by)\s+[^-–—\(\[\|]+`)
 )
+
+// CoreQuery aggressively strips parentheticals, feat./prod. credits, extra hyphenated
+// subtitles, and VEVO suffixes for a third-chance LRCLib search when prior queries miss.
+func CoreQuery(rawTitle, channel string) string {
+	s := strings.TrimSpace(rawTitle)
+	if s != "" {
+		s = parenNoiseRe.ReplaceAllString(s, " ")
+		s = bracketNoiseRe.ReplaceAllString(s, " ")
+		s = cjkBracketNoiseRe.ReplaceAllString(s, " ")
+		s = trailingPipeAnyRe.ReplaceAllString(s, "")
+		s = featClauseRe.ReplaceAllString(s, " ")
+		s = stripStandaloneFeatTokens(s)
+		s = trimDanglingSeparators(s)
+		s = collapseSpaces(s)
+		if parts := strings.Split(s, " - "); len(parts) >= 3 {
+			s = strings.TrimSpace(parts[0]) + " - " + strings.TrimSpace(parts[1])
+		}
+	}
+	ch := cleanChannelName(channel)
+	if ch != "" {
+		ch = vevoSuffixRe.ReplaceAllString(ch, "")
+		ch = collapseSpaces(ch)
+	}
+	if s == "" {
+		return ch
+	}
+	if ch == "" || strings.Contains(strings.ToLower(s), strings.ToLower(ch)) || hasArtistSeparator(s) {
+		return s
+	}
+	return ch + " " + s
+}
 
 // FallbackQuery strips all parenthetical/bracketed tags and trailing pipe metadata
 // for a secondary LRCLib search when the primary cleaned query yields no matches.

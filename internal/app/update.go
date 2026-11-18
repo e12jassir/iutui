@@ -761,17 +761,17 @@ func (s *State) handleKey(msg tea.KeyMsg) (*State, tea.Cmd) {
 	case " ":
 		return s, s.engineCmd(func(ctx context.Context) error { return s.Deps.Engine.TogglePause(ctx) }, "")
 	case "n":
-		return s, s.engineCmd(func(ctx context.Context) error { return s.Deps.Engine.Next(ctx) }, "⏭ Siguiente")
+		return s.NextTrack()
 	case "p":
-		return s, s.engineCmd(func(ctx context.Context) error { return s.Deps.Engine.Prev(ctx) }, "⏮ Anterior")
+		return s.PrevTrack()
 	case "+", "=":
 		return s, s.engineCmd(func(ctx context.Context) error { return s.Deps.Engine.AddVolume(ctx, 5) }, "🔊 Volumen +5%")
 	case "-":
 		return s, s.engineCmd(func(ctx context.Context) error { return s.Deps.Engine.AddVolume(ctx, -5) }, "🔉 Volumen -5%")
 	case ".", ">":
-		return s, s.engineCmd(func(ctx context.Context) error { return s.Deps.Engine.Seek(ctx, 10) }, "⏩ +10s")
+		return s.SeekRelative(10)
 	case ",", "<":
-		return s, s.engineCmd(func(ctx context.Context) error { return s.Deps.Engine.Seek(ctx, -10) }, "⏪ -10s")
+		return s.SeekRelative(-10)
 	case "r":
 		s.Syncing = true
 		return s, tea.Batch(s.loadFeedCmd(s.ActiveTab, true), s.ensureAnimTick())
@@ -1035,6 +1035,49 @@ func (s *State) PlaySelected(mode string) (*State, tea.Cmd) {
 	if !ok || s.Deps.Engine == nil {
 		return s, nil
 	}
+	return s.playVideo(v, mode)
+}
+
+func (s *State) indexOfVisibleVideo(id string) int {
+	if id == "" {
+		return -1
+	}
+	for i, item := range s.VisibleItems() {
+		if item.ID == id {
+			return i
+		}
+	}
+	return -1
+}
+
+func (s *State) playVideo(v model.Video, mode string) (*State, tea.Cmd) {
+	if s.Deps.Engine == nil {
+		return s, nil
+	}
+	s.LyricsScroll = 0
+	if s.CurrentPlaying.ID != "" && s.CurrentPlaying.ID != v.ID && !s.skipHistoryPush {
+		s.PlayStack = append(s.PlayStack, s.CurrentPlaying)
+		if len(s.PlayStack) > 50 {
+			s.PlayStack = s.PlayStack[len(s.PlayStack)-50:]
+		}
+	}
+	s.skipHistoryPush = false
+	s.CurrentPlaying = v
+
+	if p, ok := s.Deps.Engine.(streamPrefetcher); ok {
+		items := s.VisibleItems()
+		idx := s.indexOfVisibleVideo(v.ID)
+		if idx < 0 {
+			idx = s.activeIdx()
+		}
+		if idx >= 0 && idx+1 < len(items) {
+			p.Prefetch(items[idx+1])
+		}
+		if idx >= 0 && idx+2 < len(items) {
+			p.Prefetch(items[idx+2])
+		}
+	}
+
 	upcomingIDs := s.upcomingFallbackIDs(15)
 	s.playInFlight = true
 	s.PlayLoading = true
@@ -1076,14 +1119,110 @@ func (s *State) PlaySelected(mode string) (*State, tea.Cmd) {
 		}
 		return PlayStartedMsg{}
 	}
-	return s, tea.Batch(toastCmd, playCmd, s.ensureAnimTick())
+	var lyricsCmd tea.Cmd
+	if s.ShowLyrics {
+		lyricsCmd = s.startLyricsFetch(v.ID, v.Title, v.Channel)
+	}
+	return s, tea.Batch(toastCmd, playCmd, lyricsCmd, s.ensureAnimTick())
 }
 
-// EnqueueSelected appends the highlighted video to the player queue.
+// NextTrack advances playback to the next queued or visible track, or delegates to mpv playlist-next.
+func (s *State) NextTrack() (*State, tea.Cmd) {
+	if s.Deps.Engine == nil {
+		return s, nil
+	}
+	if len(s.Queue) > 0 {
+		next := s.Queue[0]
+		s.Queue = s.Queue[1:]
+		if idx := s.indexOfVisibleVideo(next.ID); idx >= 0 {
+			s.SetSelection(idx)
+		}
+		return s.playVideo(next, "auto")
+	}
+	if items := s.VisibleItems(); len(items) > 1 {
+		nextIdx := (s.activeIdx() + 1) % len(items)
+		s.SetSelection(nextIdx)
+		return s.PlaySelected("auto")
+	}
+	return s, s.engineCmd(func(ctx context.Context) error { return s.Deps.Engine.Next(ctx) }, "⏭ Siguiente")
+}
+
+// PrevTrack returns playback to the previous played or visible track, or restarts the active track.
+func (s *State) PrevTrack() (*State, tea.Cmd) {
+	if s.Deps.Engine == nil {
+		return s, nil
+	}
+	if len(s.PlayStack) > 0 {
+		prev := s.PlayStack[len(s.PlayStack)-1]
+		s.PlayStack = s.PlayStack[:len(s.PlayStack)-1]
+		if idx := s.indexOfVisibleVideo(prev.ID); idx >= 0 {
+			s.SetSelection(idx)
+		}
+		s.skipHistoryPush = true
+		return s.playVideo(prev, "auto")
+	}
+	if items := s.VisibleItems(); len(items) > 1 && s.activeIdx() > 0 {
+		s.SetSelection(s.activeIdx() - 1)
+		s.skipHistoryPush = true
+		return s.PlaySelected("auto")
+	}
+	if s.PlayerStatus.IsRunning {
+		return s.SeekAbsolutePos(0, "⏮ Inicio de pista")
+	}
+	return s, s.engineCmd(func(ctx context.Context) error { return s.Deps.Engine.Prev(ctx) }, "⏮ Anterior")
+}
+
+// SeekRelative seeks playback relative by deltaSec with optimistic UI timestamp feedback.
+func (s *State) SeekRelative(deltaSec int) (*State, tea.Cmd) {
+	if s.Deps.Engine == nil {
+		return s, nil
+	}
+	next := s.PlayerStatus.TimePos + float64(deltaSec)
+	if next < 0 {
+		next = 0
+	}
+	if s.PlayerStatus.Duration > 0 && next > s.PlayerStatus.Duration {
+		next = s.PlayerStatus.Duration
+	}
+	s.PlayerStatus.TimePos = next
+	label := "⏩ +10s"
+	if deltaSec < 0 {
+		label = fmt.Sprintf("⏪ %ds", deltaSec)
+	} else if deltaSec != 10 {
+		label = fmt.Sprintf("⏩ +%ds", deltaSec)
+	}
+	return s, s.engineCmd(func(ctx context.Context) error { return s.Deps.Engine.Seek(ctx, deltaSec) }, label)
+}
+
+// SeekAbsolutePos seeks playback to targetSec with optimistic UI timestamp feedback.
+func (s *State) SeekAbsolutePos(targetSec float64, toast string) (*State, tea.Cmd) {
+	if s.Deps.Engine == nil {
+		return s, nil
+	}
+	if targetSec < 0 {
+		targetSec = 0
+	}
+	if s.PlayerStatus.Duration > 0 && targetSec > s.PlayerStatus.Duration {
+		targetSec = s.PlayerStatus.Duration
+	}
+	oldPos := s.PlayerStatus.TimePos
+	s.PlayerStatus.TimePos = targetSec
+	return s, s.engineCmd(func(ctx context.Context) error {
+		if cp, ok := s.Deps.Engine.(chaptersProvider); ok {
+			return cp.SeekAbsolute(ctx, targetSec)
+		}
+		return s.Deps.Engine.Seek(ctx, int(targetSec-oldPos))
+	}, toast)
+}
+
+// EnqueueSelected appends the highlighted video to the player queue and prefetches its stream.
 func (s *State) EnqueueSelected() (*State, tea.Cmd) {
 	v, ok := s.SelectedVideo()
 	if !ok || s.Deps.Engine == nil {
 		return s, nil
+	}
+	if p, ok := s.Deps.Engine.(streamPrefetcher); ok {
+		p.Prefetch(v)
 	}
 	s.Queue = append(s.Queue, v)
 	toastCmd := s.toastCmd(fmt.Sprintf("En cola (%d): %s", len(s.Queue), v.Title))
@@ -1579,12 +1718,28 @@ func (s *State) ToggleLyrics() (*State, tea.Cmd) {
 		return s, nil
 	}
 	var videoID, title, channel string
-	if s.PlayerStatus.IsRunning && strings.TrimSpace(s.PlayerStatus.Title) != "" {
-		title = strings.TrimSpace(s.PlayerStatus.Title)
-		if matched := s.findVideoForTitle(title); matched.Title != "" {
+	if s.PlayLoading && strings.TrimSpace(s.PlayLoadingTitle) != "" {
+		title = strings.TrimSpace(s.PlayLoadingTitle)
+		if s.CurrentPlaying.ID != "" && strings.TrimSpace(s.CurrentPlaying.Title) == title {
+			videoID = s.CurrentPlaying.ID
+			channel = strings.TrimSpace(s.CurrentPlaying.Channel)
+		} else if matched := s.findVideoForTitle(title); matched.Title != "" {
 			videoID = matched.ID
-			channel = matched.Channel
+			channel = strings.TrimSpace(matched.Channel)
 		}
+	} else if s.PlayerStatus.IsRunning && strings.TrimSpace(s.PlayerStatus.Title) != "" {
+		title = strings.TrimSpace(s.PlayerStatus.Title)
+		if s.CurrentPlaying.ID != "" && strings.TrimSpace(s.CurrentPlaying.Title) == title {
+			videoID = s.CurrentPlaying.ID
+			channel = strings.TrimSpace(s.CurrentPlaying.Channel)
+		} else if matched := s.findVideoForTitle(title); matched.Title != "" {
+			videoID = matched.ID
+			channel = strings.TrimSpace(matched.Channel)
+		}
+	} else if strings.TrimSpace(s.CurrentPlaying.Title) != "" {
+		videoID = s.CurrentPlaying.ID
+		title = strings.TrimSpace(s.CurrentPlaying.Title)
+		channel = strings.TrimSpace(s.CurrentPlaying.Channel)
 	} else if v, ok := s.SelectedVideo(); ok {
 		videoID = v.ID
 		title = strings.TrimSpace(v.Title)
@@ -1613,6 +1768,7 @@ func (s *State) startLyricsFetch(videoID, title, channel string) tea.Cmd {
 	s.LyricsLoading = true
 	s.LyricsTrack = title
 	s.LyricsErr = ""
+	s.LyricsScroll = 0
 	s.Lyrics = lyrics.TrackLyrics{}
 
 	client := s.Deps.LyricsClient

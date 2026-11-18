@@ -1747,3 +1747,101 @@ func TestApp_MouseHoverDoesNotScrollAndSettingsQualityClearsAudioOnly(t *testing
 		t.Fatalf("expected %s before %s*, events=%v", wantSet, wantPrefetchPrefix, events)
 	}
 }
+
+func TestApp_NextPrevSeekBarOptimisticSeekAndLyricsWheel(t *testing.T) {
+	videos := []model.Video{
+		{ID: "t0", Title: "Song Zero", Channel: "Art0", Duration: "04:00"},
+		{ID: "t1", Title: "Song One", Channel: "Art1", Duration: "04:00"},
+		{ID: "t2", Title: "Song Two", Channel: "Art2", Duration: "04:00"},
+		{ID: "t3", Title: "Song Three", Channel: "Art3", Duration: "04:00"},
+	}
+	cat := &catalog.FakeCatalog{
+		Feeds: map[model.Tab][]model.Video{model.TabHome: videos},
+	}
+	eng := player.NewFakeEngine()
+	s := NewState(Dependencies{
+		Catalog: cat,
+		Engine:  eng,
+		Store:   store.NewFakeStore(),
+	})
+	defer s.Close()
+	s, _ = s.Update(tea.WindowSizeMsg{Width: 120, Height: 38})
+	s, _ = s.Update(FeedLoadedMsg{Tab: model.TabHome, Videos: videos})
+
+	// Play t0, enqueue t3, then click [>|] (x=14, y=Height-2) to pop Queue and push t0 to PlayStack.
+	s, cmd := s.PlaySelected("auto")
+	_ = collectNonTickMsgs(cmd, 100*time.Millisecond)
+	s.SetSelection(3)
+	s, cmd = s.EnqueueSelected()
+	_ = collectNonTickMsgs(cmd, 100*time.Millisecond)
+	if len(s.Queue) != 1 || s.Queue[0].ID != "t3" {
+		t.Fatalf("Queue = %+v, want [t3]", s.Queue)
+	}
+
+	s.PlayerStatus = player.Status{IsRunning: true, Title: "Song Zero", TimePos: 60, Duration: 240}
+	s, cmd = s.Update(tea.MouseMsg{X: 14, Y: s.Height - 2, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	_ = collectNonTickMsgs(cmd, 100*time.Millisecond)
+	if s.CurrentPlaying.ID != "t3" || len(s.Queue) != 0 {
+		t.Fatalf("expected [>|] to pop queued t3, current=%q queueLen=%d", s.CurrentPlaying.ID, len(s.Queue))
+	}
+	if len(s.PlayStack) != 1 || s.PlayStack[0].ID != "t0" {
+		t.Fatalf("expected PlayStack=[t0], got %+v", s.PlayStack)
+	}
+
+	// Next via 'n' advances to next visible track when queue is empty.
+	s, cmd = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	_ = collectNonTickMsgs(cmd, 100*time.Millisecond)
+	if s.CurrentPlaying.ID != "t0" {
+		t.Fatalf("expected wrap-around next from last t3 to t0, got %q", s.CurrentPlaying.ID)
+	}
+
+	// Prev via [|<] (x=3, y=Height-2) pops PlayStack back to t3 cleanly without re-pushing t0 on top.
+	s, cmd = s.Update(tea.MouseMsg{X: 3, Y: s.Height - 2, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	_ = collectNonTickMsgs(cmd, 100*time.Millisecond)
+	if s.CurrentPlaying.ID != "t3" {
+		t.Fatalf("expected [|<] to pop PlayStack back to t3, got %q", s.CurrentPlaying.ID)
+	}
+
+	// Relative buttons [-10s] (x=20) and [+10s] (x=27) update TimePos optimistically.
+	s.PlayerStatus = player.Status{IsRunning: true, Title: "Song Three", TimePos: 60, Duration: 240}
+	s, cmd = s.Update(tea.MouseMsg{X: 20, Y: s.Height - 2, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	if s.PlayerStatus.TimePos != 50 {
+		t.Fatalf("after [-10s] click expected TimePos=50, got %v", s.PlayerStatus.TimePos)
+	}
+	_ = collectNonTickMsgs(cmd, 100*time.Millisecond)
+
+	s, cmd = s.Update(tea.MouseMsg{X: 27, Y: s.Height - 2, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	if s.PlayerStatus.TimePos != 60 {
+		t.Fatalf("after [+10s] click expected TimePos=60, got %v", s.PlayerStatus.TimePos)
+	}
+	_ = collectNonTickMsgs(cmd, 100*time.Millisecond)
+
+	// Clicking progress bar (y=Height-3, midpoint x=60 on width 120) seeks via SeekAbsolute.
+	s, cmd = s.Update(tea.MouseMsg{X: 60, Y: s.Height - 3, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	if s.PlayerStatus.TimePos <= 100 || s.PlayerStatus.TimePos >= 140 {
+		t.Fatalf("expected midpoint progress click TimePos near 120s, got %v", s.PlayerStatus.TimePos)
+	}
+	_ = collectNonTickMsgs(cmd, 100*time.Millisecond)
+	foundAbs := false
+	for _, c := range eng.Calls() {
+		if c.Method == "SeekAbsolute" && c.Delta > 100 && c.Delta < 140 {
+			foundAbs = true
+		}
+	}
+	if !foundAbs {
+		t.Fatalf("expected Engine.SeekAbsolute call near 120s, calls=%+v", eng.Calls())
+	}
+
+	// Mouse wheel over right-hand lyrics side panel scrolls LyricsScroll without changing SelectedIdx.
+	s.ShowLyrics = true
+	selBefore := s.SelectedIdx
+	lyricsX := s.Width - s.LyricsSideWidth() + 4
+	s, _ = s.Update(tea.MouseMsg{X: lyricsX, Y: 10, Button: tea.MouseButtonWheelDown})
+	if s.LyricsScroll != 2 || s.SelectedIdx != selBefore {
+		t.Fatalf("wheel down over lyrics panel got scroll=%d idx=%d, want scroll=2 idx=%d", s.LyricsScroll, s.SelectedIdx, selBefore)
+	}
+	s, _ = s.Update(tea.MouseMsg{X: lyricsX, Y: 10, Button: tea.MouseButtonWheelUp})
+	if s.LyricsScroll != 0 || s.SelectedIdx != selBefore {
+		t.Fatalf("wheel up over lyrics panel got scroll=%d idx=%d, want scroll=0 idx=%d", s.LyricsScroll, s.SelectedIdx, selBefore)
+	}
+}
