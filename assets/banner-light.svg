@@ -1,0 +1,270 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="848" height="248" viewBox="0 0 848 248" role="img" aria-label="iutui — Terminal YouTube client">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="100%" stop-color="#f8f9fb"/>
+    </linearGradient>
+    <linearGradient id="topSheen" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0"/>
+      <stop offset="22%" stop-color="#ffffff" stop-opacity="0.65"/>
+      <stop offset="78%" stop-color="#ffffff" stop-opacity="0.65"/>
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.78" cy="0.35" r="0.4">
+      <stop offset="0%" stop-color="#0284c7" stop-opacity="0.04"/>
+      <stop offset="100%" stop-color="#0284c7" stop-opacity="0"/>
+    </radialGradient>
+    <clipPath id="frame">
+      <rect width="848" height="248" rx="14"/>
+    </clipPath>
+  </defs>
+
+  <g clip-path="url(#frame)">
+    <rect x="0.5" y="0.5" width="847" height="247" rx="14" fill="url(#bg)" stroke="#d5dce5" stroke-width="1"/>
+    <rect width="848" height="248" fill="url(#glow)"/>
+    <line x1="24" y1="1.2" x2="824" y2="1.2" stroke="url(#topSheen)" stroke-width="1"/>
+    <circle cx="440" cy="24" r="0.9" fill="#0f172a" opacity="0.0138"/>
+    <circle cx="440" cy="46" r="0.9" fill="#0f172a" opacity="0.0138"/>
+    <circle cx="440" cy="68" r="0.9" fill="#0f172a" opacity="0.0138"/>
+    <circle cx="440" cy="90" r="0.9" fill="#0f172a" opacity="0.0138"/>
+    <circle cx="440" cy="112" r="0.9" fill="#0f172a" opacity="0.0138"/>
+    <circle cx="440" cy="134" r="0.9" fill="#0f172a" opacity="0.0138"/>
+    <circle cx="440" cy="156" r="0.9" fill="#0f172a" opacity="0.0138"/>
+    <circle cx="440" cy="178" r="0.9" fill="#0f172a" opacity="0.0138"/>
+    <circle cx="440" cy="200" r="0.9" fill="#0f172a" opacity="0.0138"/>
+    <circle cx="440" cy="222" r="0.9" fill="#0f172a" opacity="0.0138"/>
+    <circle cx="462" cy="24" r="0.9" fill="#0f172a" opacity="0.0161"/>
+    <circle cx="462" cy="46" r="0.9" fill="#0f172a" opacity="0.0161"/>
+    <circle cx="462" cy="68" r="0.9" fill="#0f172a" opacity="0.0161"/>
+    <circle cx="462" cy="90" r="0.9" fill="#0f172a" opacity="0.0161"/>
+    <circle cx="462" cy="112" r="0.9" fill="#0f172a" opacity="0.0161"/>
+    <circle cx="462" cy="134" r="0.9" fill="#0f172a" opacity="0.0161"/>
+    <circle cx="462" cy="156" r="0.9" fill="#0f172a" opacity="0.0161"/>
+    <circle cx="462" cy="178" r="0.9" fill="#0f172a" opacity="0.0161"/>
+    <circle cx="462" cy="200" r="0.9" fill="#0f172a" opacity="0.0161"/>
+    <circle cx="462" cy="222" r="0.9" fill="#0f172a" opacity="0.0161"/>
+    <circle cx="484" cy="24" r="0.9" fill="#0f172a" opacity="0.0185"/>
+    <circle cx="484" cy="46" r="0.9" fill="#0f172a" opacity="0.0185"/>
+    <circle cx="484" cy="68" r="0.9" fill="#0f172a" opacity="0.0185"/>
+    <circle cx="484" cy="90" r="0.9" fill="#0f172a" opacity="0.0185"/>
+    <circle cx="484" cy="112" r="0.9" fill="#0f172a" opacity="0.0185"/>
+    <circle cx="484" cy="134" r="0.9" fill="#0f172a" opacity="0.0185"/>
+    <circle cx="484" cy="156" r="0.9" fill="#0f172a" opacity="0.0185"/>
+    <circle cx="484" cy="178" r="0.9" fill="#0f172a" opacity="0.0185"/>
+    <circle cx="484" cy="200" r="0.9" fill="#0f172a" opacity="0.0185"/>
+    <circle cx="484" cy="222" r="0.9" fill="#0f172a" opacity="0.0185"/>
+    <circle cx="506" cy="24" r="0.9" fill="#0f172a" opacity="0.0208"/>
+    <circle cx="506" cy="46" r="0.9" fill="#0f172a" opacity="0.0208"/>
+    <circle cx="506" cy="68" r="0.9" fill="#0f172a" opacity="0.0208"/>
+    <circle cx="506" cy="90" r="0.9" fill="#0f172a" opacity="0.0208"/>
+    <circle cx="506" cy="112" r="0.9" fill="#0f172a" opacity="0.0208"/>
+    <circle cx="506" cy="134" r="0.9" fill="#0f172a" opacity="0.0208"/>
+    <circle cx="506" cy="156" r="0.9" fill="#0f172a" opacity="0.0208"/>
+    <circle cx="506" cy="178" r="0.9" fill="#0f172a" opacity="0.0208"/>
+    <circle cx="506" cy="200" r="0.9" fill="#0f172a" opacity="0.0208"/>
+    <circle cx="506" cy="222" r="0.9" fill="#0f172a" opacity="0.0208"/>
+    <circle cx="528" cy="24" r="0.9" fill="#0f172a" opacity="0.0232"/>
+    <circle cx="528" cy="46" r="0.9" fill="#0f172a" opacity="0.0232"/>
+    <circle cx="528" cy="68" r="0.9" fill="#0f172a" opacity="0.0232"/>
+    <circle cx="528" cy="90" r="0.9" fill="#0f172a" opacity="0.0232"/>
+    <circle cx="528" cy="112" r="0.9" fill="#0f172a" opacity="0.0232"/>
+    <circle cx="528" cy="134" r="0.9" fill="#0f172a" opacity="0.0232"/>
+    <circle cx="528" cy="156" r="0.9" fill="#0f172a" opacity="0.0232"/>
+    <circle cx="528" cy="178" r="0.9" fill="#0f172a" opacity="0.0232"/>
+    <circle cx="528" cy="200" r="0.9" fill="#0f172a" opacity="0.0232"/>
+    <circle cx="528" cy="222" r="0.9" fill="#0f172a" opacity="0.0232"/>
+    <circle cx="550" cy="24" r="0.9" fill="#0f172a" opacity="0.0256"/>
+    <circle cx="550" cy="46" r="0.9" fill="#0f172a" opacity="0.0256"/>
+    <circle cx="550" cy="68" r="0.9" fill="#0f172a" opacity="0.0256"/>
+    <circle cx="550" cy="90" r="0.9" fill="#0f172a" opacity="0.0256"/>
+    <circle cx="550" cy="112" r="0.9" fill="#0f172a" opacity="0.0256"/>
+    <circle cx="550" cy="134" r="0.9" fill="#0f172a" opacity="0.0256"/>
+    <circle cx="550" cy="156" r="0.9" fill="#0f172a" opacity="0.0256"/>
+    <circle cx="550" cy="178" r="0.9" fill="#0f172a" opacity="0.0256"/>
+    <circle cx="550" cy="200" r="0.9" fill="#0f172a" opacity="0.0256"/>
+    <circle cx="550" cy="222" r="0.9" fill="#0f172a" opacity="0.0256"/>
+    <circle cx="572" cy="24" r="0.9" fill="#0f172a" opacity="0.0279"/>
+    <circle cx="572" cy="46" r="0.9" fill="#0f172a" opacity="0.0279"/>
+    <circle cx="572" cy="68" r="0.9" fill="#0f172a" opacity="0.0279"/>
+    <circle cx="572" cy="90" r="0.9" fill="#0f172a" opacity="0.0279"/>
+    <circle cx="572" cy="112" r="0.9" fill="#0f172a" opacity="0.0279"/>
+    <circle cx="572" cy="134" r="0.9" fill="#0f172a" opacity="0.0279"/>
+    <circle cx="572" cy="156" r="0.9" fill="#0f172a" opacity="0.0279"/>
+    <circle cx="572" cy="178" r="0.9" fill="#0f172a" opacity="0.0279"/>
+    <circle cx="572" cy="200" r="0.9" fill="#0f172a" opacity="0.0279"/>
+    <circle cx="572" cy="222" r="0.9" fill="#0f172a" opacity="0.0279"/>
+    <circle cx="594" cy="24" r="0.9" fill="#0f172a" opacity="0.0303"/>
+    <circle cx="594" cy="46" r="0.9" fill="#0f172a" opacity="0.0303"/>
+    <circle cx="594" cy="68" r="0.9" fill="#0f172a" opacity="0.0303"/>
+    <circle cx="594" cy="90" r="0.9" fill="#0f172a" opacity="0.0303"/>
+    <circle cx="594" cy="112" r="0.9" fill="#0f172a" opacity="0.0303"/>
+    <circle cx="594" cy="134" r="0.9" fill="#0f172a" opacity="0.0303"/>
+    <circle cx="594" cy="156" r="0.9" fill="#0f172a" opacity="0.0303"/>
+    <circle cx="594" cy="178" r="0.9" fill="#0f172a" opacity="0.0303"/>
+    <circle cx="594" cy="200" r="0.9" fill="#0f172a" opacity="0.0303"/>
+    <circle cx="594" cy="222" r="0.9" fill="#0f172a" opacity="0.0303"/>
+    <circle cx="616" cy="24" r="0.9" fill="#0f172a" opacity="0.0327"/>
+    <circle cx="616" cy="46" r="0.9" fill="#0f172a" opacity="0.0327"/>
+    <circle cx="616" cy="68" r="0.9" fill="#0f172a" opacity="0.0327"/>
+    <circle cx="616" cy="90" r="0.9" fill="#0f172a" opacity="0.0327"/>
+    <circle cx="616" cy="112" r="0.9" fill="#0f172a" opacity="0.0327"/>
+    <circle cx="616" cy="134" r="0.9" fill="#0f172a" opacity="0.0327"/>
+    <circle cx="616" cy="156" r="0.9" fill="#0f172a" opacity="0.0327"/>
+    <circle cx="616" cy="178" r="0.9" fill="#0f172a" opacity="0.0327"/>
+    <circle cx="616" cy="200" r="0.9" fill="#0f172a" opacity="0.0327"/>
+    <circle cx="616" cy="222" r="0.9" fill="#0f172a" opacity="0.0327"/>
+    <circle cx="638" cy="24" r="0.9" fill="#0f172a" opacity="0.035"/>
+    <circle cx="638" cy="46" r="0.9" fill="#0f172a" opacity="0.035"/>
+    <circle cx="638" cy="68" r="0.9" fill="#0f172a" opacity="0.035"/>
+    <circle cx="638" cy="90" r="0.9" fill="#0f172a" opacity="0.035"/>
+    <circle cx="638" cy="112" r="0.9" fill="#0f172a" opacity="0.035"/>
+    <circle cx="638" cy="134" r="0.9" fill="#0f172a" opacity="0.035"/>
+    <circle cx="638" cy="156" r="0.9" fill="#0f172a" opacity="0.035"/>
+    <circle cx="638" cy="178" r="0.9" fill="#0f172a" opacity="0.035"/>
+    <circle cx="638" cy="200" r="0.9" fill="#0f172a" opacity="0.035"/>
+    <circle cx="638" cy="222" r="0.9" fill="#0f172a" opacity="0.035"/>
+    <circle cx="660" cy="24" r="0.9" fill="#0f172a" opacity="0.0374"/>
+    <circle cx="660" cy="46" r="0.9" fill="#0f172a" opacity="0.0374"/>
+    <circle cx="660" cy="68" r="0.9" fill="#0f172a" opacity="0.0374"/>
+    <circle cx="660" cy="90" r="0.9" fill="#0f172a" opacity="0.0374"/>
+    <circle cx="660" cy="112" r="0.9" fill="#0f172a" opacity="0.0374"/>
+    <circle cx="660" cy="134" r="0.9" fill="#0f172a" opacity="0.0374"/>
+    <circle cx="660" cy="156" r="0.9" fill="#0f172a" opacity="0.0374"/>
+    <circle cx="660" cy="178" r="0.9" fill="#0f172a" opacity="0.0374"/>
+    <circle cx="660" cy="200" r="0.9" fill="#0f172a" opacity="0.0374"/>
+    <circle cx="660" cy="222" r="0.9" fill="#0f172a" opacity="0.0374"/>
+    <circle cx="682" cy="24" r="0.9" fill="#0f172a" opacity="0.0397"/>
+    <circle cx="682" cy="46" r="0.9" fill="#0f172a" opacity="0.0397"/>
+    <circle cx="682" cy="68" r="0.9" fill="#0f172a" opacity="0.0397"/>
+    <circle cx="682" cy="90" r="0.9" fill="#0f172a" opacity="0.0397"/>
+    <circle cx="682" cy="112" r="0.9" fill="#0f172a" opacity="0.0397"/>
+    <circle cx="682" cy="134" r="0.9" fill="#0f172a" opacity="0.0397"/>
+    <circle cx="682" cy="156" r="0.9" fill="#0f172a" opacity="0.0397"/>
+    <circle cx="682" cy="178" r="0.9" fill="#0f172a" opacity="0.0397"/>
+    <circle cx="682" cy="200" r="0.9" fill="#0f172a" opacity="0.0397"/>
+    <circle cx="682" cy="222" r="0.9" fill="#0f172a" opacity="0.0397"/>
+    <circle cx="704" cy="24" r="0.9" fill="#0f172a" opacity="0.0421"/>
+    <circle cx="704" cy="46" r="0.9" fill="#0f172a" opacity="0.0421"/>
+    <circle cx="704" cy="68" r="0.9" fill="#0f172a" opacity="0.0421"/>
+    <circle cx="704" cy="90" r="0.9" fill="#0f172a" opacity="0.0421"/>
+    <circle cx="704" cy="112" r="0.9" fill="#0f172a" opacity="0.0421"/>
+    <circle cx="704" cy="134" r="0.9" fill="#0f172a" opacity="0.0421"/>
+    <circle cx="704" cy="156" r="0.9" fill="#0f172a" opacity="0.0421"/>
+    <circle cx="704" cy="178" r="0.9" fill="#0f172a" opacity="0.0421"/>
+    <circle cx="704" cy="200" r="0.9" fill="#0f172a" opacity="0.0421"/>
+    <circle cx="704" cy="222" r="0.9" fill="#0f172a" opacity="0.0421"/>
+    <circle cx="726" cy="24" r="0.9" fill="#0f172a" opacity="0.0445"/>
+    <circle cx="726" cy="46" r="0.9" fill="#0f172a" opacity="0.0445"/>
+    <circle cx="726" cy="68" r="0.9" fill="#0f172a" opacity="0.0445"/>
+    <circle cx="726" cy="90" r="0.9" fill="#0f172a" opacity="0.0445"/>
+    <circle cx="726" cy="112" r="0.9" fill="#0f172a" opacity="0.0445"/>
+    <circle cx="726" cy="134" r="0.9" fill="#0f172a" opacity="0.0445"/>
+    <circle cx="726" cy="156" r="0.9" fill="#0f172a" opacity="0.0445"/>
+    <circle cx="726" cy="178" r="0.9" fill="#0f172a" opacity="0.0445"/>
+    <circle cx="726" cy="200" r="0.9" fill="#0f172a" opacity="0.0445"/>
+    <circle cx="726" cy="222" r="0.9" fill="#0f172a" opacity="0.0445"/>
+    <circle cx="748" cy="24" r="0.9" fill="#0f172a" opacity="0.0468"/>
+    <circle cx="748" cy="46" r="0.9" fill="#0f172a" opacity="0.0468"/>
+    <circle cx="748" cy="68" r="0.9" fill="#0f172a" opacity="0.0468"/>
+    <circle cx="748" cy="90" r="0.9" fill="#0f172a" opacity="0.0468"/>
+    <circle cx="748" cy="112" r="0.9" fill="#0f172a" opacity="0.0468"/>
+    <circle cx="748" cy="134" r="0.9" fill="#0f172a" opacity="0.0468"/>
+    <circle cx="748" cy="156" r="0.9" fill="#0f172a" opacity="0.0468"/>
+    <circle cx="748" cy="178" r="0.9" fill="#0f172a" opacity="0.0468"/>
+    <circle cx="748" cy="200" r="0.9" fill="#0f172a" opacity="0.0468"/>
+    <circle cx="748" cy="222" r="0.9" fill="#0f172a" opacity="0.0468"/>
+    <circle cx="770" cy="24" r="0.9" fill="#0f172a" opacity="0.0492"/>
+    <circle cx="770" cy="46" r="0.9" fill="#0f172a" opacity="0.0492"/>
+    <circle cx="770" cy="68" r="0.9" fill="#0f172a" opacity="0.0492"/>
+    <circle cx="770" cy="90" r="0.9" fill="#0f172a" opacity="0.0492"/>
+    <circle cx="770" cy="112" r="0.9" fill="#0f172a" opacity="0.0492"/>
+    <circle cx="770" cy="134" r="0.9" fill="#0f172a" opacity="0.0492"/>
+    <circle cx="770" cy="156" r="0.9" fill="#0f172a" opacity="0.0492"/>
+    <circle cx="770" cy="178" r="0.9" fill="#0f172a" opacity="0.0492"/>
+    <circle cx="770" cy="200" r="0.9" fill="#0f172a" opacity="0.0492"/>
+    <circle cx="770" cy="222" r="0.9" fill="#0f172a" opacity="0.0492"/>
+    <circle cx="792" cy="24" r="0.9" fill="#0f172a" opacity="0.0516"/>
+    <circle cx="792" cy="46" r="0.9" fill="#0f172a" opacity="0.0516"/>
+    <circle cx="792" cy="68" r="0.9" fill="#0f172a" opacity="0.0516"/>
+    <circle cx="792" cy="90" r="0.9" fill="#0f172a" opacity="0.0516"/>
+    <circle cx="792" cy="112" r="0.9" fill="#0f172a" opacity="0.0516"/>
+    <circle cx="792" cy="134" r="0.9" fill="#0f172a" opacity="0.0516"/>
+    <circle cx="792" cy="156" r="0.9" fill="#0f172a" opacity="0.0516"/>
+    <circle cx="792" cy="178" r="0.9" fill="#0f172a" opacity="0.0516"/>
+    <circle cx="792" cy="200" r="0.9" fill="#0f172a" opacity="0.0516"/>
+    <circle cx="792" cy="222" r="0.9" fill="#0f172a" opacity="0.0516"/>
+    <circle cx="814" cy="24" r="0.9" fill="#0f172a" opacity="0.0539"/>
+    <circle cx="814" cy="46" r="0.9" fill="#0f172a" opacity="0.0539"/>
+    <circle cx="814" cy="68" r="0.9" fill="#0f172a" opacity="0.0539"/>
+    <circle cx="814" cy="90" r="0.9" fill="#0f172a" opacity="0.0539"/>
+    <circle cx="814" cy="112" r="0.9" fill="#0f172a" opacity="0.0539"/>
+    <circle cx="814" cy="134" r="0.9" fill="#0f172a" opacity="0.0539"/>
+    <circle cx="814" cy="156" r="0.9" fill="#0f172a" opacity="0.0539"/>
+    <circle cx="814" cy="178" r="0.9" fill="#0f172a" opacity="0.0539"/>
+    <circle cx="814" cy="200" r="0.9" fill="#0f172a" opacity="0.0539"/>
+    <circle cx="814" cy="222" r="0.9" fill="#0f172a" opacity="0.0539"/>
+    <g fill="none" stroke="#94a3b8" stroke-width="1" opacity="0.45">
+      <path d="M12 20 L12 12 L20 12"/>
+      <path d="M828 12 L836 12 L836 20"/>
+      <path d="M12 228 L12 236 L20 236"/>
+      <path d="M828 236 L836 236 L836 228"/>
+    </g>
+
+    <!-- Left editorial -->
+    <circle cx="40" cy="34" r="6.5" fill="#0284c7" opacity="0.16"/>
+    <circle cx="40" cy="34" r="3" fill="#0284c7">
+      <animate attributeName="opacity" values="1;0.35;1" dur="3.2s" repeatCount="indefinite"/>
+    </circle>
+    <text x="55" y="38" font-family="ui-monospace, 'SFMono-Regular', 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="10" font-weight="500" letter-spacing="1.5" fill="#64748b">TERMINAL YOUTUBE CLIENT</text>
+
+    <text x="36" y="104" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="46" font-weight="700" letter-spacing="-1.6" fill="#0f172a">iutui<tspan fill="#0284c7">.</tspan></text>
+
+    <text x="36" y="142" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" fill="#475569">Fast, keyboard-first YouTube TUI &amp; CLI powered by</text>
+    <text x="36" y="162" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" fill="#475569">mpv JSON IPC and yt-dlp. Zero browser bloat.</text>
+
+    <text x="36" y="214" font-family="ui-monospace, 'SFMono-Regular', 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="10" font-weight="500" letter-spacing="1.2" fill="#64748b">v0.5.0&#160;&#160;&#x00b7;&#160;&#160;LINUX / MACOS&#160;&#160;&#x00b7;&#160;&#160;MIT</text>
+
+    <!-- Right miniature TUI -->
+    <rect x="462" y="26" width="354" height="196" rx="10" fill="#f1f4f8" stroke="#dce2ea" stroke-width="1"/>
+    <line x1="462" y1="50" x2="816" y2="50" stroke="#e4e8ef" stroke-width="1"/>
+    <text x="474" y="41.5" font-family="ui-monospace, 'SFMono-Regular', 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="9" font-weight="600" fill="#0284c7">Home</text>
+    <line x1="474" y1="49" x2="496" y2="49" stroke="#0284c7" stroke-width="1.5"/>
+    <text x="510" y="41.5" font-family="ui-monospace, 'SFMono-Regular', 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="9" fill="#64748b">Music</text>
+    <text x="550" y="41.5" font-family="ui-monospace, 'SFMono-Regular', 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="9" fill="#64748b">Subs</text>
+    <text x="586" y="41.5" font-family="ui-monospace, 'SFMono-Regular', 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="9" fill="#64748b">History</text>
+    <text x="804" y="41.5" text-anchor="end" font-family="ui-monospace, 'SFMono-Regular', 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="8.5" fill="#64748b">720p &#x00b7; mpv IPC</text>
+
+    <rect x="472" y="58" width="74" height="116" rx="6" fill="#ffffff" stroke="#e4e8ef" stroke-width="1"/>
+    <rect x="478" y="69" width="2.5" height="12" rx="1.2" fill="#0284c7"/>
+    <rect x="485" y="72.5" width="48" height="5" rx="2" fill="#475569" fill-opacity="0.7"/>
+    <rect x="483" y="95" width="44" height="4.5" rx="2" fill="#94a3b8" fill-opacity="0.6"/>
+    <rect x="483" y="117" width="48" height="4.5" rx="2" fill="#94a3b8" fill-opacity="0.5"/>
+    <rect x="483" y="139" width="38" height="4.5" rx="2" fill="#94a3b8" fill-opacity="0.45"/>
+
+    <rect x="554" y="58" width="122" height="54" rx="6" fill="#ffffff" stroke="#0284c7" stroke-opacity="0.75" stroke-width="1"/>
+    <rect x="560" y="66" width="38" height="38" rx="4" fill="#0284c7" fill-opacity="0.14"/>
+    <path d="M576 79 L583 83 L576 87 Z" fill="#0284c7"/>
+    <rect x="605" y="75" width="60" height="4.5" rx="2" fill="#0f172a" fill-opacity="0.75"/>
+    <rect x="605" y="86" width="40" height="3.5" rx="1.75" fill="#64748b" fill-opacity="0.45"/>
+    <rect x="684" y="58" width="122" height="54" rx="6" fill="#ffffff" stroke="#e4e8ef" stroke-opacity="1" stroke-width="1"/>
+    <rect x="690" y="66" width="38" height="38" rx="4" fill="#e4e8ef" fill-opacity="0.65"/>
+    <rect x="735" y="75" width="60" height="4.5" rx="2" fill="#94a3b8" fill-opacity="0.5"/>
+    <rect x="735" y="86" width="40" height="3.5" rx="1.75" fill="#64748b" fill-opacity="0.45"/>
+    <rect x="554" y="120" width="122" height="54" rx="6" fill="#ffffff" stroke="#e4e8ef" stroke-opacity="1" stroke-width="1"/>
+    <rect x="560" y="128" width="38" height="38" rx="4" fill="#e4e8ef" fill-opacity="0.65"/>
+    <rect x="605" y="137" width="60" height="4.5" rx="2" fill="#94a3b8" fill-opacity="0.5"/>
+    <rect x="605" y="148" width="40" height="3.5" rx="1.75" fill="#64748b" fill-opacity="0.45"/>
+    <rect x="684" y="120" width="122" height="54" rx="6" fill="#ffffff" stroke="#e4e8ef" stroke-opacity="1" stroke-width="1"/>
+    <rect x="690" y="128" width="38" height="38" rx="4" fill="#e4e8ef" fill-opacity="0.65"/>
+    <rect x="735" y="137" width="60" height="4.5" rx="2" fill="#94a3b8" fill-opacity="0.5"/>
+    <rect x="735" y="148" width="40" height="3.5" rx="1.75" fill="#64748b" fill-opacity="0.45"/>
+
+    <rect x="472" y="184" width="334" height="28" rx="6" fill="#ffffff" stroke="#e4e8ef" stroke-width="1"/>
+    <path d="M482 194 L489 198 L482 202 Z" fill="#0284c7"/>
+    <text x="494" y="201" font-family="ui-monospace, 'SFMono-Regular', 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="8.5" font-weight="600" fill="#0f172a">mpv</text>
+    <rect x="522" y="196" width="154" height="4" rx="2" fill="#e4e8ef"/>
+    <rect x="522" y="196" width="96" height="4" rx="2" fill="#0284c7"/>
+    <circle cx="618" cy="198" r="2.8" fill="#0284c7"/>
+    <text x="796" y="201" text-anchor="end" font-family="ui-monospace, 'SFMono-Regular', 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="8" fill="#64748b">[L] Lyrics &#x00b7; [B] Skip</text>
+  </g>
+</svg>

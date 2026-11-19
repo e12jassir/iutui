@@ -1,0 +1,73 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="848" height="156" viewBox="0 0 848 156" role="img" aria-label="iutui runtime architecture">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="100%" stop-color="#f8f9fb"/>
+    </linearGradient>
+    <linearGradient id="topSheen" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0"/>
+      <stop offset="22%" stop-color="#ffffff" stop-opacity="0.65"/>
+      <stop offset="78%" stop-color="#ffffff" stop-opacity="0.65"/>
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+    <radialGradient id="archGlow" cx="0.38" cy="0.5" r="0.45">
+      <stop offset="0%" stop-color="#0284c7" stop-opacity="0.03"/>
+      <stop offset="100%" stop-color="#0284c7" stop-opacity="0"/>
+    </radialGradient>
+    <clipPath id="frame">
+      <rect width="848" height="156" rx="13"/>
+    </clipPath>
+  </defs>
+
+  <g clip-path="url(#frame)">
+    <rect x="0.5" y="0.5" width="847" height="155" rx="13" fill="url(#bg)" stroke="#d5dce5" stroke-width="1"/>
+    <rect width="848" height="156" fill="url(#archGlow)"/>
+    <line x1="24" y1="1.2" x2="824" y2="1.2" stroke="url(#topSheen)" stroke-width="1"/>
+
+    <text x="28" y="26" font-family="ui-monospace, 'SFMono-Regular', 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="9.5" font-weight="500" letter-spacing="1.4" fill="#64748b">RUNTIME DATA FLOW&#160;&#160;&#x00b7;&#160;&#160;SINGLE STATIC BINARY</text>
+
+    <!-- Stage 1 -->
+    <rect x="28" y="42" width="182" height="80" rx="8" fill="#ffffff" stroke="#d5dce5" stroke-width="1"/>
+    <text x="42" y="67" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="600" fill="#0f172a">Discovery &amp; Feeds</text>
+    <text x="42" y="88" font-family="ui-monospace, 'SFMono-Regular', 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="9.5" fill="#475569">InnerTube &#x00b7; yt-dlp</text>
+    <text x="42" y="105" font-family="ui-monospace, 'SFMono-Regular', 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="9.5" fill="#64748b">Local Atom RSS</text>
+
+    <line x1="210" y1="82" x2="239" y2="82" stroke="#94a3b8" stroke-width="1.3"/>
+    <path d="M235 79 L240 82 L235 85" fill="none" stroke="#94a3b8" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
+
+    <!-- Stage 2 -->
+    <rect x="242" y="42" width="186" height="80" rx="8" fill="#ffffff" stroke="#0284c7" stroke-opacity="0.7" stroke-width="1"/>
+    <text x="256" y="67" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="600" fill="#0f172a">Pure-Go Core</text>
+    <text x="256" y="88" font-family="ui-monospace, 'SFMono-Regular', 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="9.5" fill="#475569">Bubble Tea &#x00b7; Worker Pool</text>
+    <text x="256" y="105" font-family="ui-monospace, 'SFMono-Regular', 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="9.5" fill="#64748b">LRU Thumbs &#x00b7; XDG State</text>
+
+    <line x1="428" y1="82" x2="457" y2="82" stroke="#94a3b8" stroke-width="1.3"/>
+    <path d="M453 79 L458 82 L453 85" fill="none" stroke="#94a3b8" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
+
+    <!-- Stage 3 -->
+    <rect x="460" y="42" width="178" height="80" rx="8" fill="#ffffff" stroke="#d5dce5" stroke-width="1"/>
+    <text x="474" y="67" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="600" fill="#0f172a">Playback Engine</text>
+    <text x="474" y="88" font-family="ui-monospace, 'SFMono-Regular', 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="9.5" fill="#475569">mpv JSON IPC</text>
+    <text x="474" y="105" font-family="ui-monospace, 'SFMono-Regular', 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="9.5" fill="#64748b">24 MiB Bounded Cache</text>
+
+    <!-- Fan-out bus -->
+    <line x1="638" y1="76" x2="654" y2="76" stroke="#94a3b8" stroke-width="1.1"/>
+    <line x1="654" y1="34" x2="654" y2="118" stroke="#94a3b8" stroke-width="1.1"/>
+    <line x1="654" y1="34" x2="668" y2="34" stroke="#94a3b8" stroke-width="1.1"/>
+    <rect x="668" y="23" width="152" height="22" rx="5" fill="#ffffff" stroke="#e4e8ef" stroke-width="1"/>
+    <circle cx="680" cy="34" r="2.3" fill="#0284c7" opacity="0.85"/>
+    <text x="690" y="37.2" font-family="ui-monospace, 'SFMono-Regular', 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="9.5" fill="#475569">Kitty / Ghostty HD</text>
+    <line x1="654" y1="62" x2="668" y2="62" stroke="#94a3b8" stroke-width="1.1"/>
+    <rect x="668" y="51" width="152" height="22" rx="5" fill="#ffffff" stroke="#e4e8ef" stroke-width="1"/>
+    <circle cx="680" cy="62" r="2.3" fill="#0284c7" opacity="0.85"/>
+    <text x="690" y="65.2" font-family="ui-monospace, 'SFMono-Regular', 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="9.5" fill="#475569">MPRIS2 D-Bus</text>
+    <line x1="654" y1="90" x2="668" y2="90" stroke="#94a3b8" stroke-width="1.1"/>
+    <rect x="668" y="79" width="152" height="22" rx="5" fill="#ffffff" stroke="#e4e8ef" stroke-width="1"/>
+    <circle cx="680" cy="90" r="2.3" fill="#0284c7" opacity="0.85"/>
+    <text x="690" y="93.2" font-family="ui-monospace, 'SFMono-Regular', 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="9.5" fill="#475569">SponsorBlock</text>
+    <line x1="654" y1="118" x2="668" y2="118" stroke="#94a3b8" stroke-width="1.1"/>
+    <rect x="668" y="107" width="152" height="22" rx="5" fill="#ffffff" stroke="#e4e8ef" stroke-width="1"/>
+    <circle cx="680" cy="118" r="2.3" fill="#0284c7" opacity="0.85"/>
+    <text x="690" y="121.2" font-family="ui-monospace, 'SFMono-Regular', 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="9.5" fill="#475569">LRCLIB Lyrics</text>
+  </g>
+</svg>
