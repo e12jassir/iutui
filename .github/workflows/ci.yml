@@ -13,18 +13,31 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - name: install shellcheck and python3 (linux)
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y shellcheck python3
+      - name: check formatting (gofmt)
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "Unformatted Go files:"
+            echo "$unformatted"
+            exit 1
+          fi
       - name: verify go.mod tidy
         if: runner.os == 'Linux'
         run: |
           go mod tidy
           git diff --exit-code go.mod go.sum
-      - name: lint and smoke tests (linux)
+      - name: validate install.sh (linux)
         if: runner.os == 'Linux'
-        run: make verify
+        run: |
+          bash -n install.sh
+          if command -v shellcheck >/dev/null 2>&1; then shellcheck install.sh; fi
       - name: go vet and race tests
         run: |
           go vet ./...
-          go test -race -count=1 ./...
+          go test -race -cover -count=1 ./...
+      - name: cross-build verification
+        if: runner.os == 'Linux'
+        run: |
+          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -o /dev/null ./cmd/iutui
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o /dev/null ./cmd/iutui
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -o /dev/null ./cmd/iutui

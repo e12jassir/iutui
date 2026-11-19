@@ -362,7 +362,7 @@ func TestYTDLPCatalog_FetchArgs(t *testing.T) {
 			wantCookies:     true,
 		},
 		{
-			name: "non-empty cookie jar passes --cookies on search",
+			name: "non-empty cookie jar omits --cookies on search",
 			invoke: func(ctx context.Context, cat *YTDLPCatalog) ([]model.Video, error) {
 				return cat.Search(ctx, "golang")
 			},
@@ -376,7 +376,7 @@ func TestYTDLPCatalog_FetchArgs(t *testing.T) {
 			},
 			wantTarget:      "ytsearch20:golang",
 			wantPlaylistEnd: false,
-			wantCookies:     true,
+			wantCookies:     false,
 		},
 		{
 			name: "empty cookie jar path omits --cookies",

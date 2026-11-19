@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# iutui installer.  Usage: ./install.sh [--uninstall]
+# iutui installer. Usage: ./install.sh [--uninstall]
 # PREFIX (default ~/.local) and BINDIR (default $PREFIX/bin) are honoured.
 set -euo pipefail
 
@@ -7,7 +7,6 @@ PREFIX="${PREFIX:-$HOME/.local}"
 BINDIR="${BINDIR:-$PREFIX/bin}"
 LIBDIR="${LIBDIR:-$PREFIX/lib/yt}"
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LIBEXEC_FILES=(yt yt-fmt yt-thumb-preview)
 LEGACY_BINS=(yt yt-fmt yt-thumb-preview yt-tui ytx)
 
 if [ "${1:-}" = "--uninstall" ]; then
@@ -17,30 +16,36 @@ if [ "${1:-}" = "--uninstall" ]; then
     exit 0
 fi
 
-if [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
-    echo "iutui needs bash >= 4 (macOS: brew install bash)" >&2
+echo "==> Installing iutui into $BINDIR"
+mkdir -p "$BINDIR"
+for f in "${LEGACY_BINS[@]}"; do rm -f "$BINDIR/$f"; done
+rm -rf "$LIBDIR"
+
+tmp_bin=""
+cleanup() {
+    if [ -n "$tmp_bin" ]; then
+        rm -f "$tmp_bin"
+    fi
+}
+trap cleanup EXIT
+
+if command -v go >/dev/null 2>&1 && [ -d "$SRC/cmd/iutui" ]; then
+    echo "==> Building iutui Go binary"
+    tmp_bin="$(mktemp)"
+    (cd "$SRC" && go build -o "$tmp_bin" ./cmd/iutui)
+    install -m 755 "$tmp_bin" "$BINDIR/iutui"
+elif [ -x "$SRC/bin/iutui" ]; then
+    install -m 755 "$SRC/bin/iutui" "$BINDIR/iutui"
+else
+    echo "error: Go toolchain not found in PATH and no prebuilt bin/iutui binary found." >&2
+    echo "       Install Go 1.24+ from https://go.dev/dl/ or download a prebuilt release." >&2
     exit 1
 fi
 
-echo "==> Installing iutui into $BINDIR"
-mkdir -p "$BINDIR" "$LIBDIR"
-for f in "${LEGACY_BINS[@]}"; do rm -f "$BINDIR/$f"; done
-for f in "${LIBEXEC_FILES[@]}"; do install -m 755 "$SRC/bin/$f" "$LIBDIR/$f"; done
-install -m 644 "$SRC"/lib/*.sh "$LIBDIR/"
-
-if command -v go >/dev/null 2>&1 && [ -d "$SRC/cmd/iutui" ]; then
-    echo "==> Building iutui binary"
-    (cd "$SRC" && go build -o "$SRC/bin/iutui" ./cmd/iutui)
-    install -m 755 "$SRC/bin/iutui" "$BINDIR/iutui"
-elif [ -x "$SRC/bin/iutui" ]; then
-    install -m 755 "$SRC/bin/iutui" "$BINDIR/iutui"
-fi
-if [ -x "$BINDIR/iutui" ]; then
-    ln -sf iutui "$BINDIR/uitui"
-fi
+ln -sf iutui "$BINDIR/uitui"
 
 IUTUI_CONFIG_DEST="${XDG_CONFIG_HOME:-$HOME/.config}/iutui"
-if [ ! -f "$IUTUI_CONFIG_DEST/config" ]; then
+if [ ! -f "$IUTUI_CONFIG_DEST/config" ] && [ -f "$SRC/config.example" ]; then
     mkdir -p "$IUTUI_CONFIG_DEST"
     cp "$SRC/config.example" "$IUTUI_CONFIG_DEST/config"
     echo "==> Default config written to $IUTUI_CONFIG_DEST/config"
@@ -56,23 +61,42 @@ hint() {
 
 echo "==> Checking dependencies"
 missing=()
-for dep in yt-dlp mpv curl python3; do
-    if command -v "$dep" >/dev/null 2>&1; then echo "  [ok] $dep"
-    else echo "  [!!] $dep"; missing+=("$dep"); fi
+for dep in mpv yt-dlp; do
+    if command -v "$dep" >/dev/null 2>&1; then
+        echo "  [ok] $dep (required)"
+    else
+        echo "  [!!] $dep (required)"
+        missing+=("$dep")
+    fi
 done
 if [ "${#missing[@]}" -gt 0 ]; then
     echo "     $(hint "${missing[*]}")"
 fi
 
-if ! command -v deno >/dev/null 2>&1 && ! command -v node >/dev/null 2>&1 && ! command -v bun >/dev/null 2>&1; then
-    echo "  [!!] JS runtime: optional for Android fast path; needed by yt-dlp web fallback (deno recommended: https://deno.com)"
+if command -v chafa >/dev/null 2>&1; then
+    echo "  [ok] chafa (optional ANSI thumbnail fallback)"
+else
+    echo "  [..] chafa (optional: ANSI thumbnails for non-Kitty/Ghostty terminals)"
 fi
 
-case ":$PATH:" in *":$BINDIR:"*) ;; *) echo "  [i] add $BINDIR to your PATH" ;; esac
+if command -v deno >/dev/null 2>&1 || command -v node >/dev/null 2>&1 || command -v bun >/dev/null 2>&1; then
+    echo "  [ok] JS runtime (optional yt-dlp web extractor fallback)"
+else
+    echo "  [..] JS runtime (optional: deno/node/bun for yt-dlp web fallback)"
+fi
+
+if [ "$(uname -s)" = "Linux" ]; then
+    if command -v playerctl >/dev/null 2>&1; then
+        echo "  [ok] playerctl (optional MPRIS2 media key control)"
+    else
+        echo "  [..] playerctl (optional: MPRIS2 media controls on Linux)"
+    fi
+fi
+
+case ":$PATH:" in
+    *":$BINDIR:"*) ;;
+    *) echo "  [i] add $BINDIR to your PATH" ;;
+esac
 
 echo
-if [ -x "$BINDIR/iutui" ]; then
-    echo "Done. Run 'iutui doctor' to verify your setup, then 'iutui'."
-else
-    echo "Done. Run 'yt --doctor' to verify your setup, then 'yt'."
-fi
+echo "Done. Run 'iutui doctor' to verify your setup, then 'iutui'."

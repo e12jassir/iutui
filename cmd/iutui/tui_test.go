@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -374,4 +376,109 @@ func TestResolvePlayTargetAndMixFlag(t *testing.T) {
 	if f := playCmd.Flags().Lookup("mix"); f == nil || f.Shorthand != "m" {
 		t.Fatalf("expected play --mix/-m flag, got %+v", f)
 	}
+}
+
+func TestVersionFlag(t *testing.T) {
+	root := newRootCmd()
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"--version"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("--version failed: %v", err)
+	}
+	got := strings.TrimSpace(out.String())
+	want := "iutui version 0.5.0"
+	if got != want {
+		t.Fatalf("--version = %q, want %q", got, want)
+	}
+}
+
+func TestDebugLogFlag(t *testing.T) {
+	tmp := t.TempDir()
+	stateHome := filepath.Join(tmp, "state")
+	t.Setenv("XDG_STATE_HOME", stateHome)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tmp, "config"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(tmp, "cache"))
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(tmp, "runtime"))
+
+	t.Run("writes JSON slog lines to XDG_STATE_HOME/iutui/debug.log when enabled", func(t *testing.T) {
+		root := newRootCmd()
+		if flag := root.PersistentFlags().Lookup("debug-log"); flag == nil {
+			t.Fatal("expected persistent --debug-log flag on root command")
+		}
+		var out bytes.Buffer
+		root.SetOut(&out)
+		root.SetErr(&out)
+		root.SetArgs([]string{"--debug-log", "doctor"})
+		if err := root.Execute(); err != nil {
+			t.Fatalf("doctor --debug-log failed: %v", err)
+		}
+
+		logPath := filepath.Join(stateHome, "iutui", "debug.log")
+		info, err := os.Stat(logPath)
+		if err != nil {
+			t.Fatalf("expected debug.log at %q: %v", logPath, err)
+		}
+		if info.Mode().Perm() != 0o600 {
+			t.Errorf("debug.log perm = %o, want 0600", info.Mode().Perm())
+		}
+
+		raw, err := os.ReadFile(logPath)
+		if err != nil {
+			t.Fatalf("read debug.log: %v", err)
+		}
+		lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
+		if len(lines) == 0 || lines[0] == "" {
+			t.Fatalf("expected JSON log lines in debug.log, got empty")
+		}
+
+		var entry map[string]any
+		if err := json.Unmarshal([]byte(lines[0]), &entry); err != nil {
+			t.Fatalf("invalid JSON slog line %q: %v", lines[0], err)
+		}
+		if entry["msg"] != "iutui starting" {
+			t.Errorf("log msg = %v, want %q", entry["msg"], "iutui starting")
+		}
+		if entry["version"] != "0.5.0" {
+			t.Errorf("log version = %v, want %q", entry["version"], "0.5.0")
+		}
+		wantStateDir := filepath.Join(stateHome, "iutui")
+		if entry["state_dir"] != wantStateDir {
+			t.Errorf("log state_dir = %v, want %q", entry["state_dir"], wantStateDir)
+		}
+		if entry["socket_path"] == "" {
+			t.Errorf("expected non-empty socket_path in log entry: %+v", entry)
+		}
+
+		// PersistentPostRun should have reset default slog to discard and closed debug.log.
+		sizeBefore := len(raw)
+		slog.Info("post-run discard check")
+		rawAfter, err := os.ReadFile(logPath)
+		if err != nil {
+			t.Fatalf("re-read debug.log: %v", err)
+		}
+		if len(rawAfter) != sizeBefore {
+			t.Fatalf("expected no writes to debug.log after PersistentPostRun, grew from %d to %d bytes", sizeBefore, len(rawAfter))
+		}
+	})
+
+	t.Run("does not create debug.log when flag is omitted", func(t *testing.T) {
+		isolatedState := filepath.Join(t.TempDir(), "state")
+		t.Setenv("XDG_STATE_HOME", isolatedState)
+
+		root := newRootCmd()
+		var out bytes.Buffer
+		root.SetOut(&out)
+		root.SetErr(&out)
+		root.SetArgs([]string{"doctor"})
+		if err := root.Execute(); err != nil {
+			t.Fatalf("doctor failed: %v", err)
+		}
+
+		logPath := filepath.Join(isolatedState, "iutui", "debug.log")
+		if _, err := os.Stat(logPath); !os.IsNotExist(err) {
+			t.Fatalf("expected no debug.log when --debug-log is false, got err=%v", err)
+		}
+	})
 }

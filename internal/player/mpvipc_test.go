@@ -17,11 +17,11 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"testing"
 	"time"
 
 	"github.com/e12jassir/iutui/internal/model"
+	"github.com/e12jassir/iutui/internal/platform"
 )
 
 var (
@@ -898,8 +898,7 @@ wait $!
 
 	t.Cleanup(func() {
 		for _, pid := range readPIDs() {
-			_ = syscall.Kill(-pid, syscall.SIGKILL)
-			_ = syscall.Kill(pid, syscall.SIGKILL)
+			_ = platform.KillProcessGroup(pid)
 		}
 	})
 
@@ -914,10 +913,7 @@ wait $!
 		}),
 	)
 
-	pidAlive := func(pid int) bool {
-		err := syscall.Kill(pid, 0)
-		return err == nil
-	}
+	pidAlive := platform.ProcessAlive
 
 	if err := client.Play(context.Background(), model.Video{ID: "vid11111111", Title: "First"}, "window"); err != nil {
 		t.Fatalf("first Play failed: %v", err)
@@ -978,7 +974,7 @@ wait $!
 		time.Sleep(10 * time.Millisecond)
 	}
 	if pidAlive(pid2) {
-		_ = syscall.Kill(pid2, syscall.SIGKILL)
+		_ = platform.KillProcessGroup(pid2)
 		t.Fatalf("second mpv pid %d remained alive after Close()", pid2)
 	}
 }
@@ -3201,4 +3197,183 @@ func TestFakeEngine_SpeedLoopPlaylistAndPlayFrom(t *testing.T) {
 		}(g)
 	}
 	wg.Wait()
+}
+
+func TestIPCClient_EnqueueAndStandalonePlayLaunchMPV(t *testing.T) {
+	t.Run("Enqueue appends to active IPC playlist when connected", func(t *testing.T) {
+		var (
+			mu   sync.Mutex
+			cmds [][]any
+		)
+		srv := startTestMPVServer(t, func(conn net.Conn, cmd []any, reqID int64) {
+			cp := make([]any, len(cmd))
+			copy(cp, cmd)
+			mu.Lock()
+			if len(cmd) > 0 && fmt.Sprint(cmd[0]) != "observe_property" {
+				cmds = append(cmds, cp)
+			}
+			mu.Unlock()
+			_ = json.NewEncoder(conn).Encode(map[string]any{
+				"error":      "success",
+				"request_id": reqID,
+			})
+		})
+
+		client := NewIPCClient(WithSocketPath(srv.sockPath), WithCommandTimeout(2*time.Second))
+		defer client.Close()
+
+		if err := client.Enqueue(context.Background(), model.Video{ID: "enqVid00001", Title: "Queued Song"}); err != nil {
+			t.Fatalf("Enqueue() unexpected error: %v", err)
+		}
+
+		mu.Lock()
+		gotCmds := slices.Clone(cmds)
+		mu.Unlock()
+		if len(gotCmds) != 1 || fmt.Sprint(gotCmds[0][0]) != "loadfile" || fmt.Sprint(gotCmds[0][1]) != "https://www.youtube.com/watch?v=enqVid00001" || fmt.Sprint(gotCmds[0][2]) != "append-play" {
+			t.Fatalf("unexpected Enqueue IPC commands: %#v", gotCmds)
+		}
+	})
+
+	t.Run("Enqueue reconnects immediately when socket becomes available before falling back", func(t *testing.T) {
+		sockPath := filepath.Join(t.TempDir(), "late-mpv.sock")
+		client := NewIPCClient(
+			WithSocketPath(sockPath),
+			WithBackoff(2*time.Second, 5*time.Second),
+			WithCommandTimeout(2*time.Second),
+		)
+		defer client.Close()
+
+		var (
+			mu   sync.Mutex
+			cmds [][]any
+		)
+		ln, err := net.Listen("unix", sockPath)
+		if err != nil {
+			t.Fatalf("listen unix: %v", err)
+		}
+		srv := &testMPVServer{
+			sockPath: sockPath,
+			listener: ln,
+			accepts:  make(chan net.Conn, 8),
+			onCmd: func(conn net.Conn, cmd []any, reqID int64) {
+				cp := make([]any, len(cmd))
+				copy(cp, cmd)
+				mu.Lock()
+				if len(cmd) > 0 && fmt.Sprint(cmd[0]) != "observe_property" {
+					cmds = append(cmds, cp)
+				}
+				mu.Unlock()
+				_ = json.NewEncoder(conn).Encode(map[string]any{
+					"error":      "success",
+					"request_id": reqID,
+				})
+			},
+		}
+		t.Cleanup(func() { srv.Close() })
+		go srv.acceptLoop()
+
+		if err := client.Enqueue(context.Background(), model.Video{ID: "enqLate0001", Title: "Late Socket Song"}); err != nil {
+			t.Fatalf("Enqueue() unexpected error: %v", err)
+		}
+
+		mu.Lock()
+		gotCmds := slices.Clone(cmds)
+		mu.Unlock()
+		if len(gotCmds) != 1 || fmt.Sprint(gotCmds[0][0]) != "loadfile" || fmt.Sprint(gotCmds[0][2]) != "append-play" {
+			t.Fatalf("expected Enqueue to reconnect and send append-play, got %#v", gotCmds)
+		}
+	})
+
+	t.Run("Enqueue without server falls back to Play launching mpv directly without yt", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		binDir := filepath.Join(tmpDir, "bin")
+		argsFile := filepath.Join(tmpDir, "mpv-enqueue.args")
+
+		writeStubBin(t, binDir, "mpv", fmt.Sprintf("printf '%%s\\n' \"$@\" > %q\nexit 0", argsFile))
+		t.Setenv("PATH", binDir)
+
+		sockPath := filepath.Join(tmpDir, "run", "mpv.sock")
+		client := NewIPCClient(
+			WithSocketPath(sockPath),
+			WithBackoff(2*time.Second, 5*time.Second),
+			WithLaunchDefaults(LaunchOpts{
+				SocketPath: sockPath,
+				Mode:       "window",
+				Quality:    720,
+			}),
+		)
+		client.SetAutoplay(false)
+		defer client.Close()
+
+		if err := client.Enqueue(context.Background(), model.Video{ID: "enqPlay0001", Title: "Fallback Play"}); err != nil {
+			t.Fatalf("Enqueue() fallback error: %v", err)
+		}
+
+		deadline := time.Now().Add(2 * time.Second)
+		var raw []byte
+		var readErr error
+		for time.Now().Before(deadline) {
+			raw, readErr = os.ReadFile(argsFile)
+			if readErr == nil && len(raw) > 0 {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		if readErr != nil || len(raw) == 0 {
+			t.Fatalf("timed out waiting for mpv launch args from Enqueue fallback: %v", readErr)
+		}
+		argsText := string(raw)
+		if !strings.Contains(argsText, "https://www.youtube.com/watch?v=enqPlay0001") {
+			t.Fatalf("expected video URL in mpv args, got:\n%s", argsText)
+		}
+		if !strings.Contains(argsText, "--force-media-title=Fallback Play") {
+			t.Fatalf("expected title flag in mpv args, got:\n%s", argsText)
+		}
+	})
+
+	t.Run("PlayFrom with empty SocketPath launches mpv via LaunchMPV without yt", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		binDir := filepath.Join(tmpDir, "bin")
+		argsFile := filepath.Join(tmpDir, "mpv-nosock.args")
+
+		writeStubBin(t, binDir, "mpv", fmt.Sprintf("printf '%%s\\n' \"$@\" > %q\nexit 0", argsFile))
+		t.Setenv("PATH", binDir)
+
+		client := NewIPCClient(
+			WithSocketPath(filepath.Join(tmpDir, "missing.sock")),
+			WithBackoff(2*time.Second, 5*time.Second),
+		)
+		client.SetAutoplay(false)
+		defer client.Close()
+
+		if err := client.PlayFrom(context.Background(), model.Video{ID: "noSockVid01", Title: "No Socket"}, "audio", 18.5); err != nil {
+			t.Fatalf("PlayFrom() without SocketPath error: %v", err)
+		}
+
+		deadline := time.Now().Add(2 * time.Second)
+		var raw []byte
+		var readErr error
+		for time.Now().Before(deadline) {
+			raw, readErr = os.ReadFile(argsFile)
+			if readErr == nil && len(raw) > 0 {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		if readErr != nil || len(raw) == 0 {
+			t.Fatalf("timed out waiting for standalone mpv args: %v", readErr)
+		}
+		args := strings.Split(strings.TrimSpace(string(raw)), "\n")
+		for _, want := range []string{
+			"--no-video",
+			"--force-window=no",
+			"--force-media-title=No Socket",
+			"--start=18.5",
+			"https://www.youtube.com/watch?v=noSockVid01",
+		} {
+			if !slices.Contains(args, want) {
+				t.Fatalf("standalone mpv args %v missing %q", args, want)
+			}
+		}
+	})
 }

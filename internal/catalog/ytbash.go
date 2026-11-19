@@ -2,29 +2,27 @@ package catalog
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
-	"time"
 
 	"github.com/e12jassir/iutui/internal/model"
 )
 
-// BashCatalog implements Catalog by reading cached TSV feeds and falling back
-// to invoking the yt bash CLI with __list.
+// BashCatalog implements Catalog as a pure-Go local reader for legacy TSV
+// feed caches, state lists (history, watchlater, liked), and local downloads.
+// It never spawns external processes; cache misses return (nil, nil).
 type BashCatalog struct {
 	CacheDir string
 	StateDir string
 	BinPath  string
 }
 
-// NewBashCatalog constructs a BashCatalog with explicit directories and binary
-// path. Empty values fall back to XDG defaults and PATH/executable resolution.
+// NewBashCatalog constructs a BashCatalog with explicit directories. Empty
+// directory values fall back to XDG defaults; binPath is retained for signature
+// compatibility and is unused.
 func NewBashCatalog(cacheDir, stateDir, binPath string) *BashCatalog {
 	return &BashCatalog{
 		CacheDir: cacheDir,
@@ -33,11 +31,14 @@ func NewBashCatalog(cacheDir, stateDir, binPath string) *BashCatalog {
 	}
 }
 
-// Feed returns videos for the given tab from cached TSV files when available,
-// falling back to `yt __list <view>` with context cancellation support.
+// Feed returns videos for the given tab from cached TSV files or local
+// downloads metadata when available, returning (nil, nil) on cache miss.
 func (c *BashCatalog) Feed(ctx context.Context, tab model.Tab) ([]model.Video, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+	if c == nil {
+		return nil, nil
 	}
 
 	cacheDir, stateDir := c.resolveDirs()
@@ -52,68 +53,32 @@ func (c *BashCatalog) Feed(ctx context.Context, tab model.Tab) ([]model.Video, e
 		}
 	}
 
-	viewArg, ok := tabViewArg(tab)
-	if !ok {
-		return nil, nil
-	}
-
-	return c.runList(ctx, viewArg)
+	return nil, nil
 }
 
-// RefreshFeed bypasses cached TSV files and fetches fresh results from yt.
+// RefreshFeed returns local downloads for TabDownloads or (nil, nil) for other
+// tabs without invoking any external binary.
 func (c *BashCatalog) RefreshFeed(ctx context.Context, tab model.Tab) ([]model.Video, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+	if c == nil {
+		return nil, nil
 	}
 	_, stateDir := c.resolveDirs()
 	if tab == model.TabDownloads {
 		return loadDownloads(stateDir), nil
 	}
-	viewArg, ok := tabViewArg(tab)
-	if !ok {
-		return nil, nil
-	}
-	return c.runList(ctx, viewArg)
+	return nil, nil
 }
 
-// Search queries YouTube via `yt __list search <query>` using exec.CommandContext.
+// Search checks context cancellation and returns (nil, nil) without executing
+// any external binary.
 func (c *BashCatalog) Search(ctx context.Context, query string) ([]model.Video, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if strings.TrimSpace(query) == "" {
-		return nil, nil
-	}
-	return c.runList(ctx, "search", query)
-}
-
-func (c *BashCatalog) runList(ctx context.Context, args ...string) ([]model.Video, error) {
-	bin := c.BinPath
-	if bin == "" {
-		bin = resolveYtBin()
-	}
-
-	cmdArgs := append([]string{"__list"}, args...)
-	cmd := exec.CommandContext(ctx, bin, cmdArgs...)
-	// Put the child in its own process group so cancellation kills yt and its
-	// subprocesses (e.g. yt-dlp/curl) rather than leaving them holding stdout.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error {
-		if cmd.Process == nil {
-			return nil
-		}
-		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-	}
-	cmd.WaitDelay = 100 * time.Millisecond
-	out, err := cmd.Output()
-	if err != nil {
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return nil, ctxErr
-		}
-		return nil, err
-	}
-
-	return ParseTSV(bytes.NewReader(out))
+	return nil, nil
 }
 
 func (c *BashCatalog) resolveDirs() (cacheDir, stateDir string) {
@@ -156,6 +121,10 @@ func (c *BashCatalog) cachedFeedPath(tab model.Tab, cacheDir, stateDir string) s
 		)
 	case model.TabHistory:
 		return filepath.Join(stateDir, "history.tsv")
+	case model.TabWatchLater:
+		return filepath.Join(stateDir, "watchlater.tsv")
+	case model.TabLiked:
+		return filepath.Join(stateDir, "liked.tsv")
 	default:
 		return ""
 	}
@@ -171,45 +140,6 @@ func firstExisting(paths ...string) string {
 		return paths[0]
 	}
 	return ""
-}
-
-func tabViewArg(tab model.Tab) (string, bool) {
-	switch tab {
-	case model.TabHome:
-		return "foryou", true
-	case model.TabMusic:
-		return "music", true
-	case model.TabSubscriptions:
-		return "subs", true
-	case model.TabHistory:
-		return "history", true
-	default:
-		return "", false
-	}
-}
-
-func resolveYtBin() string {
-	var candidates []string
-	if exe, err := os.Executable(); err == nil {
-		dir := filepath.Dir(exe)
-		candidates = append(candidates,
-			filepath.Join(dir, "yt"),
-			filepath.Join(dir, "..", "lib", "yt", "yt"),
-		)
-	}
-	if home, err := os.UserHomeDir(); err == nil && home != "" {
-		candidates = append(candidates, filepath.Join(home, ".local", "lib", "yt", "yt"))
-	}
-	candidates = append(candidates, "./bin/yt")
-	for _, p := range candidates {
-		if info, err := os.Stat(p); err == nil && !info.IsDir() {
-			return p
-		}
-	}
-	if p, err := exec.LookPath("yt"); err == nil {
-		return p
-	}
-	return "yt"
 }
 
 // ParseTSVFile opens a TSV file at path and parses its video rows.

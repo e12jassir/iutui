@@ -166,8 +166,9 @@ func hasValidCookieFile(path string) bool {
 	return err == nil && !info.IsDir() && info.Size() > 0
 }
 
-// Search queries YouTube directly via yt-dlp (~2s) and falls back to BashCatalog on error.
+// Search queries YouTube directly via yt-dlp (~2s) and falls back to BashCatalog only if it yields results.
 func (h *HybridCatalog) Search(ctx context.Context, query string) ([]model.Video, error) {
+	var directErr error
 	if h.Direct != nil {
 		videos, err := h.Direct.Search(ctx, query)
 		if err == nil {
@@ -176,15 +177,37 @@ func (h *HybridCatalog) Search(ctx context.Context, query string) ([]model.Video
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
+		directErr = err
 	}
 	if h.Feeds != nil {
 		videos, err := h.Feeds.Search(ctx, query)
-		if err == nil && h.Direct != nil {
-			h.Direct.applyCachedMeta(videos)
+		if err == nil && len(videos) > 0 {
+			if h.Direct != nil {
+				h.Direct.applyCachedMeta(videos)
+			}
+			return videos, nil
+		}
+		if directErr != nil {
+			return nil, directErr
 		}
 		return videos, err
 	}
-	return nil, nil
+	return nil, directErr
+}
+
+// RefreshSearch bypasses Direct's search cache and performs a fresh lookup.
+func (h *HybridCatalog) RefreshSearch(ctx context.Context, query string) ([]model.Video, error) {
+	if h.Direct != nil {
+		videos, err := h.Direct.RefreshSearch(ctx, query)
+		if err == nil {
+			return videos, nil
+		}
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, err
+	}
+	return h.Search(ctx, query)
 }
 
 // EnrichMetadata delegates per-video view/date enrichment to the underlying Direct catalog.

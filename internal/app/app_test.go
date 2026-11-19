@@ -2293,3 +2293,71 @@ func TestPhase2_DownloadProgressAndOfflinePlayback(t *testing.T) {
 		t.Fatalf("expected FakeEngine Play with LocalPath=%q, got %+v", localFile, calls)
 	}
 }
+
+func TestSearchFocusImmuneToMouseMotionAndSuggestionClick(t *testing.T) {
+	cat := &catalog.FakeCatalog{
+		Feeds: map[model.Tab][]model.Video{
+			model.TabHome: {
+				{ID: "h0", Title: "Home 0", Duration: "04:00"},
+				{ID: "h1", Title: "Home 1", Duration: "05:00"},
+			},
+		},
+		Results: map[string][]model.Video{
+			"pink floyd live": {{ID: "pf1", Title: "Pink Floyd Live"}},
+			"golang":          {{ID: "go1", Title: "Go 1"}, {ID: "go2", Title: "Go 2"}},
+		},
+	}
+	s := NewState(Dependencies{
+		Catalog: cat,
+		Engine:  player.NewFakeEngine(),
+		SuggestProvider: &fakeSuggestProvider{
+			items: []string{"pink floyd live", "pink floyd pulse"},
+		},
+	})
+	defer s.Close()
+	s.Width, s.Height = 140, 42
+	s, _ = s.Update(FeedLoadedMsg{Tab: model.TabHome, Videos: cat.Feeds[model.TabHome]})
+
+	// Open search with '/' and verify mouse motion over grid never steals FocusSearch or alters SelectedIdx.
+	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	s.SearchSuggestions = []string{"pink floyd live", "pink floyd pulse"}
+	col1X := s.mainOriginX() + s.gridCardWidth() + 4
+	s, _ = s.Update(tea.MouseMsg{X: col1X, Y: 12, Action: tea.MouseActionMotion})
+	if s.Focus != FocusSearch || s.SelectedIdx != 0 {
+		t.Fatalf("expected FocusSearch and SelectedIdx=0 preserved after passive mouse motion, got focus=%v idx=%d", s.Focus, s.SelectedIdx)
+	}
+
+	// Hovering over suggestion row 1 highlights it; left click submits it directly.
+	sideW := s.sidebarWidth()
+	s, _ = s.Update(tea.MouseMsg{X: sideW + 4, Y: 5, Action: tea.MouseActionMotion})
+	if s.SuggestIdx != 1 {
+		t.Fatalf("expected SuggestIdx=1 on suggestion hover, got %d", s.SuggestIdx)
+	}
+	s, cmd := s.Update(tea.MouseMsg{
+		X:      sideW + 4,
+		Y:      4,
+		Button: tea.MouseButtonLeft,
+		Action: tea.MouseActionPress,
+	})
+	if s.Focus != FocusMain || s.SearchQuery != "pink floyd live" {
+		t.Fatalf("expected click on suggestion 0 to submit 'pink floyd live', got focus=%v query=%q", s.Focus, s.SearchQuery)
+	}
+	for _, m := range collectNonTickMsgs(cmd, 150*time.Millisecond) {
+		s, _ = s.Update(m)
+	}
+	if len(s.SearchResults) != 1 || s.SearchResults[0].ID != "pf1" {
+		t.Fatalf("expected search result pf1, got %+v", s.SearchResults)
+	}
+
+	// Pressing 'r' while on ViewSearch re-runs the active search cleanly.
+	s, cmd = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	if !s.SearchPending {
+		t.Fatal("expected SearchPending=true after pressing 'r' in ViewSearch")
+	}
+	for _, m := range collectNonTickMsgs(cmd, 150*time.Millisecond) {
+		s, _ = s.Update(m)
+	}
+	if s.SearchPending || len(s.SearchResults) != 1 || s.SearchResults[0].ID != "pf1" {
+		t.Fatalf("expected refreshed search results on 'r', got pending=%v res=%+v", s.SearchPending, s.SearchResults)
+	}
+}

@@ -21,6 +21,9 @@ const (
 	likedFile         = "liked.tsv"
 	historyFile       = "history.tsv"
 	subscriptionsFile = "subscriptions.tsv"
+
+	// MaxHistoryEntries is the maximum number of videos retained in history.tsv.
+	MaxHistoryEntries = 500
 )
 
 // TSVStore implements Store by atomically reading and writing TSV files
@@ -157,8 +160,9 @@ func (s *TSVStore) History(ctx context.Context) ([]model.Video, error) {
 	return s.readVideos(filepath.Join(s.StateDir, historyFile))
 }
 
-// RecordHistory prepends v to history.tsv and deduplicates any prior entry
-// with the same video ID. Writes are atomic.
+// RecordHistory prepends v to history.tsv, deduplicates any prior entry
+// with the same video ID, and caps the stored entries at MaxHistoryEntries.
+// Writes are atomic.
 func (s *TSVStore) RecordHistory(ctx context.Context, v model.Video) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -183,6 +187,9 @@ func (s *TSVStore) RecordHistory(ctx context.Context, v model.Video) error {
 			continue
 		}
 		updated = append(updated, item)
+	}
+	if len(updated) > MaxHistoryEntries {
+		updated = updated[:MaxHistoryEntries]
 	}
 
 	return writeVideosAtomic(path, updated)

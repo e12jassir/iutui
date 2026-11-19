@@ -130,13 +130,9 @@ func TestHybridCatalog_NativeFirstAndFallbacks(t *testing.T) {
 		}
 
 		ytdlpBin := writeFakeYTDLP(t, tmp, `printf '{"id":"native001","title":"Native Go Video","channel":"GoChan","duration":180,"view_count":5000}\n'`)
-		bashBin := filepath.Join(tmp, "yt")
-		if err := os.WriteFile(bashBin, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
-			t.Fatal(err)
-		}
 
 		h := NewHybridCatalog(
-			NewBashCatalog(cacheDir, stateDir, bashBin),
+			NewBashCatalog(cacheDir, stateDir, ""),
 			NewYTDLPCatalog(cacheDir, 5*time.Minute, ytdlpBin),
 		)
 
@@ -157,11 +153,17 @@ func TestHybridCatalog_NativeFirstAndFallbacks(t *testing.T) {
 		}
 	})
 
-	t.Run("RefreshFeed falls back to BashCatalog when Direct fails and handles local tabs", func(t *testing.T) {
+	t.Run("falls back to local TSV feeds when Direct fails and handles local tabs", func(t *testing.T) {
 		tmp := t.TempDir()
 		cacheDir := filepath.Join(tmp, "cache")
 		stateDir := filepath.Join(tmp, "state")
+		if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
 		if err := os.MkdirAll(filepath.Join(stateDir, "downloads"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(cacheDir, "feed_foryou.tsv"), []byte("tsvfb001\thttps://www.youtube.com/watch?v=tsvfb001\tTSV Fallback\tChan\t02:30\t300\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
 		if err := os.WriteFile(filepath.Join(stateDir, "downloads", "dl00001.meta"), []byte("Saved Song\nSaved Artist\n"), 0o644); err != nil {
@@ -170,22 +172,29 @@ func TestHybridCatalog_NativeFirstAndFallbacks(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(stateDir, "history.tsv"), []byte("hist0001\tWatched\tChan\t02:00\thttps://youtu.be/hist0001\t100\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
-
-		ytStub := filepath.Join(tmp, "yt")
-		if err := os.WriteFile(ytStub, []byte("#!/bin/sh\nprintf 'bash0001\thttps://www.youtube.com/watch?v=bash0001\tBash Refreshed\tChan\t02:30\t300\n'\n"), 0o755); err != nil {
+		if err := os.WriteFile(filepath.Join(stateDir, "watchlater.tsv"), []byte("later001\tWatch Later\tChanW\t04:00\thttps://youtu.be/later001\t200\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
+		if err := os.WriteFile(filepath.Join(stateDir, "liked.tsv"), []byte("liked001\tLiked Track\tChanK\t03:15\thttps://youtu.be/liked001\t500\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
 		badYtdlp := writeFakeYTDLP(t, tmp, `exit 1`)
 
 		h := NewHybridCatalog(
-			NewBashCatalog(cacheDir, stateDir, ytStub),
+			NewBashCatalog(cacheDir, stateDir, ""),
 			NewYTDLPCatalog(cacheDir, 5*time.Minute, badYtdlp),
 		)
 
 		ctx := context.Background()
+		feed, err := h.Feed(ctx, model.TabHome)
+		if err != nil || len(feed) != 1 || feed[0].ID != "tsvfb001" {
+			t.Fatalf("Feed fallback = %+v, err=%v", feed, err)
+		}
+
 		refreshed, err := h.RefreshFeed(ctx, model.TabHome)
-		if err != nil || len(refreshed) != 1 || refreshed[0].ID != "bash0001" {
-			t.Fatalf("RefreshFeed fallback = %+v, err=%v", refreshed, err)
+		if err != nil || refreshed != nil {
+			t.Fatalf("RefreshFeed fallback = %+v, err=%v, want (nil, nil)", refreshed, err)
 		}
 
 		dls, err := h.Feed(ctx, model.TabDownloads)
@@ -193,9 +202,24 @@ func TestHybridCatalog_NativeFirstAndFallbacks(t *testing.T) {
 			t.Fatalf("TabDownloads = %+v, err=%v", dls, err)
 		}
 
+		refreshedDls, err := h.RefreshFeed(ctx, model.TabDownloads)
+		if err != nil || len(refreshedDls) != 1 || refreshedDls[0].ID != "dl00001" {
+			t.Fatalf("RefreshFeed TabDownloads = %+v, err=%v", refreshedDls, err)
+		}
+
 		hist, err := h.Feed(ctx, model.TabHistory)
 		if err != nil || len(hist) != 1 || hist[0].ID != "hist0001" {
 			t.Fatalf("TabHistory = %+v, err=%v", hist, err)
+		}
+
+		later, err := h.Feed(ctx, model.TabWatchLater)
+		if err != nil || len(later) != 1 || later[0].ID != "later001" {
+			t.Fatalf("TabWatchLater = %+v, err=%v", later, err)
+		}
+
+		liked, err := h.Feed(ctx, model.TabLiked)
+		if err != nil || len(liked) != 1 || liked[0].ID != "liked001" {
+			t.Fatalf("TabLiked = %+v, err=%v", liked, err)
 		}
 	})
 

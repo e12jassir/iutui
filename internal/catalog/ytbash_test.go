@@ -103,6 +103,22 @@ func TestBashCatalogCachedFeeds(t *testing.T) {
 			content:  "hist12345\tWatched Video\tChanH\t02:15\thttps://youtu.be/hist12345\tNA\n",
 			wantID:   "hist12345",
 		},
+		{
+			name:     "watch later reads watchlater.tsv from stateDir",
+			tab:      model.TabWatchLater,
+			inState:  true,
+			filename: "watchlater.tsv",
+			content:  "later1234\tLater Video\tChanL\t08:40\thttps://youtu.be/later1234\tNA\n",
+			wantID:   "later1234",
+		},
+		{
+			name:     "liked reads liked.tsv from stateDir",
+			tab:      model.TabLiked,
+			inState:  true,
+			filename: "liked.tsv",
+			content:  "liked1234\tLiked Video\tChanK\t03:45\thttps://youtu.be/liked1234\tNA\n",
+			wantID:   "liked1234",
+		},
 	}
 
 	for _, tc := range cases {
@@ -125,7 +141,7 @@ func TestBashCatalogCachedFeeds(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			cat := NewBashCatalog(cacheDir, stateDir, filepath.Join(tmp, "nonexistent-yt"))
+			cat := NewBashCatalog(cacheDir, stateDir, "")
 			got, err := cat.Feed(context.Background(), tc.tab)
 			if err != nil {
 				t.Fatalf("Feed(%v) error: %v", tc.tab, err)
@@ -137,95 +153,109 @@ func TestBashCatalogCachedFeeds(t *testing.T) {
 	}
 }
 
-func TestBashCatalogSearchAndFallback(t *testing.T) {
+func TestBashCatalogDownloadsAndCacheMiss(t *testing.T) {
 	tmp := t.TempDir()
-	fakeBin := filepath.Join(tmp, "yt")
-	script := `#!/bin/sh
-if [ "$1" = "__list" ] && [ "$2" = "search" ]; then
-  printf 'srch12345\thttps://youtu.be/srch12345\tFound %s\tSearchChan\t06:00\t4200\n' "$3"
-  exit 0
-fi
-if [ "$1" = "__list" ] && [ "$2" = "foryou" ]; then
-  printf 'cli123456\tCLI Video\tCLIChan\t01:30\thttps://youtu.be/cli123456\t100\n'
-  exit 0
-fi
-exit 1
-`
-	if err := os.WriteFile(fakeBin, []byte(script), 0o755); err != nil {
+	cacheDir := filepath.Join(tmp, "empty-cache")
+	stateDir := filepath.Join(tmp, "state")
+	dlDir := filepath.Join(stateDir, "downloads")
+	if err := os.MkdirAll(dlDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dlDir, "dlvid1234.meta"), []byte("Offline Track\nOffline Artist\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
-	cat := NewBashCatalog(filepath.Join(tmp, "empty-cache"), filepath.Join(tmp, "empty-state"), fakeBin)
+	cat := NewBashCatalog(cacheDir, stateDir, filepath.Join(tmp, "nonexistent-yt"))
+	ctx := context.Background()
 
-	t.Run("search invokes bin/yt __list search", func(t *testing.T) {
-		got, err := cat.Search(context.Background(), "golang")
-		if err != nil {
-			t.Fatalf("Search error: %v", err)
-		}
-		if len(got) != 1 || got[0].ID != "srch12345" || got[0].Title != "Found golang" {
-			t.Fatalf("unexpected search result: %+v", got)
+	t.Run("downloads reads local meta entries on Feed and RefreshFeed", func(t *testing.T) {
+		for _, refresh := range []bool{false, true} {
+			var (
+				got []model.Video
+				err error
+			)
+			if refresh {
+				got, err = cat.RefreshFeed(ctx, model.TabDownloads)
+			} else {
+				got, err = cat.Feed(ctx, model.TabDownloads)
+			}
+			if err != nil {
+				t.Fatalf("refresh=%v downloads error: %v", refresh, err)
+			}
+			if len(got) != 1 || got[0].ID != "dlvid1234" || got[0].Title != "Offline Track" || got[0].Channel != "Offline Artist" {
+				t.Fatalf("refresh=%v downloads = %+v", refresh, got)
+			}
 		}
 	})
 
-	t.Run("empty search returns nil without running command", func(t *testing.T) {
-		got, err := cat.Search(context.Background(), "   ")
-		if err != nil {
-			t.Fatalf("Search error: %v", err)
-		}
-		if got != nil {
-			t.Fatalf("expected nil, got %+v", got)
+	t.Run("feed returns nil without error on cache miss", func(t *testing.T) {
+		for _, tab := range []model.Tab{model.TabHome, model.TabMusic, model.TabSubscriptions, model.TabHistory, model.TabWatchLater, model.TabLiked} {
+			got, err := cat.Feed(ctx, tab)
+			if err != nil {
+				t.Fatalf("Feed(%v) error: %v", tab, err)
+			}
+			if got != nil {
+				t.Fatalf("Feed(%v) = %+v, want nil on cache miss", tab, got)
+			}
 		}
 	})
 
-	t.Run("feed falls back to bin/yt __list when cache missing", func(t *testing.T) {
-		got, err := cat.Feed(context.Background(), model.TabHome)
-		if err != nil {
-			t.Fatalf("Feed error: %v", err)
+	t.Run("refresh returns nil for non-downloads tabs without spawning binary", func(t *testing.T) {
+		for _, tab := range []model.Tab{model.TabHome, model.TabMusic, model.TabSubscriptions, model.TabHistory, model.TabWatchLater, model.TabLiked} {
+			got, err := cat.RefreshFeed(ctx, tab)
+			if err != nil {
+				t.Fatalf("RefreshFeed(%v) error: %v", tab, err)
+			}
+			if got != nil {
+				t.Fatalf("RefreshFeed(%v) = %+v, want nil", tab, got)
+			}
 		}
-		if len(got) != 1 || got[0].ID != "cli123456" {
-			t.Fatalf("unexpected fallback result: %+v", got)
+	})
+
+	t.Run("search returns nil without spawning binary", func(t *testing.T) {
+		for _, q := range []string{"", "   ", "golang"} {
+			got, err := cat.Search(ctx, q)
+			if err != nil {
+				t.Fatalf("Search(%q) error: %v", q, err)
+			}
+			if got != nil {
+				t.Fatalf("Search(%q) = %+v, want nil", q, got)
+			}
 		}
 	})
 }
 
 func TestBashCatalogContextCancellation(t *testing.T) {
 	tmp := t.TempDir()
-	slowBin := filepath.Join(tmp, "yt")
-	script := "#!/bin/sh\nsleep 5\n"
-	if err := os.WriteFile(slowBin, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	cat := NewBashCatalog(filepath.Join(tmp, "cache"), filepath.Join(tmp, "state"), slowBin)
+	cat := NewBashCatalog(filepath.Join(tmp, "cache"), filepath.Join(tmp, "state"), "")
 
 	t.Run("pre-cancelled context returns context.Canceled", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
 
-		_, err := cat.Feed(ctx, model.TabHome)
-		if !errors.Is(err, context.Canceled) {
+		if _, err := cat.Feed(ctx, model.TabHome); !errors.Is(err, context.Canceled) {
 			t.Fatalf("Feed err = %v, want context.Canceled", err)
 		}
-
-		_, err = cat.Search(ctx, "test")
-		if !errors.Is(err, context.Canceled) {
+		if _, err := cat.RefreshFeed(ctx, model.TabDownloads); !errors.Is(err, context.Canceled) {
+			t.Fatalf("RefreshFeed err = %v, want context.Canceled", err)
+		}
+		if _, err := cat.Search(ctx, "test"); !errors.Is(err, context.Canceled) {
 			t.Fatalf("Search err = %v, want context.Canceled", err)
 		}
 	})
 
-	t.Run("command timeout cancels running process", func(t *testing.T) {
-		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	t.Run("expired deadline returns context.DeadlineExceeded", func(t *testing.T) {
+		ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
 		defer cancel()
 
-		start := time.Now()
-		_, err := cat.Search(ctx, "slow")
-		elapsed := time.Since(start)
-
-		if !errors.Is(err, context.DeadlineExceeded) {
-			t.Fatalf("Search err = %v, want context.DeadlineExceeded", err)
+		if _, err := cat.Feed(ctx, model.TabHome); !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Feed err = %v, want context.DeadlineExceeded", err)
 		}
-		if elapsed > time.Second {
-			t.Fatalf("cancellation took too long: %v", elapsed)
+		if _, err := cat.RefreshFeed(ctx, model.TabHome); !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("RefreshFeed err = %v, want context.DeadlineExceeded", err)
+		}
+		if _, err := cat.Search(ctx, "slow"); !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Search err = %v, want context.DeadlineExceeded", err)
 		}
 	})
 }
@@ -249,13 +279,33 @@ func TestBashCatalogXDGDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	stateDir := filepath.Join(stateBase, "yt")
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(stateDir, "watchlater.tsv"),
+		[]byte("xdglater1\tXDG Later\tChanL\t04:00\thttps://youtu.be/xdglater1\tNA\n"),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+
 	cat := NewBashCatalog("", "", "")
 	got, err := cat.Feed(context.Background(), model.TabMusic)
 	if err != nil {
-		t.Fatalf("Feed error: %v", err)
+		t.Fatalf("Feed(TabMusic) error: %v", err)
 	}
 	if len(got) != 1 || got[0].ID != "xdg123456" {
-		t.Fatalf("unexpected videos: %+v", got)
+		t.Fatalf("unexpected music videos: %+v", got)
+	}
+
+	gotLater, err := cat.Feed(context.Background(), model.TabWatchLater)
+	if err != nil {
+		t.Fatalf("Feed(TabWatchLater) error: %v", err)
+	}
+	if len(gotLater) != 1 || gotLater[0].ID != "xdglater1" {
+		t.Fatalf("unexpected watchlater videos: %+v", gotLater)
 	}
 }
 

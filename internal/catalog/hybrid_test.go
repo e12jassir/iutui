@@ -58,7 +58,7 @@ printf '{"id":"abc123def45","title":"Pink Floyd Time","channel":"Pink Floyd","du
 		}
 	})
 
-	t.Run("HybridCatalog uses local TSV feed and falls back to BashCatalog on search failure", func(t *testing.T) {
+	t.Run("HybridCatalog uses local TSV feed on Direct failure and returns nil on search failure", func(t *testing.T) {
 		tmp := t.TempDir()
 		cacheDir := filepath.Join(tmp, "cache")
 		stateDir := filepath.Join(tmp, "state")
@@ -74,18 +74,10 @@ printf '{"id":"abc123def45","title":"Pink Floyd Time","channel":"Pink Floyd","du
 			t.Fatal(err)
 		}
 
-		ytStub := filepath.Join(tmp, "yt")
-		if err := os.WriteFile(ytStub, []byte("#!/bin/sh\nprintf 'fb001\\thttps://www.youtube.com/watch?v=fb001\\tFallback\\tChan\\t01:00\\t500\\tFallback\\n'\n"), 0o755); err != nil {
-			t.Fatal(err)
-		}
-
-		badYtdlp := filepath.Join(tmp, "bad-yt-dlp")
-		if err := os.WriteFile(badYtdlp, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
-			t.Fatal(err)
-		}
+		badYtdlp := writeFakeYTDLP(t, tmp, `exit 1`)
 
 		h := NewHybridCatalog(
-			NewBashCatalog(cacheDir, stateDir, ytStub),
+			NewBashCatalog(cacheDir, stateDir, ""),
 			NewYTDLPCatalog(cacheDir, 5*time.Minute, badYtdlp),
 		)
 
@@ -96,8 +88,70 @@ printf '{"id":"abc123def45","title":"Pink Floyd Time","channel":"Pink Floyd","du
 		}
 
 		res, err := h.Search(ctx, "fallback")
-		if err != nil || len(res) != 1 || res[0].ID != "fb001" {
-			t.Fatalf("Search fallback = %+v, err=%v", res, err)
+		if err == nil || res != nil {
+			t.Fatalf("Search fallback = %+v, err=%v, want (nil, non-nil err)", res, err)
+		}
+	})
+
+	t.Run("YTDLPCatalog Search never passes cookies, ignores empty cache, and RefreshSearch invalidates cache", func(t *testing.T) {
+		tmp := t.TempDir()
+		cookieJar := filepath.Join(tmp, "cookies.txt")
+		if err := os.WriteFile(cookieJar, []byte("# Netscape\n.youtube.com\tTRUE\t/\tTRUE\t2000000000\tSID\tx\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		argsLog := filepath.Join(tmp, "args.log")
+		emptyFlag := filepath.Join(tmp, "empty")
+		if err := os.WriteFile(emptyFlag, []byte("1"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		script := fmt.Sprintf(`
+printf '%%s\n' "$*" >> %s
+if [ -f %s ]; then
+  rm -f %s
+  exit 0
+fi
+printf '{"id":"srchOK11111","title":"Fresh Search","channel":"Chan","duration":120}\n'
+`, shellQuote(argsLog), shellQuote(emptyFlag), shellQuote(emptyFlag))
+
+		bin := writeFakeYTDLP(t, tmp, script)
+		cat := NewYTDLPCatalog(tmp, 5*time.Minute, bin)
+		cat.CookieJarPath = cookieJar
+		ctx := context.Background()
+
+		// First search returns 0 rows -> must NOT poison the cache.
+		res1, err := cat.Search(ctx, "diomedes")
+		if err != nil {
+			t.Fatalf("first search failed: %v", err)
+		}
+		if len(res1) != 0 {
+			t.Fatalf("expected 0 results on first search, got %d", len(res1))
+		}
+
+		// Immediate second search must re-run yt-dlp and succeed without --cookies.
+		res2, err := cat.Search(ctx, "diomedes")
+		if err != nil {
+			t.Fatalf("second search failed: %v", err)
+		}
+		if len(res2) != 1 || res2[0].ID != "srchOK11111" {
+			t.Fatalf("expected fresh search result, got %+v", res2)
+		}
+
+		// RefreshSearch deletes cache entry and calls yt-dlp again.
+		res3, err := cat.RefreshSearch(ctx, "diomedes")
+		if err != nil || len(res3) != 1 {
+			t.Fatalf("RefreshSearch failed: res=%+v err=%v", res3, err)
+		}
+
+		rawArgs, err := os.ReadFile(argsLog)
+		if err != nil {
+			t.Fatalf("read args log: %v", err)
+		}
+		if strings.Contains(string(rawArgs), "--cookies") {
+			t.Fatalf("ytsearch must not pass --cookies, got args:\n%s", string(rawArgs))
+		}
+		lines := strings.Split(strings.TrimSpace(string(rawArgs)), "\n")
+		if len(lines) != 3 {
+			t.Fatalf("expected 3 yt-dlp invocations (empty + uncached retry + RefreshSearch), got %d:\n%s", len(lines), string(rawArgs))
 		}
 	})
 }
@@ -181,15 +235,11 @@ func TestHybridCatalog_GuestRSSSubscriptions(t *testing.T) {
 
 		ytdlpCalled := filepath.Join(tmp, "ytdlp.called")
 		badYtdlp := writeFakeYTDLP(t, tmp, fmt.Sprintf("touch %s\nexit 1\n", shellQuote(ytdlpCalled)))
-		badBash := filepath.Join(tmp, "yt")
-		if err := os.WriteFile(badBash, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
-			t.Fatal(err)
-		}
 
 		direct := NewYTDLPCatalog(cacheDir, 5*time.Minute, badYtdlp)
 		defer direct.Wait()
 
-		h := NewHybridCatalog(NewBashCatalog(cacheDir, stateDir, badBash), direct)
+		h := NewHybridCatalog(NewBashCatalog(cacheDir, stateDir, ""), direct)
 		h.RSSClient = newRSSRedirectClient(srv)
 		h.SubscriptionsProvider = func(context.Context) ([]string, error) {
 			return []string{chanA, chanB, "@ignoredHandle"}, nil

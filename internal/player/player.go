@@ -5,12 +5,10 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
-	"github.com/e12jassir/iutui/internal/model"
 	"github.com/e12jassir/iutui/internal/platform"
 )
 
@@ -33,46 +31,6 @@ type PlaylistItem struct {
 	Title    string `json:"title"`
 	Filename string `json:"filename"`
 	Current  bool   `json:"current"`
-}
-
-// PlayVideo triggers playback through the existing yt infrastructure.
-func PlayVideo(v model.Video, mode string) error {
-	if mode == "" {
-		mode = "auto"
-	}
-	url := fmt.Sprintf("https://www.youtube.com/watch?v=%s", v.ID)
-
-	ytBin := resolveYtBin()
-
-	cmd := exec.Command(ytBin, "__do", "play", mode, v.ID, url, v.Title, v.Channel, v.Duration)
-	cmd.Stdin = nil
-	cmd.Stdout = nil
-	cmd.Stderr = nil
-	return cmd.Start()
-}
-
-func resolveYtBin() string {
-	var candidates []string
-	if exe, err := os.Executable(); err == nil {
-		dir := filepath.Dir(exe)
-		candidates = append(candidates,
-			filepath.Join(dir, "yt"),
-			filepath.Join(dir, "..", "lib", "yt", "yt"),
-		)
-	}
-	if home, err := os.UserHomeDir(); err == nil && home != "" {
-		candidates = append(candidates, filepath.Join(home, ".local", "lib", "yt", "yt"))
-	}
-	candidates = append(candidates, "./bin/yt")
-	for _, p := range candidates {
-		if info, err := os.Stat(p); err == nil && !info.IsDir() {
-			return p
-		}
-	}
-	if p, err := exec.LookPath("yt"); err == nil {
-		return p
-	}
-	return "yt"
 }
 
 // FindSocket locates the active mpv.sock.

@@ -13,8 +13,9 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"syscall"
 	"time"
+
+	"github.com/e12jassir/iutui/internal/platform"
 )
 
 var (
@@ -363,12 +364,12 @@ func extractBrowserLoginCookies(ctx context.Context, cacheDir, ytdlpBin, spec st
 		"ytsearch1:youtube",
 	)
 	// Isolate subprocess group so cancellation kills yt-dlp and any helper children cleanly.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	platform.SetProcessGroup(cmd)
 	cmd.Cancel = func() error {
 		if cmd.Process == nil {
 			return nil
 		}
-		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		return platform.KillProcessGroup(cmd.Process.Pid)
 	}
 	cmd.WaitDelay = 100 * time.Millisecond
 

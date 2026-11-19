@@ -5,7 +5,8 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"syscall"
+
+	"github.com/e12jassir/iutui/internal/platform"
 )
 
 // LaunchOpts configures an mpv process launch.
@@ -141,7 +142,7 @@ func StartMPVProcess(mpvBin string, opts LaunchOpts) (*os.Process, error) {
 	cmd.Stdin = nil
 	cmd.Stdout = nil
 	cmd.Stderr = nil
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	platform.DetachProcess(cmd)
 
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("launch mpv: %w", err)

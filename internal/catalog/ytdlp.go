@@ -13,10 +13,10 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/e12jassir/iutui/internal/model"
+	"github.com/e12jassir/iutui/internal/platform"
 )
 
 // BuildFormat returns a yt-dlp format selector string for the requested
@@ -277,16 +277,49 @@ func (c *YTDLPCatalog) Search(ctx context.Context, query string) ([]model.Video,
 	}
 	c.applyCachedMeta(videos)
 
-	c.searchMu.Lock()
-	if c.searchCache == nil {
-		c.searchCache = make(map[string]searchCacheEntry)
+	if len(videos) > 0 {
+		now := time.Now()
+		c.searchMu.Lock()
+		if c.searchCache == nil {
+			c.searchCache = make(map[string]searchCacheEntry)
+		}
+		for k, entry := range c.searchCache {
+			if now.Sub(entry.fetchedAt) > ttl {
+				delete(c.searchCache, k)
+			}
+		}
+		if len(c.searchCache) >= 64 {
+			var oldestKey string
+			var oldestTime time.Time
+			for k, entry := range c.searchCache {
+				if oldestKey == "" || entry.fetchedAt.Before(oldestTime) {
+					oldestKey = k
+					oldestTime = entry.fetchedAt
+				}
+			}
+			if oldestKey != "" {
+				delete(c.searchCache, oldestKey)
+			}
+		}
+		copied := make([]model.Video, len(videos))
+		copy(copied, videos)
+		c.searchCache[query] = searchCacheEntry{videos: copied, fetchedAt: now}
+		c.searchMu.Unlock()
 	}
-	copied := make([]model.Video, len(videos))
-	copy(copied, videos)
-	c.searchCache[query] = searchCacheEntry{videos: copied, fetchedAt: time.Now()}
-	c.searchMu.Unlock()
 
 	return videos, nil
+}
+
+// RefreshSearch invalidates any cached results for query and executes a fresh lookup.
+func (c *YTDLPCatalog) RefreshSearch(ctx context.Context, query string) ([]model.Video, error) {
+	q := strings.TrimSpace(query)
+	if q == "" {
+		return nil, nil
+	}
+	c.searchMu.Lock()
+	delete(c.searchCache, q)
+	c.searchMu.Unlock()
+	return c.Search(ctx, q)
 }
 
 func (c *YTDLPCatalog) fetchTarget(ctx context.Context, target string) ([]model.Video, error) {
@@ -304,7 +337,7 @@ func (c *YTDLPCatalog) fetchTarget(ctx context.Context, target string) ([]model.
 		}
 		args = append(args, "--playlist-end", strconv.Itoa(feedLimit))
 	}
-	if c.CookieJarPath != "" {
+	if c.CookieJarPath != "" && !strings.HasPrefix(target, "ytsearch") {
 		if info, err := os.Stat(c.CookieJarPath); err == nil && !info.IsDir() && info.Size() > 0 {
 			args = append(args, "--cookies", c.CookieJarPath)
 		}
@@ -328,12 +361,12 @@ func (c *YTDLPCatalog) runYTDLP(ctx context.Context, args ...string) ([]byte, er
 	}
 
 	cmd := exec.CommandContext(ctx, bin, args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	platform.SetProcessGroup(cmd)
 	cmd.Cancel = func() error {
 		if cmd.Process == nil {
 			return nil
 		}
-		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		return platform.KillProcessGroup(cmd.Process.Pid)
 	}
 	cmd.WaitDelay = 100 * time.Millisecond
 

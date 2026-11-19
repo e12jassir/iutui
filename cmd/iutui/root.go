@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -30,7 +32,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var version = "0.4.6"
+var version = "0.5.0"
 
 type nativeThumbs struct {
 	backend thumbs.Backend
@@ -71,12 +73,51 @@ func (n nativeThumbs) RenderBrand(width, height int) string {
 }
 
 func newRootCmd() *cobra.Command {
-	var quickMode bool
+	var (
+		quickMode    bool
+		debugLog     bool
+		debugLogFile *os.File
+	)
+
+	closeDebugLog := func() {
+		slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
+		if debugLogFile != nil {
+			_ = debugLogFile.Close()
+			debugLogFile = nil
+		}
+	}
 
 	root := &cobra.Command{
 		Use:     "iutui",
 		Short:   "YouTube TUI & CLI powered by mpv IPC and yt-dlp",
 		Version: version,
+		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			closeDebugLog()
+			if !debugLog {
+				return nil
+			}
+			paths := platform.ResolvePaths()
+			if err := os.MkdirAll(paths.StateDir, 0o755); err != nil {
+				return err
+			}
+			logPath := filepath.Join(paths.StateDir, "debug.log")
+			f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+			if err != nil {
+				return err
+			}
+			debugLogFile = f
+			handler := slog.NewJSONHandler(f, &slog.HandlerOptions{Level: slog.LevelDebug})
+			slog.SetDefault(slog.New(handler))
+			slog.Info("iutui starting",
+				"version", version,
+				"state_dir", paths.StateDir,
+				"socket_path", paths.SocketPath,
+			)
+			return nil
+		},
+		PersistentPostRun: func(cmd *cobra.Command, args []string) {
+			closeDebugLog()
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			paths := platform.ResolvePaths()
 			_, _ = platform.MigrateFromYT(paths)
@@ -88,6 +129,7 @@ func newRootCmd() *cobra.Command {
 		},
 	}
 	root.Flags().BoolVarP(&quickMode, "quick", "q", false, "Open fast interactive selector")
+	root.PersistentFlags().BoolVar(&debugLog, "debug-log", false, "Write structured debug logs to $XDG_STATE_HOME/iutui/debug.log")
 
 	root.AddCommand(
 		newPlayCmd(),
@@ -372,6 +414,7 @@ func runTUI(paths platform.Paths) error {
 	defer mpris.Close()
 	defer mprisCancel()
 	if mpris.Active() {
+		slog.Info("mpris bridge status", "active", true)
 		mprisCh := eng.Subscribe(mprisCtx)
 		go func() {
 			for st := range mprisCh {
@@ -387,7 +430,17 @@ func runTUI(paths platform.Paths) error {
 				})
 			}
 		}()
+	} else {
+		slog.Debug("mpris bridge status", "active", false)
 	}
+
+	slog.Debug("tui starting",
+		"version", version,
+		"theme", cfg.Theme,
+		"quality", cfg.Quality,
+		"default_mode", cfg.DefaultMode,
+		"has_cookies", cookieJar != "",
+	)
 
 	tui.SetOnThumbReady(func(id string) {
 		if !programDone.Load() {
@@ -398,6 +451,7 @@ func runTUI(paths platform.Paths) error {
 	defer programDone.Store(true)
 	_, err := p.Run()
 	programDone.Store(true)
+	slog.Info("tui exited", "err", err)
 	return err
 }
 

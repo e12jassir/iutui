@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/e12jassir/iutui/internal/model"
@@ -22,9 +23,15 @@ const (
 func (s *State) handleMouse(msg tea.MouseMsg) (*State, tea.Cmd) {
 	switch {
 	case msg.Button == tea.MouseButtonWheelDown:
-		if s.Focus == FocusSearch && s.SearchDraft == "" {
+		if s.Focus == FocusSearch {
+			if len(s.SearchSuggestions) > 0 {
+				s.SuggestIdx = (s.SuggestIdx + 1) % len(s.SearchSuggestions)
+				return s, nil
+			}
+			if s.SearchDraft != "" {
+				return s, nil
+			}
 			s.Focus = FocusMain
-			s.SearchSuggestions = nil
 			s.SuggestIdx = -1
 		}
 		if s.ShowQualityModal {
@@ -61,9 +68,19 @@ func (s *State) handleMouse(msg tea.MouseMsg) (*State, tea.Cmd) {
 		return s, s.enrichVisibleMetadataCmd(s.VisibleItems(), s.activeIdx())
 
 	case msg.Button == tea.MouseButtonWheelUp:
-		if s.Focus == FocusSearch && s.SearchDraft == "" {
+		if s.Focus == FocusSearch {
+			if len(s.SearchSuggestions) > 0 {
+				if s.SuggestIdx <= 0 {
+					s.SuggestIdx = len(s.SearchSuggestions) - 1
+				} else {
+					s.SuggestIdx--
+				}
+				return s, nil
+			}
+			if s.SearchDraft != "" {
+				return s, nil
+			}
 			s.Focus = FocusMain
-			s.SearchSuggestions = nil
 			s.SuggestIdx = -1
 		}
 		if s.ShowQualityModal {
@@ -137,13 +154,11 @@ func (s *State) handleMouseMotion(x, y int) *State {
 		return s
 	}
 
-	if y >= 4 {
-		// Unstick FocusSearch if pointer moves back over the main grid without an active draft.
-		if s.Focus == FocusSearch && s.SearchDraft == "" {
-			s.Focus = FocusMain
-			s.SearchSuggestions = nil
-			s.SuggestIdx = -1
+	if s.Focus == FocusSearch {
+		if idx, inside := s.suggestionRowAt(x, y); inside && idx >= 0 {
+			s.SuggestIdx = idx
 		}
+		return s
 	}
 
 	if idx, ok := s.videoIndexAt(x, y, false); ok {
@@ -228,6 +243,11 @@ func (s *State) handleLeftClick(x, y int) (*State, tea.Cmd) {
 			// [r] reload button on far right inside search panel
 			if x >= btnStart && x <= btnEnd {
 				s.Focus = FocusMain
+				s.SearchSuggestions = nil
+				s.SuggestIdx = -1
+				if s.View == ViewSearch && strings.TrimSpace(s.SearchQuery) != "" {
+					return s.RefreshCurrentSearch()
+				}
 				s.Syncing = true
 				return s, tea.Batch(s.loadFeedCmd(s.ActiveTab, true), s.ensureAnimTick())
 			}
@@ -252,8 +272,21 @@ func (s *State) handleLeftClick(x, y int) (*State, tea.Cmd) {
 		}
 	}
 
-	// Clicking outside top search panel blurs search focus
+	if s.Focus == FocusSearch && len(s.SearchSuggestions) > 0 {
+		if idx, inside := s.suggestionRowAt(x, y); inside {
+			if idx >= 0 && idx < len(s.SearchSuggestions) {
+				s.SearchDraft = s.SearchSuggestions[idx]
+				return s.SubmitSearch()
+			}
+			return s, nil
+		}
+	}
+
+	// Clicking outside top search panel and suggestion dropdown blurs search focus
 	if s.Focus == FocusSearch {
+		if s.suggestCancel != nil {
+			s.suggestCancel()
+		}
 		s.Focus = FocusMain
 		s.SearchSuggestions = nil
 		s.SuggestIdx = -1
@@ -608,6 +641,35 @@ func (s *State) headerSearchBounds() (btnStart, btnEnd, barStart int) {
 	btnStart = sideW + searchPanelW - 5
 	btnEnd = sideW + searchPanelW - 2
 	return btnStart, btnEnd, barStart
+}
+
+func (s *State) suggestionRowAt(x, y int) (idx int, inside bool) {
+	if s.Focus != FocusSearch || len(s.SearchSuggestions) == 0 {
+		return -1, false
+	}
+	sideW := s.sidebarWidth()
+	panelW := max(24, (s.Width-sideW)-15)
+	sugCount := min(6, len(s.SearchSuggestions))
+	sugH := sugCount + 2
+	maxBody := s.Height - 3
+	if s.HasPlayerBar() {
+		maxBody -= 5
+	}
+	if maxBody-sugH < 4 {
+		sugH = max(0, maxBody-4)
+	}
+	if sugH < 3 {
+		return -1, false
+	}
+	if x < sideW || x >= sideW+panelW || y < 3 || y >= 3+sugH {
+		return -1, false
+	}
+	rel := y - 4
+	maxItems := min(len(s.SearchSuggestions), sugH-2)
+	if rel >= 0 && rel < maxItems {
+		return rel, true
+	}
+	return -1, true
 }
 
 func formatClockApp(seconds float64) string {

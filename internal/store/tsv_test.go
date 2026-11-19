@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -324,5 +325,38 @@ func TestTSVStoreLikedSeparateFromSaved(t *testing.T) {
 	}
 	if got, err := fs.Liked(ctx); err != nil || len(got) != 1 || got[0].ID != v1.ID {
 		t.Fatalf("FakeStore.Liked = (%+v, %v), want [%s]", got, err, v1.ID)
+	}
+}
+
+func TestTSVStoreRecordHistoryCapsAtMaxEntries(t *testing.T) {
+	const total = 600
+	s := NewTSVStore(t.TempDir())
+	ctx := context.Background()
+
+	for i := range total {
+		v := model.Video{
+			ID:       fmt.Sprintf("vid-%03d", i),
+			Title:    fmt.Sprintf("Video %03d", i),
+			Channel:  "Chan",
+			Duration: "01:00",
+		}
+		if err := s.RecordHistory(ctx, v); err != nil {
+			t.Fatalf("RecordHistory(%d) error: %v", i, err)
+		}
+	}
+
+	got, err := s.History(ctx)
+	if err != nil {
+		t.Fatalf("History error: %v", err)
+	}
+	if len(got) != MaxHistoryEntries {
+		t.Fatalf("len(History) = %d, want %d", len(got), MaxHistoryEntries)
+	}
+
+	for i, v := range got {
+		wantID := fmt.Sprintf("vid-%03d", total-1-i)
+		if v.ID != wantID {
+			t.Fatalf("History[%d].ID = %q, want %q", i, v.ID, wantID)
+		}
 	}
 }
