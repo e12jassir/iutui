@@ -43,30 +43,51 @@ func renderQualityOverlay(s *app.State, width, height int, th theme.Theme, pal r
 }
 
 func renderSettingsOverlay(s *app.State, width, height int, th theme.Theme, pal renderPalette) string {
-	_, _, boxW, boxH := s.SettingsModalBounds()
+	_, _, boxW, boxH, scroll, visBodyH, layout := s.SettingsModalWindow()
 	innerW := max(20, boxW-2)
+	rows := s.SettingsRows()
+	if len(rows) == 0 {
+		return ""
+	}
+	selIdx := s.SettingsIdx
+	if selIdx < 0 || selIdx >= len(rows) {
+		selIdx = 0
+	}
 
 	titleLeft := lipgloss.NewStyle().Foreground(pal.spotAccent).Bold(true).Render(" ⚙ Configuración · iutui")
-	themeTag := lipgloss.NewStyle().Foreground(pal.muted).Render(s.ThemeName + " ")
-	hdrGap := max(1, innerW-lipgloss.Width(titleLeft)-lipgloss.Width(themeTag))
-	hdrLine := titleLeft + strings.Repeat(" ", hdrGap) + themeTag
+	scrollInd := ""
+	if len(layout) > visBodyH {
+		hasAbove := scroll > 0
+		hasBelow := scroll+visBodyH < len(layout)
+		switch {
+		case hasAbove && hasBelow:
+			scrollInd = " ⇅"
+		case hasAbove:
+			scrollInd = " ↑"
+		case hasBelow:
+			scrollInd = " ↓"
+		}
+	}
+	tagPlain := fmt.Sprintf("%s · %d/%d%s ", s.ThemeName, selIdx+1, len(rows), scrollInd)
+	maxTag := max(4, innerW-lipgloss.Width(titleLeft)-1)
+	rightTag := lipgloss.NewStyle().Foreground(pal.muted).Render(truncatePlain(tagPlain, maxTag))
+	hdrGap := max(1, innerW-lipgloss.Width(titleLeft)-lipgloss.Width(rightTag))
+	hdrLine := titleLeft + strings.Repeat(" ", hdrGap) + rightTag
 
-	secStyle := lipgloss.NewStyle().Foreground(pal.dim).Bold(true)
-	rows := s.SettingsRows()
+	divider := lipgloss.NewStyle().Foreground(pal.spotBorder).Render(" " + strings.Repeat("─", max(1, innerW-2)))
 
 	renderSettingRow := func(r app.SettingRow) string {
-		sel := r.Index == s.SettingsIdx
+		sel := r.Index == selIdx
 		marker := "  "
 		if sel {
 			marker = "▶ "
 		}
-		leftTxt := marker + r.Label
 		var rightTxt string
 		if r.IsBool {
 			if r.Enabled {
-				rightTxt = "● " + r.Value
+				rightTxt = "● ACTIVADO"
 			} else {
-				rightTxt = "○ " + r.Value
+				rightTxt = "○ DESACTIVADO"
 			}
 		} else if sel {
 			rightTxt = "◀ " + r.Value + " ▶"
@@ -76,49 +97,78 @@ func renderSettingsOverlay(s *app.State, width, height int, th theme.Theme, pal 
 
 		maxRight := max(12, innerW/2)
 		rightPlain := truncatePlain(rightTxt, maxRight)
-		maxLeft := max(8, innerW-runewidth.StringWidth(rightPlain)-3)
-		leftPlain := truncatePlain(leftTxt, maxLeft)
-		gapW := max(1, innerW-1-runewidth.StringWidth(leftPlain)-runewidth.StringWidth(rightPlain))
+		rightW := runewidth.StringWidth(rightPlain)
+		maxLeft := max(8, innerW-rightW-3)
 
-		lblStyle := lipgloss.NewStyle().Foreground(pal.text)
-		valStyle := lipgloss.NewStyle().Foreground(pal.muted)
+		badge := ""
+		if r.Shortcut != "" {
+			badge = " [" + r.Shortcut + "]"
+		}
+		if runewidth.StringWidth(marker+r.Label+badge) > maxLeft {
+			badge = ""
+		}
+		lblText := truncatePlain(r.Label, max(4, maxLeft-runewidth.StringWidth(marker)-runewidth.StringWidth(badge)))
+		leftW := runewidth.StringWidth(marker) + runewidth.StringWidth(lblText) + runewidth.StringWidth(badge)
+		gapW := max(1, innerW-1-leftW-rightW)
+
+		markerSt := lipgloss.NewStyle().Foreground(pal.text)
+		lblSt := lipgloss.NewStyle().Foreground(pal.text)
+		badgeSt := lipgloss.NewStyle().Foreground(pal.dim)
+		valSt := lipgloss.NewStyle().Foreground(pal.muted)
+		bgSt := lipgloss.NewStyle()
 		if r.IsBool && r.Enabled {
-			valStyle = lipgloss.NewStyle().Foreground(pal.ctrlBtn).Bold(true)
+			valSt = lipgloss.NewStyle().Foreground(pal.ctrlBtn).Bold(true)
 		} else if r.IsBool {
-			valStyle = lipgloss.NewStyle().Foreground(pal.dim)
+			valSt = lipgloss.NewStyle().Foreground(pal.dim)
 		}
 		if sel {
-			lblStyle = lipgloss.NewStyle().Foreground(pal.white).Bold(true)
-			valStyle = lipgloss.NewStyle().Foreground(pal.spotAccent).Bold(true)
+			markerSt = lipgloss.NewStyle().Foreground(pal.spotAccent).Background(pal.surf).Bold(true)
+			lblSt = lipgloss.NewStyle().Foreground(pal.white).Background(pal.surf).Bold(true)
+			badgeSt = lipgloss.NewStyle().Foreground(pal.muted).Background(pal.surf)
+			valSt = lipgloss.NewStyle().Foreground(pal.spotAccent).Background(pal.surf).Bold(true)
+			bgSt = lipgloss.NewStyle().Background(pal.surf)
 		}
-		return lblStyle.Render(leftPlain) + strings.Repeat(" ", gapW) + valStyle.Render(rightPlain) + " "
+
+		row := markerSt.Render(marker) + lblSt.Render(lblText)
+		if badge != "" {
+			row += badgeSt.Render(badge)
+		}
+		return row + bgSt.Render(strings.Repeat(" ", gapW)) + valSt.Render(rightPlain) + bgSt.Render(" ")
 	}
 
-	footer := lipgloss.NewStyle().Foreground(pal.dim).Render(
-		" " + truncatePlain("~/.config/iutui/config  ·  ↑/↓ Mover · ←/→/Enter/Click Cambiar · Esc", max(10, innerW-2)),
+	content := make([]string, 0, visBodyH+5)
+	content = append(content, hdrLine, divider)
+
+	for pos := scroll; pos < scroll+visBodyH; pos++ {
+		if pos >= len(layout) {
+			content = append(content, "")
+			continue
+		}
+		line := layout[pos]
+		switch {
+		case line.IsSpacer:
+			content = append(content, "")
+		case line.IsSection:
+			accentSym := lipgloss.NewStyle().Foreground(pal.spotAccent).Bold(true).Render("◆")
+			secTxt := lipgloss.NewStyle().Foreground(pal.dim).Bold(true).Render(line.Section)
+			used := 2 + 1 + 1 + runewidth.StringWidth(line.Section) + 1
+			rem := max(1, innerW-used-1)
+			rule := lipgloss.NewStyle().Foreground(pal.spotBorder).Render(strings.Repeat("─", rem))
+			content = append(content, truncateStyledLine("  "+accentSym+" "+secTxt+" "+rule, innerW))
+		case line.SettingIdx >= 0 && line.SettingIdx < len(rows):
+			content = append(content, renderSettingRow(rows[line.SettingIdx]))
+		default:
+			content = append(content, "")
+		}
+	}
+
+	descBar := " " + lipgloss.NewStyle().Foreground(pal.ctrlBtn).Bold(true).Render("ⓘ") + " " +
+		lipgloss.NewStyle().Foreground(pal.muted).Render(truncatePlain(rows[selIdx].Desc, max(8, innerW-4)))
+	footer := " " + lipgloss.NewStyle().Foreground(pal.dim).Render(
+		truncatePlain("~/.config/iutui/config  ·  ↑/↓ Mover · ←/→/Enter Cambiar · [?] Atajos · Esc", max(10, innerW-2)),
 	)
 
-	content := []string{
-		hdrLine, // 0
-		"",      // 1
-		secStyle.Render("  APARIENCIA & TERMINAL"), // 2
-		renderSettingRow(rows[0]),                  // 3
-		renderSettingRow(rows[1]),                  // 4
-		"",                                         // 5
-		secStyle.Render("  REPRODUCCIÓN & CONSUMO"), // 6
-		renderSettingRow(rows[2]),                   // 7
-		renderSettingRow(rows[3]),                   // 8
-		renderSettingRow(rows[4]),                   // 9
-		renderSettingRow(rows[5]),                   // 10
-		renderSettingRow(rows[6]),                   // 11
-		"",                                          // 12
-		secStyle.Render("  CATÁLOGO & PRIVACIDAD"),  // 13
-		renderSettingRow(rows[7]),                   // 14
-		renderSettingRow(rows[8]),                   // 15
-		renderSettingRow(rows[9]),                   // 16
-		"",                                          // 17
-		footer,                                      // 18
-	}
+	content = append(content, divider, descBar, footer)
 
 	panel := renderSpotatuiPanel("Configuración", content, boxW, boxH, true, pal)
 	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, panel)
@@ -153,32 +203,163 @@ func renderStillWatchingOverlay(s *app.State, width, height int, th theme.Theme,
 	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, modal)
 }
 
-func renderHelpOverlay(_ string, width, height int, th theme.Theme, pal renderPalette) string {
-	title := lipgloss.NewStyle().Foreground(pal.white).Bold(true).Render("Atajos de teclado (iutui)")
-	rows := []string{
-		title,
-		"",
-		"  j / k / ↑ / ↓   Mover selección (o pasa el puntero)",
-		"  Enter / a / v   Reproducir (auto / audio / video)",
-		"  x / V · m       Alternar Solo Audio en vivo · Mix Radio",
-		"  Space / n / p   Pausar · Siguiente · Anterior",
-		"  , / . · - / +   Retroceder/Avanzar 10s · Volumen ±5%",
-		"  { / } / 0 · R   Velocidad (0.5x..2x) · Repetir pista",
-		"  w / W · s / g   Guardar · Me gusta · Suscribir · Canal",
-		"  q / u · d       Añadir a cola · Ver Cola · Descargar",
-		"  o / l · f / c   Capítulos · Letras · Calidad/Audio",
-		"  A · b / t       Activar/desactivar Autoplay · Sponsor · Tema",
-		"  [ / ] · Tab     Cambiar chip · Foco sidebar",
-		"  1..5 / / / r    Pestañas · Buscar · Recargar",
-		"  Esc · ? / Q     Volver/Cerrar · Ayuda · Salir",
+type helpItem struct {
+	keys string
+	desc string
+}
+
+type helpSection struct {
+	title string
+	items []helpItem
+}
+
+func renderHelpColumn(sections []helpSection, colW, keyColW int, withSpacers bool, pal renderPalette) []string {
+	var lines []string
+	keyStyle := lipgloss.NewStyle().Foreground(pal.ctrlBtn).Bold(true)
+	descStyle := lipgloss.NewStyle().Foreground(pal.text)
+	accentStyle := lipgloss.NewStyle().Foreground(pal.spotAccent).Bold(true)
+	secStyle := lipgloss.NewStyle().Foreground(pal.dim).Bold(true)
+	ruleStyle := lipgloss.NewStyle().Foreground(pal.spotBorder)
+
+	for si, sec := range sections {
+		if si > 0 && withSpacers {
+			lines = append(lines, "")
+		}
+		used := 1 + 1 + 1 + runewidth.StringWidth(sec.title) + 1
+		rem := max(1, colW-used-1)
+		hdr := " " + accentStyle.Render("◆") + " " + secStyle.Render(sec.title) + " " + ruleStyle.Render(strings.Repeat("─", rem))
+		lines = append(lines, truncateStyledLine(hdr, colW))
+
+		for _, it := range sec.items {
+			kw := runewidth.StringWidth(it.keys)
+			padK := max(1, keyColW-kw+1)
+			descAvail := max(6, colW-1-kw-padK)
+			row := " " + keyStyle.Render(it.keys) + strings.Repeat(" ", padK) + descStyle.Render(truncatePlain(it.desc, descAvail))
+			lines = append(lines, truncateStyledLine(row, colW))
+		}
 	}
-	boxW := min(70, max(30, width-8))
-	trimmed := make([]string, 0, len(rows))
-	for _, r := range rows {
-		trimmed = append(trimmed, truncateStyledLine(r, boxW-4))
+	return lines
+}
+
+func renderHelpOverlay(s *app.State, width, height int, _ theme.Theme, pal renderPalette) string {
+	leftSections := []helpSection{
+		{
+			title: "NAVEGACIÓN & VISTAS",
+			items: []helpItem{
+				{keys: "j/k / ↑/↓", desc: "Mover selección (o puntero)"},
+				{keys: "h/l / ←/→", desc: "Lateral / Sidebar / Tarjeta"},
+				{keys: "1..5 · Tab", desc: "Pestañas · Cambiar foco"},
+				{keys: "/ · [ / ]", desc: "Buscar · Cambiar filtro"},
+				{keys: "r · g", desc: "Recargar · Abrir canal"},
+			},
+		},
+		{
+			title: "BIBLIOTECA & COLA",
+			items: []helpItem{
+				{keys: "w / W", desc: "Guardar · Me gusta"},
+				{keys: "s · q", desc: "Suscribir · Añadir a cola"},
+				{keys: "u · d", desc: "Ver Cola · Descargar"},
+			},
+		},
 	}
-	modal := th.Toast.Width(boxW - 2).Render(strings.Join(trimmed, "\n"))
-	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, modal)
+
+	rightSections := []helpSection{
+		{
+			title: "REPRODUCCIÓN (MPV)",
+			items: []helpItem{
+				{keys: "Enter / a / v", desc: "Reproducir (auto / audio / video)"},
+				{keys: "Space · n / p", desc: "Pausa · Siguiente · Anterior"},
+				{keys: ", / . · - / +", desc: "Saltar ±10s · Volumen ±5%"},
+				{keys: "{ / } / 0 · R", desc: "Velocidad 0.5..2x · Repetir pista"},
+				{keys: "x / V · m", desc: "Solo audio · Mix Radio"},
+				{keys: "o / l · f / c", desc: "Capítulos · Letras · Calidad"},
+			},
+		},
+		{
+			title: "SISTEMA & AJUSTES",
+			items: []helpItem{
+				{keys: "A", desc: "Activar/desactivar Autoplay"},
+				{keys: "b / t", desc: "SponsorBlock · Cambiar tema"},
+				{keys: "S · ?", desc: "Configuración · Esta ayuda"},
+				{keys: "Esc · Q", desc: "Volver/Cerrar · Salir"},
+			},
+		},
+	}
+
+	var boxW int
+	wide := width >= 96
+	if wide {
+		boxW = min(100, width-6)
+	} else {
+		boxW = min(74, max(36, width-6))
+	}
+	innerW := max(24, boxW-2)
+
+	hdrLeft := lipgloss.NewStyle().Foreground(pal.spotAccent).Bold(true).Render(" ⌨ Atajos de teclado · iutui")
+	verTag := ""
+	if s != nil {
+		if ver := strings.TrimSpace(s.AppVersion); ver != "" {
+			if !strings.HasPrefix(ver, "v") {
+				ver = "v" + ver
+			}
+			verTag = ver
+		}
+	}
+	hdrLine := hdrLeft
+	if verTag != "" {
+		hdrRight := lipgloss.NewStyle().Foreground(pal.muted).Render(truncatePlain(verTag+" ", max(2, innerW-lipgloss.Width(hdrLeft)-1)))
+		hdrGap := max(1, innerW-lipgloss.Width(hdrLeft)-lipgloss.Width(hdrRight))
+		hdrLine = hdrLeft + strings.Repeat(" ", hdrGap) + hdrRight
+	}
+
+	divider := lipgloss.NewStyle().Foreground(pal.spotBorder).Render(" " + strings.Repeat("─", max(1, innerW-2)))
+	footer := " " + lipgloss.NewStyle().Foreground(pal.dim).Render(
+		truncatePlain("Pulsa [S] Configuración  ·  Click o [?] / [Esc] para cerrar", max(10, innerW-2)),
+	)
+
+	maxH := max(10, height-2)
+	availBody := max(1, maxH-6) // 2 borders + hdr + top div + bottom div + footer
+
+	var bodyLines []string
+	if wide {
+		leftW := min(41, (innerW-3)*42/100)
+		rightW := max(16, innerW-leftW-3)
+		leftLines := renderHelpColumn(leftSections, leftW, 10, true, pal)
+		rightLines := renderHelpColumn(rightSections, rightW, 13, true, pal)
+		nRows := max(len(leftLines), len(rightLines))
+		div := lipgloss.NewStyle().Foreground(pal.spotBorder).Render(" │ ")
+		for i := 0; i < nRows; i++ {
+			l := ""
+			if i < len(leftLines) {
+				l = leftLines[i]
+			}
+			r := ""
+			if i < len(rightLines) {
+				r = rightLines[i]
+			}
+			padL := max(0, leftW-lipgloss.Width(l))
+			bodyLines = append(bodyLines, l+strings.Repeat(" ", padL)+div+r)
+		}
+	} else {
+		allSections := append(append([]helpSection{}, leftSections...), rightSections...)
+		bodyLines = renderHelpColumn(allSections, innerW, 13, true, pal)
+		if len(bodyLines) > availBody {
+			bodyLines = renderHelpColumn(allSections, innerW, 13, false, pal)
+		}
+	}
+
+	if len(bodyLines) > availBody {
+		bodyLines = bodyLines[:availBody]
+	}
+
+	content := make([]string, 0, len(bodyLines)+4)
+	content = append(content, hdrLine, divider)
+	content = append(content, bodyLines...)
+	content = append(content, divider, footer)
+
+	boxH := min(maxH, len(content)+2)
+	panel := renderSpotatuiPanel("Atajos de teclado", content, boxW, boxH, true, pal)
+	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, panel)
 }
 
 func renderQueueOverlay(s *app.State, width, height int, th theme.Theme, pal renderPalette) string {

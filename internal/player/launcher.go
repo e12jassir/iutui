@@ -2,8 +2,10 @@ package player
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 
 	"github.com/e12jassir/iutui/internal/platform"
@@ -20,6 +22,7 @@ type LaunchOpts struct {
 	SocketPath    string
 	Quality       int
 	Volume        int
+	Speed         float64
 	CookieJarPath string
 	FastPlayback  bool
 	YtdlpBin      string
@@ -54,6 +57,9 @@ func BuildMPVArgs(opts LaunchOpts) []string {
 	}
 	if opts.Volume > 0 {
 		args = append(args, fmt.Sprintf("--volume=%d", opts.Volume))
+	}
+	if opts.Speed > 0 && math.Abs(opts.Speed-1.0) > 0.001 {
+		args = append(args, fmt.Sprintf("--speed=%s", strconv.FormatFloat(clampSpeed(opts.Speed), 'f', -1, 64)))
 	}
 	var perFileArgs []string
 	if opts.Title != "" {

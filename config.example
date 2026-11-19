@@ -18,6 +18,8 @@ YT_THUMB_QUALITY=max        # max (HD maxresdefault with hq fallback) | hq | mq
 YT_DEFAULT_MODE=window      # window | pip | fs | audio
 YT_QUALITY=720              # max video height (0 = no limit, 1080, 720, 480, 360)
 YT_AUDIO_VOLUME=75          # initial mpv volume (0-150)
+YT_SPEED=1.0                # playback speed (0.5 - 2.0)
+YT_AUTOPLAY=1               # 1 = auto-advance to related / next track, 0 = off
 YT_MUSIC_MODE=bg            # bg (background detached + notification) | term (foreground interactive)
 YT_PLAYBACK=auto            # auto (native direct, pipe fallback on 403) | direct | pipe
 YT_SPONSORBLOCK=1           # 1 = skip sponsor/selfpromo segments automatically via mpv IPC, 0 = off

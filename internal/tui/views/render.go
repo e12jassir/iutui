@@ -183,7 +183,7 @@ func Render(s *app.State, th theme.Theme, tr thumbs.Renderer) string {
 	hasPlayer := s.HasPlayerBar()
 	sugH := 0
 	var sugBar string
-	if s.Focus == app.FocusSearch && len(s.SearchSuggestions) > 0 {
+	if s.Focus == app.FocusSearch && strings.TrimSpace(s.SearchDraft) != "" && len(s.SearchSuggestions) > 0 {
 		sugCount := min(6, len(s.SearchSuggestions))
 		sugH = sugCount + 2
 		maxBody := s.Height - 3
@@ -257,7 +257,7 @@ func Render(s *app.State, th theme.Theme, tr thumbs.Renderer) string {
 	} else if s.ShowSettings {
 		frame = renderSettingsOverlay(s, s.Width, s.Height, th, pal)
 	} else if s.ShowHelp {
-		frame = renderHelpOverlay(frame, s.Width, s.Height, th, pal)
+		frame = renderHelpOverlay(s, s.Width, s.Height, th, pal)
 	} else if s.ShowLyrics && lyricsSideW == 0 {
 		frame = renderLyricsOverlay(s, s.Width, s.Height, th, pal)
 	}
@@ -273,9 +273,6 @@ func renderSearchSuggestionsStrip(s *app.State, width, sugH int, pal renderPalet
 
 	maxItems := max(1, min(len(s.SearchSuggestions), sugH-2))
 	title := "Sugerencias"
-	if strings.TrimSpace(s.SearchDraft) == "" {
-		title = "Búsquedas recientes"
-	}
 
 	rows := make([]string, 0, maxItems)
 	for i := 0; i < maxItems; i++ {
@@ -349,12 +346,16 @@ func renderTopPanels(s *app.State, th theme.Theme, tr thumbs.Renderer, width int
 
 	var leftTxt string
 	if s.Focus == app.FocusSearch {
-		whiteStyle := lipgloss.NewStyle().Foreground(pal.white)
 		if s.SearchDraft == "" && s.SearchQuery != "" {
-			queryHint := truncatePlain(s.SearchQuery, max(0, textAvail-2))
-			leftTxt = whiteStyle.Render(" █ ") + lipgloss.NewStyle().Foreground(pal.muted).Render(queryHint)
+			whiteStyle := lipgloss.NewStyle().Foreground(pal.white)
+			mutedStyle := lipgloss.NewStyle().Foreground(pal.muted)
+			if textAvail >= 4 {
+				leftTxt = " " + whiteStyle.Render("█") + " " + mutedStyle.Render(truncatePlain(s.SearchQuery, max(0, textAvail-3)))
+			} else {
+				leftTxt = " " + whiteStyle.Render("█")
+			}
 		} else {
-			leftTxt = whiteStyle.Render(" " + tailPlain(s.SearchDraft+"█", textAvail))
+			leftTxt = renderSearchInputLine(s.SearchDraft, s.SearchCursorPos(), textAvail, pal)
 		}
 	} else {
 		searchText := "Search"
@@ -401,6 +402,136 @@ func renderTopPanels(s *app.State, th theme.Theme, tr thumbs.Renderer, width int
 	brandBox := renderSpotatuiPanel("", []string{brandRow}, sideW, 3, false, pal)
 
 	return lipgloss.JoinHorizontal(lipgloss.Top, brandBox, right)
+}
+
+func renderSearchInputLine(draft string, cursor int, avail int, pal renderPalette) string {
+	whiteStyle := lipgloss.NewStyle().Foreground(pal.white)
+	cursorStyle := lipgloss.NewStyle().Foreground(pal.white).Reverse(true).Bold(true)
+	mutedStyle := lipgloss.NewStyle().Foreground(pal.muted)
+
+	if draft == "" {
+		if avail >= 10 {
+			return " " + whiteStyle.Render("█") + mutedStyle.Render(" "+truncatePlain("Buscar en YouTube...", max(0, avail-3)))
+		}
+		return " " + whiteStyle.Render("█")
+	}
+
+	runes := []rune(draft)
+	if cursor < 0 {
+		cursor = 0
+	} else if cursor > len(runes) {
+		cursor = len(runes)
+	}
+
+	budget := max(1, avail-1)
+	widths := make([]int, len(runes))
+	totalW := 0
+	for i, r := range runes {
+		w := runewidth.RuneWidth(r)
+		if w <= 0 {
+			w = 1
+		}
+		widths[i] = w
+		totalW += w
+	}
+
+	if cursor == len(runes) {
+		if totalW+1 <= budget {
+			return " " + whiteStyle.Render(draft+"█")
+		}
+		rem := max(0, budget-2)
+		used := 0
+		start := len(runes)
+		for i := len(runes) - 1; i >= 0; i-- {
+			if used+widths[i] > rem {
+				break
+			}
+			used += widths[i]
+			start = i
+		}
+		return " " + whiteStyle.Render("…"+string(runes[start:])+"█")
+	}
+
+	if totalW <= budget {
+		var b strings.Builder
+		b.WriteByte(' ')
+		if cursor > 0 {
+			b.WriteString(whiteStyle.Render(string(runes[:cursor])))
+		}
+		b.WriteString(cursorStyle.Render(string(runes[cursor])))
+		if cursor+1 < len(runes) {
+			b.WriteString(whiteStyle.Render(string(runes[cursor+1:])))
+		}
+		return b.String()
+	}
+
+	windowWidth := func(st, en int) int {
+		w := 0
+		if st > 0 {
+			w++
+		}
+		for i := st; i < en; i++ {
+			w += widths[i]
+		}
+		if en < len(runes) {
+			w++
+		}
+		return w
+	}
+
+	start, end := cursor, cursor+1
+	preferLeft := true
+	for {
+		grew := false
+		if preferLeft {
+			if start > 0 && windowWidth(start-1, end) <= budget {
+				start--
+				grew = true
+			} else if end < len(runes) && windowWidth(start, end+1) <= budget {
+				end++
+				grew = true
+			}
+		} else {
+			if end < len(runes) && windowWidth(start, end+1) <= budget {
+				end++
+				grew = true
+			} else if start > 0 && windowWidth(start-1, end) <= budget {
+				start--
+				grew = true
+			}
+		}
+		if !grew {
+			break
+		}
+		preferLeft = !preferLeft
+	}
+
+	var prefix strings.Builder
+	if start > 0 {
+		prefix.WriteRune('…')
+	}
+	prefix.WriteString(string(runes[start:cursor]))
+
+	var suffix strings.Builder
+	suffix.WriteString(string(runes[cursor+1 : end]))
+	if end < len(runes) {
+		suffix.WriteRune('…')
+	}
+
+	var outB strings.Builder
+	outB.WriteByte(' ')
+	if prefix.Len() > 0 {
+		outB.WriteString(whiteStyle.Render(prefix.String()))
+	}
+	outB.WriteString(cursorStyle.Render(string(runes[cursor])))
+	if suffix.Len() > 0 {
+		outB.WriteString(whiteStyle.Render(suffix.String()))
+	}
+	out := outB.String()
+	if avail > 0 && lipgloss.Width(out) > avail {
+		return truncateStyledLine(out, avail)
+	}
+	return out
 }
 
 func renderChips(s *app.State, th theme.Theme, width int, pal renderPalette) string {

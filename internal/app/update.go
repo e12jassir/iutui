@@ -484,10 +484,13 @@ func (s *State) Update(msg tea.Msg) (*State, tea.Cmd) {
 		if s.Focus != FocusSearch || msg.Seq != s.suggestSeq || msg.Query != s.SearchDraft {
 			return s, nil
 		}
-		if msg.Err == nil {
-			s.SearchSuggestions = msg.Items
+		if msg.Err != nil || len(msg.Items) == 0 {
+			s.SearchSuggestions = nil
 			s.SuggestIdx = -1
+			return s, nil
 		}
+		s.SearchSuggestions = msg.Items
+		s.SuggestIdx = -1
 		return s, nil
 
 	case QueueLoadedMsg:
@@ -595,6 +598,11 @@ func (s *State) Update(msg tea.Msg) (*State, tea.Cmd) {
 		return s.handleMouse(msg)
 
 	case tea.KeyMsg:
+		filtered, keep := s.escapeGuard.FilterKey(msg)
+		if !keep {
+			return s, nil
+		}
+		msg = filtered
 		if s.ShowStillWatching {
 			return s.handleStillWatchingKey(msg.String())
 		}

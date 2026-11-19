@@ -31,6 +31,8 @@ type FakeEngine struct {
 	sponsorBlock bool
 	audioOnly    bool
 	quality      int
+	mode         string
+	cookieJar    string
 	chapters     []Chapter
 	playlist     []PlaylistItem
 }
@@ -295,6 +297,59 @@ func (f *FakeEngine) AddVolume(_ context.Context, delta float64) error {
 	}
 	f.broadcastLocked(f.status)
 	return nil
+}
+
+// SetVolume records SetVolume, clamps Volume to [5, 100], and notifies subscribers.
+func (f *FakeEngine) SetVolume(_ context.Context, vol int) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if vol < 5 {
+		vol = 5
+	} else if vol > 100 {
+		vol = 100
+	}
+	f.calls = append(f.calls, FakeCall{Method: "SetVolume", Seconds: vol})
+	if f.err != nil {
+		return f.err
+	}
+	f.status.Volume = float64(vol)
+	f.broadcastLocked(f.status)
+	return nil
+}
+
+// SetLaunchMode records SetLaunchMode and updates FakeEngine mode & audioOnly state.
+func (f *FakeEngine) SetLaunchMode(_ context.Context, mode string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, FakeCall{Method: "SetLaunchMode", Mode: mode})
+	if f.err != nil {
+		return f.err
+	}
+	f.mode = mode
+	f.audioOnly = mode == "audio"
+	return nil
+}
+
+// LaunchMode reports the configured FakeEngine launch mode.
+func (f *FakeEngine) LaunchMode() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.mode
+}
+
+// SetCookieJar records SetCookieJar on FakeEngine.
+func (f *FakeEngine) SetCookieJar(path string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.cookieJar = path
+	f.calls = append(f.calls, FakeCall{Method: "SetCookieJar", Mode: path})
+}
+
+// CookieJar reports the configured FakeEngine cookie jar path.
+func (f *FakeEngine) CookieJar() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.cookieJar
 }
 
 // SetSpeed records the SetSpeed call, clamps Speed between 0.5 and 2.0, and notifies subscribers.

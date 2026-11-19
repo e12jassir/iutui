@@ -388,7 +388,7 @@ func TestVersionFlag(t *testing.T) {
 		t.Fatalf("--version failed: %v", err)
 	}
 	got := strings.TrimSpace(out.String())
-	want := "iutui version 0.5.0"
+	want := "iutui version 0.5.1"
 	if got != want {
 		t.Fatalf("--version = %q, want %q", got, want)
 	}
@@ -440,8 +440,8 @@ func TestDebugLogFlag(t *testing.T) {
 		if entry["msg"] != "iutui starting" {
 			t.Errorf("log msg = %v, want %q", entry["msg"], "iutui starting")
 		}
-		if entry["version"] != "0.5.0" {
-			t.Errorf("log version = %v, want %q", entry["version"], "0.5.0")
+		if entry["version"] != "0.5.1" {
+			t.Errorf("log version = %v, want %q", entry["version"], "0.5.1")
 		}
 		wantStateDir := filepath.Join(stateHome, "iutui")
 		if entry["state_dir"] != wantStateDir {
@@ -479,6 +479,73 @@ func TestDebugLogFlag(t *testing.T) {
 		logPath := filepath.Join(isolatedState, "iutui", "debug.log")
 		if _, err := os.Stat(logPath); !os.IsNotExist(err) {
 			t.Fatalf("expected no debug.log when --debug-log is false, got err=%v", err)
+		}
+	})
+}
+
+func TestNativeThumbsSetPreviewMode(t *testing.T) {
+	t.Setenv("YT_PREVIEW", "")
+	t.Setenv("KITTY_WINDOW_ID", "1")
+	t.Setenv("TERM", "xterm-kitty")
+	t.Setenv("TERM_PROGRAM", "")
+
+	tr := newNativeThumbs()
+	if got := tr.Backend(); got != thumbs.BackendKitty {
+		t.Fatalf("initial auto backend = %v, want %v", got, thumbs.BackendKitty)
+	}
+
+	tr.SetPreviewMode("none")
+	if got := tr.Backend(); got != thumbs.BackendText {
+		t.Fatalf("after SetPreviewMode(\"none\") backend = %v, want %v", got, thumbs.BackendText)
+	}
+	if rendered := tr.Render("abc123", 14, 5); !strings.Contains(rendered, "abc123") {
+		t.Fatalf("expected text placeholder render for BackendText, got:\n%s", rendered)
+	}
+	if brand := tr.RenderBrand(10, 4); brand != "" {
+		t.Fatalf("expected empty RenderBrand when not BackendKitty, got %q", brand)
+	}
+
+	tr.SetPreviewMode("chafa")
+	if got := tr.Backend(); got != thumbs.BackendChafa {
+		t.Fatalf("after SetPreviewMode(\"chafa\") backend = %v, want %v", got, thumbs.BackendChafa)
+	}
+
+	tr.SetPreviewMode("auto")
+	if got := tr.Backend(); got != thumbs.BackendKitty {
+		t.Fatalf("after SetPreviewMode(\"auto\") backend = %v, want %v", got, thumbs.BackendKitty)
+	}
+}
+
+func TestBubbleTeaEscapeFilter(t *testing.T) {
+	filter := app.NewBubbleTeaEscapeFilter()
+
+	t.Run("drops standalone SGR mouse fragment", func(t *testing.T) {
+		got := filter(nil, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("[<35;117;7M")})
+		if got != nil {
+			t.Fatalf("expected nil (dropped), got %#v", got)
+		}
+	})
+
+	t.Run("drops split alt+[ followed by SGR body", func(t *testing.T) {
+		if got := filter(nil, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("["), Alt: true}); got != nil {
+			t.Fatalf("expected alt+[ to be dropped, got %#v", got)
+		}
+		if got := filter(nil, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("<35;117;7M")}); got != nil {
+			t.Fatalf("expected split SGR body to be dropped, got %#v", got)
+		}
+	})
+
+	t.Run("passes normal typing and mouse messages untouched", func(t *testing.T) {
+		key := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("hello")}
+		if got := filter(nil, key); got == nil {
+			t.Fatalf("expected normal typing to pass, got nil")
+		} else if km, ok := got.(tea.KeyMsg); !ok || string(km.Runes) != "hello" {
+			t.Fatalf("unexpected key message: %#v", got)
+		}
+
+		mouse := tea.MouseMsg{X: 10, Y: 5, Action: tea.MouseActionMotion}
+		if got := filter(nil, mouse); got != mouse {
+			t.Fatalf("expected MouseMsg untouched, got %#v want %#v", got, mouse)
 		}
 	})
 }

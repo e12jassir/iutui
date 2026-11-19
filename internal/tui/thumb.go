@@ -154,6 +154,24 @@ func (c *lruCache[K, V]) clear() {
 	c.unpinned = 0
 }
 
+func (c *lruCache[K, V]) clearUnpinned() []K {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var removed []K
+	for elem := c.order.Front(); elem != nil; {
+		next := elem.Next()
+		entry := elem.Value.(*lruEntry[K, V])
+		if !entry.pinned {
+			c.order.Remove(elem)
+			delete(c.items, entry.key)
+			removed = append(removed, entry.key)
+		}
+		elem = next
+	}
+	c.unpinned = 0
+	return removed
+}
+
 func (c *lruCache[K, V]) len() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -179,6 +197,7 @@ var (
 
 	thumbCfgMu             sync.RWMutex
 	thumbCacheDir          string
+	thumbQuality           = "max"
 	defaultThumbHTTPClient = &http.Client{Timeout: 5 * time.Second}
 	thumbHTTPClient        = defaultThumbHTTPClient
 	thumbBaseURL           = defaultThumbBaseURL
@@ -269,6 +288,69 @@ func SetOnThumbReady(fn func(videoID string)) {
 	thumbCfgMu.Lock()
 	onThumbReady = fn
 	thumbCfgMu.Unlock()
+}
+
+// SetThumbQuality configures the preferred YouTube thumbnail quality preset ("max", "hq", or "mq").
+func SetThumbQuality(q string) {
+	norm := strings.ToLower(strings.TrimSpace(q))
+	switch norm {
+	case "max", "hq", "mq":
+	default:
+		norm = "max"
+	}
+	thumbCfgMu.Lock()
+	changed := thumbQuality != norm
+	thumbQuality = norm
+	thumbCfgMu.Unlock()
+	if changed {
+		ClearThumbCache()
+	}
+}
+
+func getThumbQuality() string {
+	thumbCfgMu.RLock()
+	q := thumbQuality
+	thumbCfgMu.RUnlock()
+	if q == "" {
+		return "max"
+	}
+	return q
+}
+
+func thumbQualityVariants() []string {
+	switch getThumbQuality() {
+	case "mq":
+		return []string{"mqdefault", "hqdefault"}
+	case "hq":
+		return []string{"hqdefault", "mqdefault"}
+	default:
+		return []string{"maxresdefault", "mqdefault", "hqdefault"}
+	}
+}
+
+func thumbMinBytes(variant string) int64 {
+	if variant == "maxresdefault" {
+		return 3000
+	}
+	return 1000
+}
+
+// ClearThumbCache drops cached video thumbnails and deletes uploaded unpinned Kitty video images
+// so runtime changes to YT_PREVIEW or YT_THUMB_QUALITY re-render cleanly.
+func ClearThumbCache() {
+	thumbCacheLRU.clearUnpinned()
+
+	fetchingMu.Lock()
+	fetchingMap = make(map[string]bool)
+	fetchingMu.Unlock()
+
+	prepareMu.Lock()
+	preparingMap = make(map[string]bool)
+	prepareMu.Unlock()
+
+	for _, imgID := range kittyLRU.clearUnpinned() {
+		deleteKittyImage(imgID)
+	}
 }
 
 func notifyThumbReady(videoID string) {
@@ -371,14 +453,14 @@ func isValidCleanThumbID(cleanID string) bool {
 	return !strings.ContainsAny(cleanID, "/\\")
 }
 
-// GetThumbnailFile returns the path to a cached thumbnail image (preferring 16:9 HD).
+// GetThumbnailFile returns the path to a cached thumbnail image honoring the configured quality preset.
 func GetThumbnailFile(id string) string {
 	cleanID := cleanThumbID(id)
 	if !isValidCleanThumbID(cleanID) {
 		return ""
 	}
 	thumbsDir := filepath.Join(getThumbCacheDir(), "thumbs")
-	for _, q := range []string{"maxresdefault", "mqdefault", "hqdefault"} {
+	for _, q := range thumbQualityVariants() {
 		f := filepath.Join(thumbsDir, fmt.Sprintf("%s_%s.jpg", cleanID, q))
 		if info, err := os.Stat(f); err == nil && !info.IsDir() && info.Size() >= 1000 {
 			return f
@@ -387,8 +469,8 @@ func GetThumbnailFile(id string) string {
 	return ""
 }
 
-// FetchThumbnailAsync triggers a bounded background download for missing thumbnails using maxresdefault (1280x720)
-// and falls back to mqdefault (320x180). Both are true 16:9 and lack the 45px black letterbox bars of hqdefault.
+// FetchThumbnailAsync triggers a bounded background download for missing thumbnails according
+// to the configured thumbnail quality preset ("max", "hq", or "mq").
 func FetchThumbnailAsync(id string) {
 	cleanID := cleanThumbID(id)
 	if len(cleanID) < 5 || !isValidCleanThumbID(cleanID) {
@@ -401,6 +483,8 @@ func FetchThumbnailAsync(id string) {
 	}
 	fetchingMap[cleanID] = true
 	fetchingMu.Unlock()
+
+	variants := thumbQualityVariants()
 
 	asyncWG.Add(1)
 	go func() {
@@ -415,17 +499,12 @@ func FetchThumbnailAsync(id string) {
 				return
 			}
 
-			// 1. Try maxresdefault (1280x720 16:9, crystal clear HD)
-			targetMax := filepath.Join(thumbsDir, fmt.Sprintf("%s_maxresdefault.jpg", cleanID))
-			if err := downloadThumbToFile(cleanID, "maxresdefault", targetMax, 3000); err == nil {
-				downloaded = true
-				return
-			}
-
-			// 2. Fallback to mqdefault (320x180 16:9, clean without black bars)
-			targetMq := filepath.Join(thumbsDir, fmt.Sprintf("%s_mqdefault.jpg", cleanID))
-			if err := downloadThumbToFile(cleanID, "mqdefault", targetMq, 1000); err == nil {
-				downloaded = true
+			for _, variant := range variants {
+				target := filepath.Join(thumbsDir, fmt.Sprintf("%s_%s.jpg", cleanID, variant))
+				if err := downloadThumbToFile(cleanID, variant, target, thumbMinBytes(variant)); err == nil {
+					downloaded = true
+					return
+				}
 			}
 		}()
 

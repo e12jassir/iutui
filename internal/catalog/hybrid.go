@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/e12jassir/iutui/internal/model"
 )
@@ -20,6 +21,29 @@ type HybridCatalog struct {
 	SubscriptionsProvider func(context.Context) ([]string, error)
 	RSSClient             *http.Client
 	DisableCookieAuthSubs bool
+
+	cfgMu sync.RWMutex
+}
+
+// SetDisableCookieAuthSubs updates whether cookie-authenticated subscriptions
+// fetching is bypassed in favor of guest Atom RSS feeds.
+func (h *HybridCatalog) SetDisableCookieAuthSubs(disable bool) {
+	if h == nil {
+		return
+	}
+	h.cfgMu.Lock()
+	h.DisableCookieAuthSubs = disable
+	h.cfgMu.Unlock()
+}
+
+func (h *HybridCatalog) disableCookieAuthSubs() bool {
+	if h == nil {
+		return false
+	}
+	h.cfgMu.RLock()
+	d := h.DisableCookieAuthSubs
+	h.cfgMu.RUnlock()
+	return d
 }
 
 // NewHybridCatalog creates a HybridCatalog pairing native Go yt-dlp catalog access
@@ -75,7 +99,7 @@ func (h *HybridCatalog) loadFeed(ctx context.Context, tab model.Tab, refresh boo
 
 func (h *HybridCatalog) subscriptionsFeed(ctx context.Context, refresh bool) ([]model.Video, error) {
 	var directErr error
-	if !h.DisableCookieAuthSubs && h.Direct != nil && hasValidCookieFile(h.Direct.CookieJarPath) {
+	if !h.disableCookieAuthSubs() && h.Direct != nil && hasValidCookieFile(h.Direct.cookieJarPath()) {
 		videos, err := h.directFeed(ctx, model.TabSubscriptions, refresh)
 		if err == nil && len(videos) > 0 {
 			return videos, nil

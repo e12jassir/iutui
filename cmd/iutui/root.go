@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -32,41 +33,57 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var version = "0.5.0"
+var version = "0.5.1"
 
 type nativeThumbs struct {
+	mu      sync.RWMutex
 	backend thumbs.Backend
 }
 
-func newNativeThumbs() nativeThumbs {
+func newNativeThumbs() *nativeThumbs {
 	b := thumbs.DetectBackend(
 		os.Getenv("YT_PREVIEW"),
 		os.Getenv("KITTY_WINDOW_ID"),
 		os.Getenv("TERM"),
 		os.Getenv("TERM_PROGRAM"),
 	)
-	return nativeThumbs{backend: b}
+	return &nativeThumbs{backend: b}
 }
 
-func (n nativeThumbs) Render(id string, width, height int) string {
-	if n.backend == thumbs.BackendText {
+func (n *nativeThumbs) SetPreviewMode(mode string) {
+	next := thumbs.DetectBackend(
+		mode,
+		os.Getenv("KITTY_WINDOW_ID"),
+		os.Getenv("TERM"),
+		os.Getenv("TERM_PROGRAM"),
+	)
+	n.mu.Lock()
+	n.backend = next
+	n.mu.Unlock()
+	tui.ClearThumbCache()
+}
+
+func (n *nativeThumbs) Render(id string, width, height int) string {
+	if n.Backend() == thumbs.BackendText {
 		return thumbs.NewTextRenderer().Render(id, width, height)
 	}
 	return tui.RenderThumbnailANSI(id, width, height)
 }
 
-func (n nativeThumbs) Prefetch(id string) {
-	if n.backend != thumbs.BackendText {
+func (n *nativeThumbs) Prefetch(id string) {
+	if n.Backend() != thumbs.BackendText {
 		tui.FetchThumbnailAsync(id)
 	}
 }
 
-func (n nativeThumbs) Backend() thumbs.Backend {
+func (n *nativeThumbs) Backend() thumbs.Backend {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
 	return n.backend
 }
 
-func (n nativeThumbs) RenderBrand(width, height int) string {
-	if n.backend != thumbs.BackendKitty {
+func (n *nativeThumbs) RenderBrand(width, height int) string {
+	if n.Backend() != thumbs.BackendKitty {
 		return ""
 	}
 	return tui.RenderBrandLogo(width, height)
@@ -247,6 +264,7 @@ func resolvePlayTarget(target string, mixFlag bool) (url string, allowPlaylist b
 func runTUI(paths platform.Paths) error {
 	cfgPath := filepath.Join(paths.ConfigDir, "config")
 	cfg, _ := config.Load(cfgPath)
+	tui.SetThumbQuality(cfg.ThumbQuality)
 	cookieJar := resolveCookieJar(cfg, paths)
 	bootCtx, bootCancel := context.WithCancel(context.Background())
 	defer bootCancel()
@@ -269,6 +287,7 @@ func runTUI(paths platform.Paths) error {
 	}
 	ytdlpCat.CookieJarPath = catalogCookieJar
 	cat := catalog.NewHybridCatalog(bashCat, ytdlpCat)
+	cat.SetDisableCookieAuthSubs(isCookiesDisabled(cfg.Cookies))
 
 	st := store.NewTSVStore(paths.StateDir)
 	cat.SubscriptionsProvider = st.Subscriptions
@@ -279,6 +298,7 @@ func runTUI(paths platform.Paths) error {
 			SocketPath:    paths.SocketPath,
 			Quality:       cfg.Quality,
 			Volume:        cfg.AudioVolume,
+			Speed:         cfg.Speed,
 			CookieJarPath: cookieJar,
 			YtdlpBin:      cfg.YtdlpBin,
 			FastPlayback:  true,
@@ -286,35 +306,48 @@ func runTUI(paths platform.Paths) error {
 	)
 	defer eng.Close()
 	eng.SetSponsorBlock(cfg.SponsorBlock)
+	eng.SetAutoplay(cfg.Autoplay)
 	dl := download.NewManager(paths.StateDir, dlDir, cfg.YtdlpBin)
 	resumeStore := store.NewResumeStore(paths.StateDir)
 	searchHist := store.NewSearchHistory(paths.StateDir)
 	suggestClient := catalog.NewSuggestClient()
+	thumbRenderer := newNativeThumbs()
 
 	sbEnabled := cfg.SponsorBlock
 	hideShorts := cfg.HideShorts
 	interleave := cfg.Interleave
+	autoplay := cfg.Autoplay
+	cacheTTL := cfg.CacheTTL
+	dlAudio := cfg.DownloadAudio
 	state := app.NewState(app.Dependencies{
-		Catalog:             cat,
-		Engine:              eng,
-		Store:               st,
-		Downloader:          dl,
-		LyricsClient:        lyrics.NewClient(),
-		SuggestProvider:     suggestClient,
-		SearchHistory:       searchHist,
-		ResumeStore:         resumeStore,
-		InitialQuality:      cfg.Quality,
-		InitialAudioOnly:    cfg.DefaultMode == "audio",
-		InitialDefaultMode:  cfg.DefaultMode,
-		InitialVolume:       cfg.AudioVolume,
-		InitialPreview:      cfg.Preview,
-		InitialHideShorts:   &hideShorts,
-		InitialInterleave:   &interleave,
-		InitialCookies:      cfg.Cookies,
-		InitialTheme:        cfg.Theme,
-		InitialSponsorBlock: &sbEnabled,
-		AppVersion:          version,
+		Catalog:              cat,
+		Engine:               eng,
+		Store:                st,
+		Downloader:           dl,
+		LyricsClient:         lyrics.NewClient(),
+		SuggestProvider:      suggestClient,
+		SearchHistory:        searchHist,
+		ResumeStore:          resumeStore,
+		InitialQuality:       cfg.Quality,
+		InitialAudioOnly:     cfg.DefaultMode == "audio",
+		InitialDefaultMode:   cfg.DefaultMode,
+		InitialVolume:        cfg.AudioVolume,
+		InitialPreview:       cfg.Preview,
+		InitialHideShorts:    &hideShorts,
+		InitialInterleave:    &interleave,
+		InitialCookies:       cfg.Cookies,
+		InitialTheme:         cfg.Theme,
+		InitialSponsorBlock:  &sbEnabled,
+		InitialThumbQuality:  cfg.ThumbQuality,
+		InitialAutoplay:      &autoplay,
+		InitialSpeed:         cfg.Speed,
+		InitialFeedSize:      cfg.FeedSize,
+		InitialSearchSize:    cfg.SearchSize,
+		InitialCacheTTL:      &cacheTTL,
+		InitialDownloadAudio: &dlAudio,
+		AppVersion:           version,
 		OnQualityChange: func(q int) error {
+			ytdlpCat.SetQuality(q)
 			return config.SaveVal(cfgPath, "YT_QUALITY", strconv.Itoa(q))
 		},
 		OnAudioOnlyChange: func(audioOnly bool) error {
@@ -338,11 +371,46 @@ func runTUI(paths platform.Paths) error {
 			if err := config.SaveVal(cfgPath, key, val); err != nil {
 				return err
 			}
-			if key == "YT_PREVIEW" {
+			switch key {
+			case "YT_PREVIEW":
 				if val == "auto" {
 					_ = os.Unsetenv("YT_PREVIEW")
 				} else {
 					_ = os.Setenv("YT_PREVIEW", val)
+				}
+				thumbRenderer.SetPreviewMode(val)
+			case "YT_THUMB_QUALITY":
+				tui.SetThumbQuality(val)
+				tui.ClearThumbCache()
+			case "YT_FEED_SIZE":
+				if n, err := strconv.Atoi(val); err == nil && n > 0 {
+					ytdlpCat.SetFeedSize(n)
+				}
+			case "YT_SEARCH_SIZE":
+				if n, err := strconv.Atoi(val); err == nil && n > 0 {
+					ytdlpCat.SetSearchSize(n)
+				}
+			case "YT_CACHE_TTL":
+				if n, err := strconv.Atoi(val); err == nil && n >= 0 {
+					ytdlpCat.SetCacheTTL(time.Duration(n) * time.Second)
+				}
+			case "YT_COOKIES":
+				cfgNext := cfg
+				cfgNext.Cookies = val
+				if isCookiesDisabled(val) {
+					ytdlpCat.SetCookieJar("")
+					cat.SetDisableCookieAuthSubs(true)
+					eng.SetCookieJar("")
+				} else {
+					nextJar := resolveCookieJar(cfgNext, paths)
+					catJar := nextJar
+					if catJar == "" && paths.CacheDir != "" {
+						catJar = filepath.Join(paths.CacheDir, "cookies.txt")
+					}
+					ytdlpCat.SetCookieJar(catJar)
+					cat.SetDisableCookieAuthSubs(false)
+					eng.SetCookieJar(nextJar)
+					startCookieBootstrap(bootCtx, cfgNext, paths, nextJar)
 				}
 			}
 			return nil
@@ -358,10 +426,11 @@ func runTUI(paths platform.Paths) error {
 		teaModel{
 			state:  state,
 			theme:  initTheme,
-			thumbs: newNativeThumbs(),
+			thumbs: thumbRenderer,
 		},
 		tea.WithAltScreen(),
 		tea.WithMouseAllMotion(),
+		tea.WithFilter(app.NewBubbleTeaEscapeFilter()),
 	)
 	var programDone atomic.Bool
 	dl.OnProgress = func(it download.Item) {
@@ -485,6 +554,7 @@ func runQuickSelector(paths platform.Paths) error {
 		SocketPath:    paths.SocketPath,
 		Quality:       cfg.Quality,
 		Volume:        cfg.AudioVolume,
+		Speed:         cfg.Speed,
 		CookieJarPath: cookieJar,
 		YtdlpBin:      cfg.YtdlpBin,
 		FastPlayback:  true,
@@ -521,6 +591,7 @@ func newPlayCmd() *cobra.Command {
 				SocketPath:    paths.SocketPath,
 				Quality:       cfg.Quality,
 				Volume:        cfg.AudioVolume,
+				Speed:         cfg.Speed,
 				CookieJarPath: cookieJar,
 				YtdlpBin:      cfg.YtdlpBin,
 				FastPlayback:  true,

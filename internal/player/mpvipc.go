@@ -83,6 +83,11 @@ func WithLaunchDefaults(opts LaunchOpts) IPCOption {
 		if opts.Mode == "audio" {
 			opts.AudioOnly = true
 		}
+		if opts.Speed > 0 {
+			clamped := clampSpeed(opts.Speed)
+			opts.Speed = clamped
+			c.status.Speed = clamped
+		}
 		c.launchDefaults = opts
 		if opts.FastPlayback {
 			c.resolver = NewStreamResolver(opts.YtdlpBin, opts.Quality)
@@ -941,12 +946,119 @@ func (c *IPCClient) AddVolume(ctx context.Context, delta float64) error {
 	return err
 }
 
-// SetSpeed sets mpv playback speed clamped between 0.5 and 2.0.
-func (c *IPCClient) SetSpeed(ctx context.Context, speed float64) error {
-	clamped := clampSpeed(speed)
-	if _, err := c.sendCommand(ctx, "set_property", "speed", clamped); err != nil {
+// SetVolume sets launch default and live mpv volume clamped to [5, 100].
+func (c *IPCClient) SetVolume(ctx context.Context, vol int) error {
+	if c.ctx.Err() != nil {
+		return ErrClientClosed
+	}
+	if vol < 5 {
+		vol = 5
+	} else if vol > 100 {
+		vol = 100
+	}
+	if c.isConnected() {
+		if _, err := c.sendCommand(ctx, "set_property", "volume", vol); err != nil {
+			return err
+		}
+	}
+	c.launchMu.Lock()
+	c.launchDefaults.Volume = vol
+	c.launchMu.Unlock()
+
+	c.statusMu.Lock()
+	c.status.Volume = float64(vol)
+	st := c.status
+	c.statusMu.Unlock()
+	c.broadcast(st)
+	return nil
+}
+
+// SetLaunchMode updates the default launch mode ("window", "audio", "pip", "fs")
+// and applies window/fullscreen/ontop/audio-only state live on an active mpv instance.
+func (c *IPCClient) SetLaunchMode(ctx context.Context, mode string) error {
+	if c.ctx.Err() != nil {
+		return ErrClientClosed
+	}
+	norm := strings.ToLower(strings.TrimSpace(mode))
+	switch norm {
+	case "window", "audio", "pip", "fs":
+	default:
+		norm = "window"
+	}
+	wantAudio := norm == "audio"
+
+	c.launchMu.Lock()
+	prevAudio := c.launchDefaults.AudioOnly
+	c.launchDefaults.Mode = norm
+	c.launchDefaults.AudioOnly = wantAudio
+	quality := c.launchDefaults.Quality
+	if c.resolver != nil {
+		c.resolver.SetAudioOnly(wantAudio)
+	}
+	c.launchMu.Unlock()
+
+	if prevAudio != wantAudio || (c.hasManagedProc() && c.isProcAudioOnly() != wantAudio) {
+		err := c.SetPlaybackProfile(ctx, quality, wantAudio)
+		if !wantAudio {
+			c.launchMu.Lock()
+			c.launchDefaults.Mode = norm
+			c.launchMu.Unlock()
+		}
 		return err
 	}
+
+	if wantAudio || !c.isConnected() {
+		return nil
+	}
+
+	switch norm {
+	case "fs":
+		if _, err := c.sendCommand(ctx, "set_property", "ontop", false); err != nil {
+			return err
+		}
+		_, err := c.sendCommand(ctx, "set_property", "fullscreen", true)
+		return err
+	case "pip":
+		if _, err := c.sendCommand(ctx, "set_property", "fullscreen", false); err != nil {
+			return err
+		}
+		_, err := c.sendCommand(ctx, "set_property", "ontop", true)
+		return err
+	default: // "window"
+		if _, err := c.sendCommand(ctx, "set_property", "fullscreen", false); err != nil {
+			return err
+		}
+		_, err := c.sendCommand(ctx, "set_property", "ontop", false)
+		return err
+	}
+}
+
+// SetCookieJar updates the cookie jar path for future mpv launches and the stream resolver.
+func (c *IPCClient) SetCookieJar(path string) {
+	c.launchMu.Lock()
+	c.launchDefaults.CookieJarPath = strings.TrimSpace(path)
+	if c.resolver != nil {
+		c.resolver.SetCookieJar(c.launchDefaults.CookieJarPath)
+	}
+	c.launchMu.Unlock()
+}
+
+// SetSpeed sets playback speed clamped between 0.5 and 2.0, persisting it for
+// future launches and updating a live mpv instance when connected.
+func (c *IPCClient) SetSpeed(ctx context.Context, speed float64) error {
+	if c.ctx.Err() != nil {
+		return ErrClientClosed
+	}
+	clamped := clampSpeed(speed)
+	if c.isConnected() {
+		if _, err := c.sendCommand(ctx, "set_property", "speed", clamped); err != nil {
+			return err
+		}
+	}
+	c.launchMu.Lock()
+	c.launchDefaults.Speed = clamped
+	c.launchMu.Unlock()
+
 	c.statusMu.Lock()
 	c.status.Speed = clamped
 	st := c.status

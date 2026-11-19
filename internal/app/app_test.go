@@ -529,16 +529,21 @@ func TestMultiRoundSearchClearsPreviousAndPreventsConcat(t *testing.T) {
 	s.ResultScroll = 1
 	s.SearchChip = 1
 
-	// Round 2 via '/': draft must start empty so typing does not concatenate onto "golang"
+	// Round 2 via '/': on ViewSearch, '/' prefills active SearchQuery for editing (no leftover draft).
 	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
 	if s.Focus != FocusSearch {
 		t.Fatalf("round 2 Focus = %v, want FocusSearch", s.Focus)
 	}
-	if s.SearchDraft != "" {
-		t.Fatalf("round 2 SearchDraft = %q, want empty string (no concat)", s.SearchDraft)
+	if s.SearchDraft != "golang" || s.SearchCursorPos() != len([]rune("golang")) {
+		t.Fatalf("round 2 SearchDraft/cursor = (%q, %d), want (\"golang\", 6)", s.SearchDraft, s.SearchCursorPos())
 	}
 	if s.SearchQuery != "golang" || len(s.SearchResults) != 2 {
 		t.Fatalf("expected prior SearchQuery/SearchResults intact while typing, got query=%q len=%d", s.SearchQuery, len(s.SearchResults))
+	}
+	// Clear prefilled draft with ctrl+u before typing new query
+	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyCtrlU})
+	if s.SearchDraft != "" {
+		t.Fatalf("after ctrl+u SearchDraft = %q, want empty", s.SearchDraft)
 	}
 
 	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("pink floyd")})
@@ -561,7 +566,7 @@ func TestMultiRoundSearchClearsPreviousAndPreventsConcat(t *testing.T) {
 		t.Fatalf("round 2 results = %+v, want [pf1]", s.SearchResults)
 	}
 
-	// Round 3 via mouse click on search bar when unfocused clears stale draft
+	// Round 3 via mouse click on search bar when unfocused discards stale draft and opens active SearchQuery for editing.
 	s.SearchDraft = "leftover"
 	_, _, barStart := s.headerSearchBounds()
 	s, _ = s.Update(tea.MouseMsg{
@@ -570,11 +575,12 @@ func TestMultiRoundSearchClearsPreviousAndPreventsConcat(t *testing.T) {
 		Button: tea.MouseButtonLeft,
 		Action: tea.MouseActionPress,
 	})
-	if s.Focus != FocusSearch || s.SearchDraft != "" {
-		t.Fatalf("mouse focus search = (%v, %q), want (FocusSearch, \"\")", s.Focus, s.SearchDraft)
+	if s.Focus != FocusSearch || s.SearchDraft != "pink floyd" {
+		t.Fatalf("mouse focus search = (%v, %q), want (FocusSearch, \"pink floyd\")", s.Focus, s.SearchDraft)
 	}
 
-	// Clicking inside search bar while already focused preserves current draft
+	// Clicking inside search bar while already focused preserves current draft and positions cursor.
+	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyCtrlU})
 	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("abc")})
 	s, _ = s.Update(tea.MouseMsg{
 		X:      barStart + 2,
@@ -582,8 +588,8 @@ func TestMultiRoundSearchClearsPreviousAndPreventsConcat(t *testing.T) {
 		Button: tea.MouseButtonLeft,
 		Action: tea.MouseActionPress,
 	})
-	if s.SearchDraft != "abc" {
-		t.Fatalf("re-clicking focused search bar altered draft to %q, want %q", s.SearchDraft, "abc")
+	if s.SearchDraft != "abc" || s.SearchCursorPos() != 1 {
+		t.Fatalf("re-clicking focused search bar gave draft=%q cursor=%d, want (\"abc\", 1)", s.SearchDraft, s.SearchCursorPos())
 	}
 }
 
@@ -608,6 +614,7 @@ func TestStaleAndCanceledSearchIgnoredBySeq(t *testing.T) {
 
 	// Restart search 2 with the exact same query "golang" while search 1 is in flight
 	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyCtrlU})
 	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("golang")})
 	var cmd2 tea.Cmd
 	s, cmd2 = s.Update(tea.KeyMsg{Type: tea.KeyEnter})
@@ -1622,12 +1629,15 @@ func TestApp_SettingsStudioLiveChipAndStaleTitleGuard(t *testing.T) {
 	if s.ThemeName != "terminal" {
 		t.Fatalf("expected ThemeName=terminal after backward step from youtube-dark, got %q", s.ThemeName)
 	}
-	leftX, topY, _, _ := s.SettingsModalBounds()
-	// Hover row 5 (Autoplay) and click it to toggle false.
-	rowY := topY + 1 + SettingsItemRowOffsets[5]
+	leftX, _, _, _ := s.SettingsModalBounds()
+	// Hover Autoplay row and click it to toggle false.
+	rowY, vis := s.SettingsRowScreenY(SettingIdxAutoplay)
+	if !vis {
+		t.Fatal("expected Autoplay row to be visible in settings modal")
+	}
 	s, _ = s.Update(tea.MouseMsg{X: leftX + 6, Y: rowY, Action: tea.MouseActionMotion})
-	if s.SettingsIdx != 5 {
-		t.Fatalf("expected mouse hover to highlight SettingsIdx=5, got %d", s.SettingsIdx)
+	if s.SettingsIdx != SettingIdxAutoplay {
+		t.Fatalf("expected mouse hover to highlight SettingsIdx=%d, got %d", SettingIdxAutoplay, s.SettingsIdx)
 	}
 	s, cmd = s.Update(tea.MouseMsg{X: leftX + 6, Y: rowY, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
 	_ = collectNonTickMsgs(cmd, 100*time.Millisecond)
@@ -1726,13 +1736,13 @@ func TestApp_MouseHoverDoesNotScrollAndSettingsQualityClearsAudioOnly(t *testing
 			s.SelectedIdx, s.ScrollOffset, s.GridCols()+1)
 	}
 
-	// Adjusting "Resolución máxima" (row 2) in Settings clears AudioOnly, switches DefaultMode to window,
+	// Adjusting "Resolución máxima" (SettingIdxQuality) in Settings clears AudioOnly, switches DefaultMode to window,
 	// and executes SetPlaybackProfile before Prefetch.
 	spy.mu.Lock()
 	spy.events = nil
 	spy.mu.Unlock()
 	s.ShowSettings = true
-	s, cmd := s.AdjustSetting(2, 1) // 1080 -> 720
+	s, cmd := s.AdjustSetting(SettingIdxQuality, 1) // 1080 -> 720
 	_ = collectNonTickMsgs(cmd, 150*time.Millisecond)
 	if s.AudioOnly || s.DefaultMode != "window" || s.Quality != 720 {
 		t.Fatalf("expected AudioOnly=false DefaultMode=window Quality=720, got audio=%v mode=%q q=%d",
@@ -2110,10 +2120,10 @@ func TestPhase2_SearchAutocompleteAndHistory(t *testing.T) {
 	})
 	defer s.Close()
 
-	// '/' opens search and populates recent history suggestions.
+	// '/' opens search with NO recent history dropdown (SearchSuggestions stays empty).
 	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
-	if s.Focus != FocusSearch || len(s.SearchSuggestions) != 1 || s.SearchSuggestions[0] != "soda stereo" {
-		t.Fatalf("expected FocusSearch with history suggestions, got focus=%v sug=%v", s.Focus, s.SearchSuggestions)
+	if s.Focus != FocusSearch || len(s.SearchSuggestions) != 0 {
+		t.Fatalf("expected FocusSearch with empty suggestions (no recent history dropdown), got focus=%v sug=%v", s.Focus, s.SearchSuggestions)
 	}
 
 	// Typing 'p', 'i' triggers debounced autocomplete SuggestTickMsg -> SuggestionsLoadedMsg.
@@ -2360,4 +2370,432 @@ func TestSearchFocusImmuneToMouseMotionAndSuggestionClick(t *testing.T) {
 	if s.SearchPending || len(s.SearchResults) != 1 || s.SearchResults[0].ID != "pf1" {
 		t.Fatalf("expected refreshed search results on 'r', got pending=%v res=%+v", s.SearchPending, s.SearchResults)
 	}
+}
+
+func TestSearchCursorEditingAndMousePositioning(t *testing.T) {
+	s, _, _, _ := newTestState()
+	defer s.Close()
+	s.Width, s.Height = 120, 38
+
+	// '/' from Home starts empty with cursor at 0 even if SearchQuery was set.
+	s.SearchQuery = "previous"
+	s.View = ViewHome
+	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	if s.Focus != FocusSearch || s.SearchDraft != "" || s.SearchCursorPos() != 0 {
+		t.Fatalf("home '/' = (focus=%v, draft=%q, cur=%d), want (FocusSearch, \"\", 0)", s.Focus, s.SearchDraft, s.SearchCursorPos())
+	}
+
+	// Type UTF-8 accented text, move cursor left/right/home/end/ctrl+a/ctrl+e/ctrl+b/ctrl+f and insert in middle.
+	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("café")})
+	if s.SearchDraft != "café" || s.SearchCursorPos() != 4 {
+		t.Fatalf("after typing café: draft=%q cur=%d", s.SearchDraft, s.SearchCursorPos())
+	}
+	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyCtrlB})
+	if s.SearchCursorPos() != 2 {
+		t.Fatalf("expected cursor=2 after left+ctrl+b, got %d", s.SearchCursorPos())
+	}
+	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("ZZ")})
+	if s.SearchDraft != "caZZfé" || s.SearchCursorPos() != 4 {
+		t.Fatalf("insert in middle = (%q, %d), want (\"caZZfé\", 4)", s.SearchDraft, s.SearchCursorPos())
+	}
+	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyRight})
+	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyCtrlF})
+	if s.SearchCursorPos() != 6 {
+		t.Fatalf("expected cursor=6 after right+ctrl+f, got %d", s.SearchCursorPos())
+	}
+
+	// Home / Ctrl+A -> 0; Delete forward deletes 'c' leaving cursor at 0.
+	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyCtrlA})
+	if s.SearchCursorPos() != 0 {
+		t.Fatalf("expected cursor=0 after ctrl+a, got %d", s.SearchCursorPos())
+	}
+	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyDelete})
+	if s.SearchDraft != "aZZfé" || s.SearchCursorPos() != 0 {
+		t.Fatalf("forward delete at 0 = (%q, %d), want (\"aZZfé\", 0)", s.SearchDraft, s.SearchCursorPos())
+	}
+	// Backspace at 0 is a no-op; Ctrl+D at end deletes previous rune; Ctrl+E moves to end.
+	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+	if s.SearchDraft != "aZZfé" || s.SearchCursorPos() != 0 {
+		t.Fatalf("backspace at 0 altered draft: (%q, %d)", s.SearchDraft, s.SearchCursorPos())
+	}
+	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyEnd})
+	if s.SearchCursorPos() != 5 {
+		t.Fatalf("expected cursor=5 after End, got %d", s.SearchCursorPos())
+	}
+	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyCtrlD})
+	if s.SearchDraft != "aZZf" || s.SearchCursorPos() != 4 {
+		t.Fatalf("ctrl+d at end = (%q, %d), want (\"aZZf\", 4)", s.SearchDraft, s.SearchCursorPos())
+	}
+	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyHome})
+	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyRight})
+	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyCtrlD})
+	if s.SearchDraft != "aZf" || s.SearchCursorPos() != 1 {
+		t.Fatalf("ctrl+d at middle = (%q, %d), want (\"aZf\", 1)", s.SearchDraft, s.SearchCursorPos())
+	}
+
+	// Ctrl+W deletes word before cursor while preserving suffix; Ctrl+K deletes cur..end; Ctrl+U deletes 0..cur.
+	s.SearchDraft = "soda stereo live"
+	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyCtrlE})
+	for i := 0; i < 4; i++ { // move before "live"
+		s, _ = s.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	}
+	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyCtrlW})
+	if s.SearchDraft != "soda live" || s.SearchCursorPos() != 5 {
+		t.Fatalf("ctrl+w in middle = (%q, %d), want (\"soda live\", 5)", s.SearchDraft, s.SearchCursorPos())
+	}
+	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyCtrlK})
+	if s.SearchDraft != "soda " || s.SearchCursorPos() != 5 {
+		t.Fatalf("ctrl+k = (%q, %d), want (\"soda \", 5)", s.SearchDraft, s.SearchCursorPos())
+	}
+	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2025")})
+	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyCtrlA})
+	for i := 0; i < 5; i++ {
+		s, _ = s.Update(tea.KeyMsg{Type: tea.KeyRight})
+	}
+	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyCtrlU})
+	if s.SearchDraft != "2025" || s.SearchCursorPos() != 0 {
+		t.Fatalf("ctrl+u in middle = (%q, %d), want (\"2025\", 0)", s.SearchDraft, s.SearchCursorPos())
+	}
+
+	// Mouse click inside focused search bar positions cursor at clicked rune offset.
+	_, _, barStart := s.headerSearchBounds()
+	s, _ = s.Update(tea.MouseMsg{X: barStart + 1 + 2, Y: 1, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	if s.SearchCursorPos() != 2 {
+		t.Fatalf("mouse click at relX=2 gave cursor=%d, want 2", s.SearchCursorPos())
+	}
+	s, _ = s.Update(tea.MouseMsg{X: barStart, Y: 1, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	if s.SearchCursorPos() != 0 {
+		t.Fatalf("mouse click at left edge gave cursor=%d, want 0", s.SearchCursorPos())
+	}
+	s, _ = s.Update(tea.MouseMsg{X: barStart + 20, Y: 1, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	if s.SearchCursorPos() != 4 {
+		t.Fatalf("mouse click past end gave cursor=%d, want 4", s.SearchCursorPos())
+	}
+
+	// Pressing '/' while on ViewSearch prefills SearchQuery for editing.
+	s.View = ViewSearch
+	s.Focus = FocusMain
+	s.SearchQuery = "pink floyd"
+	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	if s.Focus != FocusSearch || s.SearchDraft != "pink floyd" || s.SearchCursorPos() != 10 {
+		t.Fatalf("ViewSearch '/' = (focus=%v, draft=%q, cur=%d), want (FocusSearch, \"pink floyd\", 10)",
+			s.Focus, s.SearchDraft, s.SearchCursorPos())
+	}
+}
+
+func TestSearchClearsSuggestionsOnDraftChangeAndEmptyError(t *testing.T) {
+	sh := store.NewSearchHistory(t.TempDir())
+	if err := sh.Record("old search"); err != nil {
+		t.Fatal(err)
+	}
+	sp := &fakeSuggestProvider{items: []string{"pink floyd live", "pink floyd pulse"}}
+	s := NewState(Dependencies{
+		Catalog:         &catalog.FakeCatalog{},
+		Engine:          player.NewFakeEngine(),
+		SuggestProvider: sp,
+		SearchHistory:   sh,
+	})
+	defer s.Close()
+
+	// Opening '/' never populates recent history dropdown.
+	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	if len(s.SearchSuggestions) != 0 {
+		t.Fatalf("expected 0 suggestions on open, got %v", s.SearchSuggestions)
+	}
+
+	// Simulate loaded suggestions, then edit draft -> suggestions & SuggestIdx clear immediately.
+	s.SearchDraft = "pink"
+	s.suggestSeq = 1
+	s, _ = s.Update(SuggestionsLoadedMsg{Seq: 1, Query: "pink", Items: []string{"pink floyd live"}})
+	s.SuggestIdx = 0
+	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	if len(s.SearchSuggestions) != 0 || s.SuggestIdx != -1 {
+		t.Fatalf("expected stale suggestions cleared immediately on draft edit, got sug=%v idx=%d",
+			s.SearchSuggestions, s.SuggestIdx)
+	}
+
+	// SuggestionsLoadedMsg with Err != nil or empty Items clears suggestions cleanly.
+	s.SearchSuggestions = []string{"stale"}
+	s.SuggestIdx = 0
+	s, _ = s.Update(SuggestionsLoadedMsg{Seq: s.suggestSeq, Query: s.SearchDraft, Err: errors.New("boom")})
+	if len(s.SearchSuggestions) != 0 || s.SuggestIdx != -1 {
+		t.Fatalf("expected error SuggestionsLoadedMsg to clear suggestions, got %v idx=%d", s.SearchSuggestions, s.SuggestIdx)
+	}
+	s.SearchSuggestions = []string{"stale"}
+	s.SuggestIdx = 0
+	s, _ = s.Update(SuggestionsLoadedMsg{Seq: s.suggestSeq, Query: s.SearchDraft, Items: nil})
+	if len(s.SearchSuggestions) != 0 || s.SuggestIdx != -1 {
+		t.Fatalf("expected empty SuggestionsLoadedMsg to clear suggestions, got %v idx=%d", s.SearchSuggestions, s.SuggestIdx)
+	}
+}
+
+func TestEscapeGuardAndUpdateIntegration(t *testing.T) {
+	t.Run("drops SGR and CSI fragments while preserving embedded and normal text", func(t *testing.T) {
+		s, _, eng, _ := newTestState()
+		defer s.Close()
+		s.Focus = FocusSearch
+
+		leaked := [][]tea.KeyMsg{
+			{{Type: tea.KeyRunes, Runes: []rune("[<35;117;7M")}},
+			{{Type: tea.KeyRunes, Runes: []rune{'['}, Alt: true}, {Type: tea.KeyRunes, Runes: []rune("<35;117;7M")}},
+			{{Type: tea.KeyRunes, Runes: []rune{'['}, Alt: true}, {Type: tea.KeyRunes, Runes: []rune("<35;11")}, {Type: tea.KeyRunes, Runes: []rune("7;7M")}},
+			{{Type: tea.KeyRunes, Runes: []rune("<35;117;7m")}},
+			{{Type: tea.KeyRunes, Runes: []rune("[<0;42;10M")}},
+			{{Type: tea.KeyRunes, Runes: []rune{'['}, Alt: true}, {Type: tea.KeyRunes, Runes: []rune("I")}},
+			{{Type: tea.KeyRunes, Runes: []rune{'['}, Alt: true}, {Type: tea.KeyRunes, Runes: []rune("O")}},
+			{{Type: tea.KeyRunes, Runes: []rune{'['}, Alt: true}, {Type: tea.KeyRunes, Runes: []rune("?62;1c")}},
+		}
+		for i, seq := range leaked {
+			for _, km := range seq {
+				s, _ = s.Update(km)
+			}
+			if s.SearchDraft != "" {
+				t.Fatalf("leaked sequence #%d contaminated SearchDraft with %q", i, s.SearchDraft)
+			}
+		}
+
+		// Embedded SGR packet stripped while keeping "el"
+		s, _ = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("el[<35;117;7M")})
+		if s.SearchDraft != "el" {
+			t.Fatalf("expected \"el\" after stripping embedded SGR, got %q", s.SearchDraft)
+		}
+
+		// Zero false positives on legitimate user strings
+		for _, okStr := range []string{"[official] 2025", "100%", "a < b", "<3"} {
+			s.setSearchDraft("", 0)
+			s, _ = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(okStr)})
+			if s.SearchDraft != okStr {
+				t.Fatalf("false positive on %q: got %q", okStr, s.SearchDraft)
+			}
+		}
+
+		// FocusMain protection: leaked SGR/CSI events must not toggle help/pause/seek/quit.
+		s.Focus = FocusMain
+		s, _ = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'['}, Alt: true})
+		s, _ = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("?62;1c")})
+		s, _ = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("[<35;117;7M")})
+		if s.ShowHelp || len(eng.Calls()) != 0 {
+			t.Fatalf("FocusMain reacted to leaked escape: ShowHelp=%v calls=%v", s.ShowHelp, eng.Calls())
+		}
+	})
+}
+
+type spyAudioDownloader struct {
+	mu    sync.Mutex
+	calls []bool
+}
+
+func (d *spyAudioDownloader) Enqueue(_ context.Context, _ model.Video, audioOnly bool) error {
+	d.mu.Lock()
+	d.calls = append(d.calls, audioOnly)
+	d.mu.Unlock()
+	return nil
+}
+
+type spySettingsEngine struct {
+	*player.FakeEngine
+	mu          sync.Mutex
+	volumes     []int
+	launchModes []string
+}
+
+func (e *spySettingsEngine) SetVolume(_ context.Context, vol int) error {
+	e.mu.Lock()
+	e.volumes = append(e.volumes, vol)
+	e.mu.Unlock()
+	return nil
+}
+
+func (e *spySettingsEngine) SetLaunchMode(_ context.Context, mode string) error {
+	e.mu.Lock()
+	e.launchModes = append(e.launchModes, mode)
+	e.mu.Unlock()
+	return nil
+}
+
+func TestLiveFiltersDownloadAudioCrossNavAndAll16Settings(t *testing.T) {
+	t.Run("HideShorts and Interleave apply live on Home Music Subscriptions", func(t *testing.T) {
+		f := false
+		tr := true
+		s := NewState(Dependencies{
+			InitialHideShorts: &tr,
+			InitialInterleave: &f,
+		})
+		defer s.Close()
+
+		videos := []model.Video{
+			{ID: "shortDur", Title: "Quick clip", Channel: "ChanA", Duration: "0:45"},
+			{ID: "short60", Title: "Exact minute", Channel: "ChanA", Duration: "01:00"},
+			{ID: "shortTag", Title: "Cool #Shorts clip", Channel: "ChanB", Duration: "02:00"},
+			{ID: "liveShort", Title: "Live #shorts", Channel: "ChanA", IsLive: true, Duration: "0:30"},
+			{ID: "RDmix1", Title: "Mix #short", Channel: "ChanA", Duration: "0:40"},
+			{ID: "keep61", Title: "Not a short", Channel: "ChanA", Duration: "01:01"},
+			{ID: "keepEmpty", Title: "Unknown dur #shortlist", Channel: "ChanA", Duration: ""},
+			{ID: "keepDash", Title: "Dash dur", Channel: "ChanB", Duration: "--:--"},
+		}
+		s.Feeds[model.TabHome] = videos
+		vis := s.VisibleItems()
+		wantIDs := []string{"liveShort", "RDmix1", "keep61", "keepEmpty", "keepDash"}
+		gotIDs := make([]string, len(vis))
+		for i, v := range vis {
+			gotIDs[i] = v.ID
+		}
+		if !slices.Equal(gotIDs, wantIDs) {
+			t.Fatalf("HideShorts visible IDs = %v, want %v", gotIDs, wantIDs)
+		}
+
+		// Enable Interleave live: round-robin by channel mixes ChanA and ChanB.
+		s.SelectedIdx = 4
+		s, _ = s.AdjustSetting(SettingIdxInterleave, 1)
+		vis = s.VisibleItems()
+		// ChanA: liveShort, RDmix1, keep61, keepEmpty; ChanB: keepDash -> round 0: liveShort, keepDash, then RDmix1, keep61, keepEmpty
+		wantMixed := []string{"liveShort", "keepDash", "RDmix1", "keep61", "keepEmpty"}
+		gotMixed := make([]string, len(vis))
+		for i, v := range vis {
+			gotMixed[i] = v.ID
+		}
+		if !slices.Equal(gotMixed, wantMixed) {
+			t.Fatalf("Interleave visible IDs = %v, want %v", gotMixed, wantMixed)
+		}
+
+		// Disabling HideShorts brings back short videos immediately.
+		s, _ = s.AdjustSetting(SettingIdxHideShorts, 1)
+		if len(s.VisibleItems()) != len(videos) {
+			t.Fatalf("expected all %d videos after HideShorts=false, got %d", len(videos), len(s.VisibleItems()))
+		}
+	})
+
+	t.Run("DownloadAudio on d, ? <-> S cross-nav, and all 16 live settings + scroll", func(t *testing.T) {
+		dl := &spyAudioDownloader{}
+		eng := &spySettingsEngine{FakeEngine: player.NewFakeEngine()}
+		var cfgMu sync.Mutex
+		cfgWrites := make(map[string]string)
+		s := NewState(Dependencies{
+			Catalog:    &catalog.FakeCatalog{},
+			Engine:     eng,
+			Downloader: dl,
+			OnConfigChange: func(key, val string) error {
+				cfgMu.Lock()
+				cfgWrites[key] = val
+				cfgMu.Unlock()
+				return nil
+			},
+		})
+		defer s.Close()
+		s.Width, s.Height = 100, 20 // compact terminal so Settings modal scrolls
+		s.Feeds[model.TabHome] = []model.Video{
+			{ID: "v1", Title: "Song One", Channel: "Ch1", Duration: "04:00"},
+		}
+
+		// 'd' respects DownloadAudio
+		s, cmd := s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+		_ = collectNonTickMsgs(cmd, 150*time.Millisecond)
+		s, cmd = s.AdjustSetting(SettingIdxDownloadAudio, 1)
+		_ = collectNonTickMsgs(cmd, 150*time.Millisecond)
+		s, cmd = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+		_ = collectNonTickMsgs(cmd, 150*time.Millisecond)
+		dl.mu.Lock()
+		dlCalls := append([]bool(nil), dl.calls...)
+		dl.mu.Unlock()
+		if !slices.Equal(dlCalls, []bool{false, true}) {
+			t.Fatalf("downloader audioOnly calls = %v, want [false true]", dlCalls)
+		}
+
+		// ? <-> S overlay cross-navigation
+		s, _ = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'?'}})
+		if !s.ShowHelp || s.ShowSettings {
+			t.Fatalf("expected ShowHelp=true, got help=%v settings=%v", s.ShowHelp, s.ShowSettings)
+		}
+		s, _ = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}})
+		if s.ShowHelp || !s.ShowSettings {
+			t.Fatalf("expected '?' -> 'S' cross-nav to Settings, got help=%v settings=%v", s.ShowHelp, s.ShowSettings)
+		}
+		s, _ = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'?'}})
+		if !s.ShowHelp || s.ShowSettings {
+			t.Fatalf("expected 'S' -> '?' cross-nav to Help, got help=%v settings=%v", s.ShowHelp, s.ShowSettings)
+		}
+		s, _ = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}})
+
+		// Adjust all 16 settings and verify state & persistence
+		if rows := s.SettingsRows(); len(rows) != SettingsRowCount || SettingsRowCount != 16 {
+			t.Fatalf("SettingsRows len = %d, SettingsRowCount = %d, want 16", len(rows), SettingsRowCount)
+		}
+		for idx := 0; idx < SettingsRowCount; idx++ {
+			s, cmd = s.AdjustSetting(idx, 1)
+			_ = collectNonTickMsgs(cmd, 150*time.Millisecond)
+		}
+		if s.ThumbQuality != "hq" || s.PreviewMode != "kitty" || s.DefaultMode != "audio" ||
+			s.AudioVolume != 80 || s.PlayerStatus.Speed != 1.25 || s.FeedSize != 150 ||
+			s.SearchSize != 60 || s.CacheTTL != 1800 || s.CookiesMode != "off" {
+			t.Fatalf("unexpected settings values after stepping all 16: thumbQ=%q preview=%q mode=%q vol=%d speed=%v feed=%d search=%d ttl=%d cookies=%q",
+				s.ThumbQuality, s.PreviewMode, s.DefaultMode, s.AudioVolume, s.PlayerStatus.Speed,
+				s.FeedSize, s.SearchSize, s.CacheTTL, s.CookiesMode)
+		}
+
+		eng.mu.Lock()
+		vols := append([]int(nil), eng.volumes...)
+		modes := append([]string(nil), eng.launchModes...)
+		eng.mu.Unlock()
+		if !slices.Equal(vols, []int{80}) || !slices.Equal(modes, []string{"audio"}) {
+			t.Fatalf("expected volumeSetter=[80] and launchModeSetter=[audio], got vols=%v modes=%v", vols, modes)
+		}
+
+		cfgMu.Lock()
+		gotKeys := map[string]string{
+			"YT_PREVIEW":        cfgWrites["YT_PREVIEW"],
+			"YT_THUMB_QUALITY":  cfgWrites["YT_THUMB_QUALITY"],
+			"YT_DEFAULT_MODE":   cfgWrites["YT_DEFAULT_MODE"],
+			"YT_AUDIO_VOLUME":   cfgWrites["YT_AUDIO_VOLUME"],
+			"YT_SPEED":          cfgWrites["YT_SPEED"],
+			"YT_AUTOPLAY":       cfgWrites["YT_AUTOPLAY"],
+			"YT_HIDE_SHORTS":    cfgWrites["YT_HIDE_SHORTS"],
+			"YT_INTERLEAVE":     cfgWrites["YT_INTERLEAVE"],
+			"YT_FEED_SIZE":      cfgWrites["YT_FEED_SIZE"],
+			"YT_SEARCH_SIZE":    cfgWrites["YT_SEARCH_SIZE"],
+			"YT_CACHE_TTL":      cfgWrites["YT_CACHE_TTL"],
+			"YT_DOWNLOAD_AUDIO": cfgWrites["YT_DOWNLOAD_AUDIO"],
+			"YT_COOKIES":        cfgWrites["YT_COOKIES"],
+		}
+		cfgMu.Unlock()
+		wantKeys := map[string]string{
+			"YT_PREVIEW":        "kitty",
+			"YT_THUMB_QUALITY":  "hq",
+			"YT_DEFAULT_MODE":   "audio",
+			"YT_AUDIO_VOLUME":   "80",
+			"YT_SPEED":          "1.25",
+			"YT_AUTOPLAY":       "0",
+			"YT_HIDE_SHORTS":    "0",
+			"YT_INTERLEAVE":     "0",
+			"YT_FEED_SIZE":      "150",
+			"YT_SEARCH_SIZE":    "60",
+			"YT_CACHE_TTL":      "1800",
+			"YT_DOWNLOAD_AUDIO": "0",
+			"YT_COOKIES":        "off",
+		}
+		for k, want := range wantKeys {
+			if gotKeys[k] != want {
+				t.Fatalf("config %s = %q, want %q", k, gotKeys[k], want)
+			}
+		}
+
+		// Scroll down with 'j' to last row (Cookies = 15) in compact Height=20, verify screen Y & mouse click hit.
+		s.SettingsIdx = 0
+		for i := 0; i < 15; i++ {
+			s, _ = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+		}
+		if s.SettingsIdx != SettingIdxCookies {
+			t.Fatalf("expected SettingsIdx=%d after 15 'j' presses, got %d", SettingIdxCookies, s.SettingsIdx)
+		}
+		leftX, _, _, _, _, _, _ := s.SettingsModalWindow()
+		rowY, vis := s.SettingsRowScreenY(SettingIdxCookies)
+		if !vis {
+			t.Fatal("expected SettingIdxCookies to be visible in scrolled window")
+		}
+		s, cmd = s.Update(tea.MouseMsg{X: leftX + 6, Y: rowY, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+		_ = collectNonTickMsgs(cmd, 150*time.Millisecond)
+		if s.CookiesMode != "auto" {
+			t.Fatalf("expected mouse click on scrolled Cookies row to toggle back to auto, got %q", s.CookiesMode)
+		}
+	})
 }

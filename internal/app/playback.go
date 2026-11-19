@@ -3,7 +3,6 @@ package app
 import (
 	"context"
 	"fmt"
-	"math"
 	"strconv"
 	"strings"
 
@@ -61,6 +60,14 @@ type sponsorBlockController interface {
 	SponsorBlockEnabled() bool
 }
 
+type volumeSetter interface {
+	SetVolume(ctx context.Context, vol int) error
+}
+
+type launchModeSetter interface {
+	SetLaunchMode(ctx context.Context, mode string) error
+}
+
 // QualityOption describes one preset in the interactive Resolution & Audio-Only modal.
 type QualityOption struct {
 	Label     string
@@ -113,7 +120,7 @@ func (s *State) ToggleAutoplay() (*State, tea.Cmd) {
 	if s.Autoplay {
 		msg = "🔁 Autoplay: ON"
 	}
-	return s, s.toastCmd(msg)
+	return s, tea.Batch(s.toastCmd(msg), s.saveBoolConfigCmd("YT_AUTOPLAY", s.Autoplay))
 }
 
 func (s *State) resumeStillWatching() (*State, tea.Cmd) {
@@ -518,21 +525,17 @@ func (s *State) AdjustSpeed(delta float64) (*State, tea.Cmd) {
 
 // SetPlaybackSpeed sets playback speed clamped to [0.5, 2.0].
 func (s *State) SetPlaybackSpeed(target float64) (*State, tea.Cmd) {
-	if target < 0.5 {
-		target = 0.5
-	}
-	if target > 2.0 {
-		target = 2.0
-	}
-	target = math.Round(target*100) / 100
+	target = clampSpeed(target)
 	s.PlayerStatus.Speed = target
-	label := fmt.Sprintf("⚡ Velocidad %sx", strconv.FormatFloat(target, 'f', -1, 64))
+	speedStr := strconv.FormatFloat(target, 'f', -1, 64)
+	label := fmt.Sprintf("⚡ Velocidad %sx", speedStr)
+	saveCmd := s.saveConfigCmd("YT_SPEED", speedStr)
 	if sc, ok := s.Deps.Engine.(speedController); ok && s.Deps.Engine != nil {
-		return s, s.engineCmd(func(ctx context.Context) error {
+		return s, tea.Batch(s.engineCmd(func(ctx context.Context) error {
 			return sc.SetSpeed(ctx, target)
-		}, label)
+		}, label), saveCmd)
 	}
-	return s, s.toastCmd(label)
+	return s, tea.Batch(s.toastCmd(label), saveCmd)
 }
 
 // ToggleLoop toggles single-track repeat in the player engine.

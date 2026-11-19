@@ -40,9 +40,21 @@ type testMPVServer struct {
 	closed  bool
 }
 
+func tempSocketPath(t *testing.T, name string) string {
+	t.Helper()
+	// macOS sockaddr_un.sun_path is capped at 104 bytes; /tmp stays well below it even for long test names.
+	dir, err := os.MkdirTemp("/tmp", "iutui-*")
+	if err != nil {
+		dir = t.TempDir()
+	} else {
+		t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	}
+	return filepath.Join(dir, name)
+}
+
 func startTestMPVServer(t *testing.T, onCmd func(conn net.Conn, cmd []any, reqID int64)) *testMPVServer {
 	t.Helper()
-	sockPath := filepath.Join(t.TempDir(), "mpv.sock")
+	sockPath := tempSocketPath(t, "mpv.sock")
 	ln, err := net.Listen("unix", sockPath)
 	if err != nil {
 		t.Fatalf("listen unix: %v", err)
@@ -480,7 +492,7 @@ exit 0`, finalArgsFile))
 
 		t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-		sockPath := filepath.Join(tmpDir, "run", "mpv.sock")
+		sockPath := tempSocketPath(t, "mpv.sock")
 		client := NewIPCClient(
 			WithSocketPath(sockPath),
 			WithBackoff(50*time.Millisecond, 100*time.Millisecond),
@@ -902,7 +914,7 @@ wait $!
 		}
 	})
 
-	sockPath := filepath.Join(tmpDir, "run", "mpv.sock")
+	sockPath := tempSocketPath(t, "mpv.sock")
 	client := NewIPCClient(
 		WithSocketPath(sockPath),
 		WithBackoff(200*time.Millisecond, 500*time.Millisecond),
@@ -2054,7 +2066,7 @@ func TestIPCClient_ToggleVideoMode(t *testing.T) {
 		writeStubBin(t, binDir, "mpv", fmt.Sprintf(`printf '%%s\n' "$@" > %q`, argsLog))
 		t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-		sockPath := filepath.Join(tmpDir, "run", "mpv.sock")
+		sockPath := tempSocketPath(t, "mpv.sock")
 		client := NewIPCClient(
 			WithSocketPath(sockPath),
 			WithBackoff(200*time.Millisecond, 500*time.Millisecond),
@@ -2331,7 +2343,7 @@ func TestIPCClient_ChaptersAndSeekAbsolute(t *testing.T) {
 	})
 
 	t.Run("Chapters and SeekAbsolute fail when disconnected", func(t *testing.T) {
-		client := NewIPCClient(WithSocketPath(filepath.Join(t.TempDir(), "missing.sock")))
+		client := NewIPCClient(WithSocketPath(tempSocketPath(t, "missing.sock")))
 		defer client.Close()
 
 		if _, err := client.Chapters(context.Background()); err == nil {
@@ -2731,12 +2743,21 @@ func TestIPCClient_SetSpeedAndToggleLoop(t *testing.T) {
 		}
 	})
 
-	t.Run("disconnected errors", func(t *testing.T) {
-		client := NewIPCClient(WithSocketPath(filepath.Join(t.TempDir(), "missing.sock")))
+	t.Run("disconnected updates launchDefaults.Speed without error while ToggleLoop errors", func(t *testing.T) {
+		client := NewIPCClient(WithSocketPath(tempSocketPath(t, "missing.sock")))
 		defer client.Close()
 
-		if err := client.SetSpeed(context.Background(), 1.25); err == nil {
-			t.Fatal("expected error from SetSpeed when disconnected")
+		if err := client.SetSpeed(context.Background(), 1.25); err != nil {
+			t.Fatalf("expected disconnected SetSpeed to update launch defaults cleanly, got: %v", err)
+		}
+		if got := client.Status().Speed; got != 1.25 {
+			t.Fatalf("Status().Speed = %v, want 1.25", got)
+		}
+		client.launchMu.RLock()
+		gotLaunchSpeed := client.launchDefaults.Speed
+		client.launchMu.RUnlock()
+		if gotLaunchSpeed != 1.25 {
+			t.Fatalf("launchDefaults.Speed = %v, want 1.25", gotLaunchSpeed)
 		}
 		if _, err := client.ToggleLoop(context.Background()); err == nil {
 			t.Fatal("expected error from ToggleLoop when disconnected")
@@ -2902,7 +2923,7 @@ func TestIPCClient_PlaylistMethods(t *testing.T) {
 	})
 
 	t.Run("disconnected playlist methods fail", func(t *testing.T) {
-		client := NewIPCClient(WithSocketPath(filepath.Join(t.TempDir(), "missing.sock")))
+		client := NewIPCClient(WithSocketPath(tempSocketPath(t, "missing.sock")))
 		defer client.Close()
 
 		ctx := context.Background()
@@ -2929,7 +2950,7 @@ func TestIPCClient_PlayFrom(t *testing.T) {
 	writeStubBin(t, binDir, "mpv", fmt.Sprintf("printf '%%s\\n' \"$@\" > %q\nexit 0", argsFile))
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	sockPath := filepath.Join(tmpDir, "run", "mpv.sock")
+	sockPath := tempSocketPath(t, "mpv.sock")
 	client := NewIPCClient(
 		WithSocketPath(sockPath),
 		WithLaunchDefaults(LaunchOpts{
@@ -3235,7 +3256,7 @@ func TestIPCClient_EnqueueAndStandalonePlayLaunchMPV(t *testing.T) {
 	})
 
 	t.Run("Enqueue reconnects immediately when socket becomes available before falling back", func(t *testing.T) {
-		sockPath := filepath.Join(t.TempDir(), "late-mpv.sock")
+		sockPath := tempSocketPath(t, "late-mpv.sock")
 		client := NewIPCClient(
 			WithSocketPath(sockPath),
 			WithBackoff(2*time.Second, 5*time.Second),
@@ -3292,7 +3313,7 @@ func TestIPCClient_EnqueueAndStandalonePlayLaunchMPV(t *testing.T) {
 		writeStubBin(t, binDir, "mpv", fmt.Sprintf("printf '%%s\\n' \"$@\" > %q\nexit 0", argsFile))
 		t.Setenv("PATH", binDir)
 
-		sockPath := filepath.Join(tmpDir, "run", "mpv.sock")
+		sockPath := tempSocketPath(t, "mpv.sock")
 		client := NewIPCClient(
 			WithSocketPath(sockPath),
 			WithBackoff(2*time.Second, 5*time.Second),
@@ -3340,7 +3361,7 @@ func TestIPCClient_EnqueueAndStandalonePlayLaunchMPV(t *testing.T) {
 		t.Setenv("PATH", binDir)
 
 		client := NewIPCClient(
-			WithSocketPath(filepath.Join(tmpDir, "missing.sock")),
+			WithSocketPath(tempSocketPath(t, "missing.sock")),
 			WithBackoff(2*time.Second, 5*time.Second),
 		)
 		client.SetAutoplay(false)
@@ -3374,6 +3395,116 @@ func TestIPCClient_EnqueueAndStandalonePlayLaunchMPV(t *testing.T) {
 			if !slices.Contains(args, want) {
 				t.Fatalf("standalone mpv args %v missing %q", args, want)
 			}
+		}
+	})
+}
+
+func TestPlayerLiveSettingsMethods(t *testing.T) {
+	t.Run("BuildMPVArgs includes clamped --speed when non-1.0", func(t *testing.T) {
+		argsDefault := BuildMPVArgs(LaunchOpts{URL: "https://www.youtube.com/watch?v=dQw4w9WgXcQ", Speed: 1.0})
+		for _, a := range argsDefault {
+			if strings.HasPrefix(a, "--speed=") {
+				t.Fatalf("unexpected --speed flag for 1.0x: %v", argsDefault)
+			}
+		}
+		argsFast := BuildMPVArgs(LaunchOpts{URL: "https://www.youtube.com/watch?v=dQw4w9WgXcQ", Speed: 1.75})
+		if !slices.Contains(argsFast, "--speed=1.75") {
+			t.Fatalf("expected --speed=1.75 in %v", argsFast)
+		}
+		argsClamp := BuildMPVArgs(LaunchOpts{URL: "https://www.youtube.com/watch?v=dQw4w9WgXcQ", Speed: 9.0})
+		if !slices.Contains(argsClamp, "--speed=2") {
+			t.Fatalf("expected clamped --speed=2 in %v", argsClamp)
+		}
+	})
+
+	t.Run("SetVolume, SetLaunchMode, SetSpeed, and SetCookieJar update launch defaults and live mpv", func(t *testing.T) {
+		var (
+			mu   sync.Mutex
+			cmds [][]any
+		)
+		srv := startTestMPVServer(t, func(conn net.Conn, cmd []any, reqID int64) {
+			if len(cmd) > 0 && fmt.Sprint(cmd[0]) != "observe_property" {
+				cp := make([]any, len(cmd))
+				copy(cp, cmd)
+				mu.Lock()
+				cmds = append(cmds, cp)
+				mu.Unlock()
+			}
+			_ = json.NewEncoder(conn).Encode(map[string]any{
+				"error":      "success",
+				"request_id": reqID,
+			})
+		})
+
+		client := NewIPCClient(
+			WithSocketPath(srv.sockPath),
+			WithCommandTimeout(2*time.Second),
+			WithLaunchDefaults(LaunchOpts{
+				Mode:         "window",
+				Quality:      720,
+				Volume:       75,
+				Speed:        1.25,
+				FastPlayback: true,
+			}),
+		)
+		defer client.Close()
+
+		if st := client.Status(); st.Speed != 1.25 {
+			t.Fatalf("initial WithLaunchDefaults Speed = %v, want 1.25", st.Speed)
+		}
+
+		ctx := context.Background()
+		if err := client.SetVolume(ctx, 250); err != nil {
+			t.Fatalf("SetVolume(250): %v", err)
+		}
+		if client.Status().Volume != 100 {
+			t.Fatalf("clamped Volume = %v, want 100", client.Status().Volume)
+		}
+		if err := client.SetVolume(ctx, 55); err != nil {
+			t.Fatalf("SetVolume(55): %v", err)
+		}
+
+		if err := client.SetLaunchMode(ctx, "pip"); err != nil {
+			t.Fatalf("SetLaunchMode(pip): %v", err)
+		}
+		if err := client.SetLaunchMode(ctx, "fs"); err != nil {
+			t.Fatalf("SetLaunchMode(fs): %v", err)
+		}
+		if err := client.SetLaunchMode(ctx, "window"); err != nil {
+			t.Fatalf("SetLaunchMode(window): %v", err)
+		}
+		if err := client.SetLaunchMode(ctx, "audio"); err != nil {
+			t.Fatalf("SetLaunchMode(audio): %v", err)
+		}
+
+		client.SetCookieJar("/tmp/test-cookies.txt")
+		client.launchMu.RLock()
+		jar := client.launchDefaults.CookieJarPath
+		vol := client.launchDefaults.Volume
+		mode := client.launchDefaults.Mode
+		audioOnly := client.launchDefaults.AudioOnly
+		client.launchMu.RUnlock()
+		if jar != "/tmp/test-cookies.txt" || vol != 55 || mode != "audio" || !audioOnly {
+			t.Fatalf("unexpected launchDefaults: jar=%q vol=%d mode=%q audio=%v", jar, vol, mode, audioOnly)
+		}
+
+		mu.Lock()
+		gotCmds := slices.Clone(cmds)
+		mu.Unlock()
+		wantCmds := [][]any{
+			{"set_property", "volume", float64(100)},
+			{"set_property", "volume", float64(55)},
+			{"set_property", "fullscreen", false},
+			{"set_property", "ontop", true},
+			{"set_property", "ontop", false},
+			{"set_property", "fullscreen", true},
+			{"set_property", "fullscreen", false},
+			{"set_property", "ontop", false},
+			{"set_property", "ytdl-format", "bestaudio/best"},
+			{"set_property", "vid", "no"},
+		}
+		if !reflect.DeepEqual(gotCmds, wantCmds) {
+			t.Fatalf("live IPC commands =\n%#v\nwant\n%#v", gotCmds, wantCmds)
 		}
 	})
 }

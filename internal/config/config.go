@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -26,6 +27,8 @@ type Config struct {
 	CookieTTL     int
 	AudioVolume   int
 	Quality       int
+	Speed         float64
+	Autoplay      bool
 	MusicMode     string
 	DownloadAudio bool
 	Prefetch      int
@@ -58,6 +61,8 @@ func Default() Config {
 		CookieTTL:     21600,
 		AudioVolume:   75,
 		Quality:       720, // Crisp HD with ~3x-12x lower data usage than 1080p60/4K60.
+		Speed:         1.0,
+		Autoplay:      true,
 		MusicMode:     "bg",
 		DownloadAudio: false,
 		Prefetch:      24,
@@ -195,6 +200,8 @@ var knownKeys = []string{
 	"YT_COOKIE_TTL",
 	"YT_AUDIO_VOLUME",
 	"YT_QUALITY",
+	"YT_SPEED",
+	"YT_AUTOPLAY",
 	"YT_MUSIC_MODE",
 	"YT_DOWNLOAD_AUDIO",
 	"YT_PREFETCH",
@@ -309,6 +316,7 @@ func buildConfig(raw map[string]string) Config {
 	cfg.AudioVolume = asNum(raw["YT_AUDIO_VOLUME"], cfg.AudioVolume)
 	cfg.Quality = asNum(raw["YT_QUALITY"], cfg.Quality)
 	cfg.Prefetch = asNum(raw["YT_PREFETCH"], cfg.Prefetch)
+	cfg.Speed = asFloatRange(raw["YT_SPEED"], cfg.Speed, 0.5, 2.0)
 
 	cfg.DefaultMode = asEnum(raw["YT_DEFAULT_MODE"], cfg.DefaultMode, "window", "pip", "fs", "audio")
 	cfg.MusicMode = asEnum(raw["YT_MUSIC_MODE"], cfg.MusicMode, "bg", "term")
@@ -318,6 +326,7 @@ func buildConfig(raw map[string]string) Config {
 	cfg.Cookies = asEnum(raw["YT_COOKIES"], cfg.Cookies, "auto", "off")
 	cfg.Theme = asEnum(strings.ToLower(strings.TrimSpace(raw["YT_THEME"])), cfg.Theme, "youtube-dark", "catppuccin", "tokyonight", "gruvbox", "kanagawa", "terminal")
 
+	cfg.Autoplay = asBool(raw["YT_AUTOPLAY"], cfg.Autoplay)
 	cfg.HideShorts = asBool(raw["YT_HIDE_SHORTS"], cfg.HideShorts)
 	cfg.Interleave = asBool(raw["YT_INTERLEAVE"], cfg.Interleave)
 	cfg.Notify = asBool(raw["YT_NOTIFY"], cfg.Notify)
@@ -386,4 +395,16 @@ func asBool(val string, def bool) bool {
 	default:
 		return def
 	}
+}
+
+func asFloatRange(val string, def, minVal, maxVal float64) float64 {
+	trimmed := strings.TrimSpace(val)
+	if trimmed == "" {
+		return def
+	}
+	v, err := strconv.ParseFloat(trimmed, 64)
+	if err != nil || math.IsNaN(v) || math.IsInf(v, 0) || v < minVal || v > maxVal {
+		return def
+	}
+	return v
 }

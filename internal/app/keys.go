@@ -29,8 +29,12 @@ func (s *State) handleKey(msg tea.KeyMsg) (*State, tea.Cmd) {
 	}
 
 	if s.ShowHelp {
-		if key == "?" || key == "esc" {
+		switch key {
+		case "?", "esc":
 			s.ShowHelp = false
+		case "S":
+			s.ShowHelp = false
+			s.ShowSettings = true
 		}
 		return s, nil
 	}
@@ -120,6 +124,10 @@ func (s *State) handleKey(msg tea.KeyMsg) (*State, tea.Cmd) {
 		case "esc", "S", "q":
 			s.ShowSettings = false
 			return s, nil
+		case "?":
+			s.ShowSettings = false
+			s.ShowHelp = true
+			return s, nil
 		case "j", "down":
 			s.SettingsIdx = (s.SettingsIdx + 1) % SettingsRowCount
 			return s, nil
@@ -151,7 +159,7 @@ func (s *State) handleKey(msg tea.KeyMsg) (*State, tea.Cmd) {
 		switch key {
 		case "esc":
 			s.Focus = FocusMain
-			s.SearchDraft = ""
+			s.setSearchDraft("", 0)
 			s.SearchSuggestions = nil
 			s.SuggestIdx = -1
 			if s.suggestCancel != nil {
@@ -160,7 +168,8 @@ func (s *State) handleKey(msg tea.KeyMsg) (*State, tea.Cmd) {
 			return s, nil
 		case "enter":
 			if s.SuggestIdx >= 0 && s.SuggestIdx < len(s.SearchSuggestions) {
-				s.SearchDraft = s.SearchSuggestions[s.SuggestIdx]
+				sug := s.SearchSuggestions[s.SuggestIdx]
+				s.setSearchDraft(sug, len([]rune(sug)))
 			}
 			return s.SubmitSearch()
 		case "down":
@@ -177,36 +186,88 @@ func (s *State) handleKey(msg tea.KeyMsg) (*State, tea.Cmd) {
 				}
 			}
 			return s, nil
+		case "left", "ctrl+b":
+			if cur := s.SearchCursorPos(); cur > 0 {
+				s.SearchCursor = cur - 1
+			}
+			return s, nil
+		case "right", "ctrl+f":
+			if cur := s.SearchCursorPos(); cur < len([]rune(s.SearchDraft)) {
+				s.SearchCursor = cur + 1
+			}
+			return s, nil
+		case "home", "ctrl+a":
+			s.SearchCursorPos()
+			s.SearchCursor = 0
+			return s, nil
+		case "end", "ctrl+e":
+			s.SearchCursor = len([]rune(s.SearchDraft))
+			s.searchCursorSynced = s.SearchDraft
+			return s, nil
 		case "tab":
 			if len(s.SearchSuggestions) > 0 {
 				if s.SuggestIdx < 0 || s.SuggestIdx >= len(s.SearchSuggestions) {
 					s.SuggestIdx = 0
 				}
-				s.SearchDraft = s.SearchSuggestions[s.SuggestIdx]
+				sug := s.SearchSuggestions[s.SuggestIdx]
+				s.setSearchDraft(sug, len([]rune(sug)))
 				return s, s.onSearchDraftChanged()
 			}
 			return s, nil
 		case "ctrl+u":
-			s.SearchDraft = ""
+			cur := s.SearchCursorPos()
+			r := []rune(s.SearchDraft)
+			s.setSearchDraft(string(r[cur:]), 0)
+			return s, s.onSearchDraftChanged()
+		case "ctrl+k":
+			cur := s.SearchCursorPos()
+			r := []rune(s.SearchDraft)
+			s.setSearchDraft(string(r[:cur]), cur)
 			return s, s.onSearchDraftChanged()
 		case "ctrl+w", "alt+backspace":
-			s.SearchDraft = deleteLastWord(s.SearchDraft)
-			return s, s.onSearchDraftChanged()
-		case "backspace", "ctrl+h", "delete":
+			cur := s.SearchCursorPos()
 			r := []rune(s.SearchDraft)
-			if len(r) > 0 {
-				s.SearchDraft = string(r[:len(r)-1])
+			newPrefix := deleteLastWord(string(r[:cur]))
+			suffix := string(r[cur:])
+			s.setSearchDraft(newPrefix+suffix, len([]rune(newPrefix)))
+			return s, s.onSearchDraftChanged()
+		case "backspace", "ctrl+h":
+			cur := s.SearchCursorPos()
+			r := []rune(s.SearchDraft)
+			if cur > 0 {
+				next := make([]rune, 0, len(r)-1)
+				next = append(next, r[:cur-1]...)
+				next = append(next, r[cur:]...)
+				s.setSearchDraft(string(next), cur-1)
+			}
+			return s, s.onSearchDraftChanged()
+		case "delete", "ctrl+d":
+			cur := s.SearchCursorPos()
+			r := []rune(s.SearchDraft)
+			if cur < len(r) {
+				next := make([]rune, 0, len(r)-1)
+				next = append(next, r[:cur]...)
+				next = append(next, r[cur+1:]...)
+				s.setSearchDraft(string(next), cur)
+			} else if cur > 0 {
+				next := make([]rune, 0, len(r)-1)
+				next = append(next, r[:cur-1]...)
+				s.setSearchDraft(string(next), cur-1)
 			}
 			return s, s.onSearchDraftChanged()
 		case " ":
-			s.SearchDraft += " "
+			s.insertSearchText(" ")
 			return s, s.onSearchDraftChanged()
 		default:
 			if msg.Type == tea.KeySpace {
-				s.SearchDraft += " "
+				s.insertSearchText(" ")
 				return s, s.onSearchDraftChanged()
-			} else if msg.Type == tea.KeyRunes {
-				s.SearchDraft += sanitizeSearchRunes(msg.Runes)
+			} else if msg.Type == tea.KeyRunes && !msg.Alt {
+				ins := sanitizeSearchRunes(msg.Runes)
+				if ins == "" {
+					return s, nil
+				}
+				s.insertSearchText(ins)
 				return s, s.onSearchDraftChanged()
 			}
 			return s, nil
@@ -226,7 +287,7 @@ func (s *State) handleKey(msg tea.KeyMsg) (*State, tea.Cmd) {
 	case "u":
 		return s.OpenQueue()
 	case "/":
-		s.openSearchFocus()
+		s.openSearchFocus(s.View == ViewSearch)
 		return s, nil
 	case "tab":
 		if s.Width >= miniGuideMinW {
@@ -334,7 +395,7 @@ func (s *State) handleKey(msg tea.KeyMsg) (*State, tea.Cmd) {
 	case "q":
 		return s.EnqueueSelected()
 	case "d":
-		return s.DownloadSelected(false)
+		return s.DownloadSelected(s.DownloadAudio)
 	case "c":
 		return s.CycleQuality()
 	case "f", "F":
@@ -386,37 +447,39 @@ func (s *State) handleKey(msg tea.KeyMsg) (*State, tea.Cmd) {
 	return s, nil
 }
 
-func (s *State) openSearchFocus() {
-	s.Focus = FocusSearch
-	s.SearchDraft = ""
-	s.SuggestIdx = -1
-	s.loadSearchHistorySuggestions()
+func (s *State) insertSearchText(ins string) {
+	cur := s.SearchCursorPos()
+	r := []rune(s.SearchDraft)
+	insRunes := []rune(ins)
+	next := make([]rune, 0, len(r)+len(insRunes))
+	next = append(next, r[:cur]...)
+	next = append(next, insRunes...)
+	next = append(next, r[cur:]...)
+	s.setSearchDraft(string(next), cur+len(insRunes))
 }
 
-func (s *State) loadSearchHistorySuggestions() {
-	if s.Deps.SearchHistory == nil {
-		s.SearchSuggestions = nil
-		return
+func (s *State) openSearchFocus(prefill bool) {
+	s.Focus = FocusSearch
+	s.SearchSuggestions = nil
+	s.SuggestIdx = -1
+	if s.suggestCancel != nil {
+		s.suggestCancel()
 	}
-	hist, err := s.Deps.SearchHistory.List()
-	if err != nil || len(hist) == 0 {
-		s.SearchSuggestions = nil
-		return
+	if prefill && strings.TrimSpace(s.SearchQuery) != "" {
+		s.setSearchDraft(s.SearchQuery, len([]rune(s.SearchQuery)))
+	} else {
+		s.setSearchDraft("", 0)
 	}
-	if len(hist) > 6 {
-		hist = hist[:6]
-	}
-	s.SearchSuggestions = append([]string(nil), hist...)
 }
 
 func (s *State) onSearchDraftChanged() tea.Cmd {
+	s.SearchSuggestions = nil
 	s.SuggestIdx = -1
 	if s.suggestCancel != nil {
 		s.suggestCancel()
 	}
 	if strings.TrimSpace(s.SearchDraft) == "" {
 		s.suggestSeq++
-		s.loadSearchHistorySuggestions()
 		return nil
 	}
 	if s.Deps.SuggestProvider == nil {
@@ -491,7 +554,7 @@ func (s *State) SubmitSearch() (*State, tea.Cmd) {
 	}
 	if q == "" {
 		s.Focus = FocusMain
-		s.SearchDraft = ""
+		s.setSearchDraft("", 0)
 		return s, nil
 	}
 	if s.Deps.SearchHistory != nil {
@@ -504,7 +567,7 @@ func (s *State) SubmitSearch() (*State, tea.Cmd) {
 	seq := s.searchSeq
 
 	s.SearchQuery = q
-	s.SearchDraft = ""
+	s.setSearchDraft("", 0)
 	s.SearchResults = nil
 	s.View = ViewSearch
 	s.Focus = FocusMain

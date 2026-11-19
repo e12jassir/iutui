@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -512,4 +513,112 @@ esac
 			t.Fatalf("targets invoked = %v, want %v", gotTargets, wantTargets)
 		}
 	})
+}
+
+func TestCatalogLiveSettersConcurrencyAndBehavior(t *testing.T) {
+	tmp := t.TempDir()
+	argsLog := filepath.Join(tmp, "args.log")
+	countFile := filepath.Join(tmp, "count.txt")
+	jarPath := filepath.Join(tmp, "cookies.txt")
+	if err := os.WriteFile(jarPath, []byte(".youtube.com\tTRUE\t/\tTRUE\t0\tSID\tok\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	script := fmt.Sprintf(`
+printf '%%s\n' "$@" >> %s
+printf 'x' >> %s
+printf '{"id":"liveSet1111","title":"Live Result","channel":"Tester","duration":200}\n'
+`, shellQuote(argsLog), shellQuote(countFile))
+	bin := writeFakeYTDLP(t, tmp, script)
+
+	cat := NewYTDLPCatalog(filepath.Join(tmp, "cache"), 5*time.Minute, bin)
+	cat.SetFeedSize(25)
+	cat.SetSearchSize(15)
+	defer cat.Wait()
+
+	h := NewHybridCatalog(nil, cat)
+	h.SetDisableCookieAuthSubs(true)
+
+	// 1. First Search(15) populates searchCache; SetSearchSize(55) clears cache and uses ytsearch55.
+	ctx := context.Background()
+	if _, err := cat.Search(ctx, "golang"); err != nil {
+		t.Fatalf("Search 1 error: %v", err)
+	}
+	if _, err := cat.Search(ctx, "golang"); err != nil {
+		t.Fatalf("Search 2 (cached) error: %v", err)
+	}
+	rawCnt, _ := os.ReadFile(countFile)
+	if len(rawCnt) != 1 {
+		t.Fatalf("expected 1 yt-dlp invocation with cached search, got %d", len(rawCnt))
+	}
+
+	cat.SetSearchSize(55)
+	if _, err := cat.Search(ctx, "golang"); err != nil {
+		t.Fatalf("Search after SetSearchSize(55) error: %v", err)
+	}
+	rawCnt, _ = os.ReadFile(countFile)
+	if len(rawCnt) != 2 {
+		t.Fatalf("expected SetSearchSize to invalidate search cache and invoke yt-dlp again, got %d calls", len(rawCnt))
+	}
+
+	// 2. SetCacheTTL(0) disables search caching.
+	cat.SetCacheTTL(0)
+	if _, err := cat.Search(ctx, "zero"); err != nil {
+		t.Fatalf("Search zero 1 error: %v", err)
+	}
+	if _, err := cat.Search(ctx, "zero"); err != nil {
+		t.Fatalf("Search zero 2 error: %v", err)
+	}
+	rawCnt, _ = os.ReadFile(countFile)
+	if len(rawCnt) != 4 {
+		t.Fatalf("expected CacheTTL=0 to bypass searchCache on repeat, got %d total calls", len(rawCnt))
+	}
+
+	// 3. Feed respects SetFeedSize, SetQuality, and SetCookieJar live.
+	cat.SetFeedSize(77)
+	cat.SetQuality(480)
+	cat.SetCookieJar(jarPath)
+	if _, err := cat.Feed(ctx, model.TabHome); err != nil {
+		t.Fatalf("Feed after live setters error: %v", err)
+	}
+	argsRaw, err := os.ReadFile(argsLog)
+	if err != nil {
+		t.Fatalf("read args log: %v", err)
+	}
+	argsStr := string(argsRaw)
+	for _, want := range []string{"ytsearch15:golang", "ytsearch55:golang", "--playlist-end\n77", BuildFormat(480), jarPath} {
+		if !strings.Contains(argsStr, want) {
+			t.Fatalf("expected %q in logged yt-dlp args:\n%s", want, argsStr)
+		}
+	}
+
+	// 4. Race test across concurrent setters and readers.
+	var wg sync.WaitGroup
+	for g := 0; g < 6; g++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for i := 0; i < 20; i++ {
+				cat.SetFeedSize(30 + (id+i)%5*10)
+				cat.SetSearchSize(20 + (id+i)%4*10)
+				cat.SetQuality([]int{0, 1080, 720, 480, 360}[(id+i)%5])
+				if i%2 == 0 {
+					cat.SetCacheTTL(time.Duration(i+1) * time.Minute)
+					cat.SetCookieJar(jarPath)
+					h.SetDisableCookieAuthSubs(false)
+				} else {
+					cat.SetCacheTTL(0)
+					cat.SetCookieJar("")
+					h.SetDisableCookieAuthSubs(true)
+				}
+				_ = cat.feedSize()
+				_ = cat.searchSize()
+				_, _ = cat.cacheTTLConfig()
+				_ = cat.cookieJarPath()
+				_ = cat.quality()
+				_ = h.disableCookieAuthSubs()
+			}
+		}(g)
+	}
+	wg.Wait()
 }

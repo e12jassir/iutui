@@ -55,6 +55,7 @@ func resetThumbTestState() {
 	asyncWG.Wait()
 
 	SetThumbCacheDir("")
+	SetThumbQuality("max")
 	SetThumbHTTPClient(nil)
 	SetThumbBaseURL("")
 	SetOnThumbReady(nil)
@@ -703,5 +704,81 @@ func TestKittyUploadTTYAvailabilityAndErrors(t *testing.T) {
 	}
 	if _, _, err := renderKittyPlaceholder("notty001", path, 0, 5); err == nil {
 		t.Fatal("expected error for invalid Kitty placeholder dimensions")
+	}
+}
+
+func TestSetThumbQualityAndClearThumbCache(t *testing.T) {
+	cacheDir := setupThumbTest(t)
+	jpg := makeTestJPEG(t, 64, 36, func(x, y int) color.RGBA {
+		return color.RGBA{R: 80, G: 160, B: 220, A: 255}
+	})
+	if len(jpg) < 3200 {
+		jpg = append(jpg, bytes.Repeat([]byte{0}, 3200-len(jpg))...)
+	}
+
+	// Write all three variants locally to verify lookup priority changes live with SetThumbQuality.
+	writeThumbFixture(t, cacheDir, "qvid001", "maxresdefault", jpg)
+	writeThumbFixture(t, cacheDir, "qvid001", "hqdefault", jpg)
+	writeThumbFixture(t, cacheDir, "qvid001", "mqdefault", jpg)
+
+	SetThumbQuality("max")
+	if got := GetThumbnailFile("qvid001"); !strings.HasSuffix(got, "qvid001_maxresdefault.jpg") {
+		t.Fatalf("quality=max got %q, want *_maxresdefault.jpg", got)
+	}
+	SetThumbQuality("hq")
+	if got := GetThumbnailFile("qvid001"); !strings.HasSuffix(got, "qvid001_hqdefault.jpg") {
+		t.Fatalf("quality=hq got %q, want *_hqdefault.jpg", got)
+	}
+	SetThumbQuality("mq")
+	if got := GetThumbnailFile("qvid001"); !strings.HasSuffix(got, "qvid001_mqdefault.jpg") {
+		t.Fatalf("quality=mq got %q, want *_mqdefault.jpg", got)
+	}
+	SetThumbQuality("invalid")
+	if got := GetThumbnailFile("qvid001"); !strings.HasSuffix(got, "qvid001_maxresdefault.jpg") {
+		t.Fatalf("invalid quality should fall back to max, got %q", got)
+	}
+
+	// Verify ClearThumbCache evicts video entries from thumbCacheLRU & kittyLRU while keeping pinned brandImgID.
+	ttyBuf := &safeTTYBuffer{}
+	setTTYWriter(ttyBuf)
+	t.Setenv("KITTY_WINDOW_ID", "1")
+	t.Setenv("TERM", "xterm-kitty")
+
+	if brand := RenderBrandLogo(10, 3); !strings.ContainsRune(brand, 0x10EEEE) {
+		t.Fatalf("expected pinned brand logo placeholder, got %q", brand)
+	}
+	pngThumb := makeTestPNG(t, 32, 18, func(x, y int) color.RGBA {
+		return color.RGBA{R: 120, G: 90, B: 200, A: 255}
+	})
+	vidPath := writeThumbFixture(t, cacheDir, "qvid002", "maxresdefault", pngThumb)
+	vidImgID := videoImageID("qvid002", 8, 4)
+	if _, gotID, err := renderKittyPlaceholder("qvid002", vidPath, 8, 4); err != nil || gotID != vidImgID {
+		t.Fatalf("renderKittyPlaceholder = (%d, %v), want %d", gotID, err, vidImgID)
+	}
+	thumbCacheLRU.put("qvid002_8x4_k=true", thumbCacheValue{ansi: "cached", kittyImgID: vidImgID}, false)
+
+	ttyBuf.Reset()
+	ClearThumbCache()
+
+	if _, ok := thumbCacheLRU.get("qvid002_8x4_k=true"); ok {
+		t.Fatal("expected ClearThumbCache to evict video entry from thumbCacheLRU")
+	}
+	if _, ok := thumbCacheLRU.get("__brand_logo_10x3"); !ok {
+		t.Fatal("expected ClearThumbCache to keep pinned brand logo in thumbCacheLRU")
+	}
+	if kittyLRU.touch(vidImgID) {
+		t.Fatal("expected ClearThumbCache to evict unpinned video image from kittyLRU")
+	}
+	if !kittyLRU.touch(brandImgID) {
+		t.Fatal("expected ClearThumbCache to keep pinned brandImgID in kittyLRU")
+	}
+	delVid := fmt.Sprintf("\x1b_Ga=d,d=i,i=%d,q=2\x1b\\", vidImgID)
+	delBrand := fmt.Sprintf("\x1b_Ga=d,d=i,i=%d,q=2\x1b\\", brandImgID)
+	out := ttyBuf.String()
+	if !strings.Contains(out, delVid) {
+		t.Fatalf("expected Kitty delete sequence %q for video image, got %q", delVid, out)
+	}
+	if strings.Contains(out, delBrand) {
+		t.Fatalf("ClearThumbCache must not delete pinned brandImgID (%q)", delBrand)
 	}
 }

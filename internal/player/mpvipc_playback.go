@@ -305,7 +305,10 @@ func (c *IPCClient) playOnSingleMPV(ctx, waitCtx context.Context, seq uint64, v 
 		opts.AllowPlaylist = plan.launchAllowPlaylist
 		opts.AudioOnly = plan.effectiveMode == "audio"
 		opts.Title = v.Title
-		opts.Mode = plan.effectiveMode
+		if plan.effectiveMode != "" && plan.effectiveMode != "auto" &&
+			!(plan.effectiveMode == "video" && (opts.Mode == "pip" || opts.Mode == "fs")) {
+			opts.Mode = plan.effectiveMode
+		}
 		opts.StartPos = startPos
 		opts.StartPaused = startPaused
 		opts.IsLive = v.IsLive
@@ -329,7 +332,8 @@ func (c *IPCClient) playOnSingleMPV(ctx, waitCtx context.Context, seq uint64, v 
 	opts.IsLive = v.IsLive
 	opts.StartPos = startPos
 	opts.StartPaused = startPaused
-	if plan.effectiveMode != "" && plan.effectiveMode != "auto" {
+	if plan.effectiveMode != "" && plan.effectiveMode != "auto" &&
+		!(plan.effectiveMode == "video" && (opts.Mode == "pip" || opts.Mode == "fs")) {
 		opts.Mode = plan.effectiveMode
 	}
 	switch plan.effectiveMode {

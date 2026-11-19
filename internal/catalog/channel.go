@@ -88,7 +88,7 @@ func (c *YTDLPCatalog) ChannelVideos(ctx context.Context, v model.Video, limit i
 	cookies := ""
 	if c != nil {
 		bin = c.BinPath
-		cookies = c.CookieJarPath
+		cookies = c.cookieJarPath()
 	}
 	channelID, channelName := videoChannelRef(v)
 	return FetchChannelVideos(ctx, bin, cookies, channelID, channelName, limit)

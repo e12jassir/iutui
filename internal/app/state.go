@@ -2,6 +2,10 @@ package app
 
 import (
 	"context"
+	"fmt"
+	"math"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -100,6 +104,13 @@ type Dependencies struct {
 	InitialCookies       string
 	InitialTheme         string
 	InitialSponsorBlock  *bool
+	InitialThumbQuality  string
+	InitialAutoplay      *bool
+	InitialSpeed         float64
+	InitialFeedSize      int
+	InitialSearchSize    int
+	InitialCacheTTL      *int
+	InitialDownloadAudio *bool
 	AppVersion           string
 	OnQualityChange      func(int) error
 	OnAudioOnlyChange    func(bool) error
@@ -119,17 +130,19 @@ type State struct {
 	HomeChip   int
 	SearchChip int
 
-	Feeds          map[model.Tab][]model.Video
-	SearchResults  []model.Video
-	SearchQuery    string
-	SearchDraft    string
-	SearchPending  bool
-	ChannelTitle   string
-	ChannelVideos  []model.Video
-	ChannelIdx     int
-	ChannelScroll  int
-	ChannelPending bool
-	Syncing        bool
+	Feeds              map[model.Tab][]model.Video
+	SearchResults      []model.Video
+	SearchQuery        string
+	SearchDraft        string
+	SearchCursor       int
+	searchCursorSynced string
+	SearchPending      bool
+	ChannelTitle       string
+	ChannelVideos      []model.Video
+	ChannelIdx         int
+	ChannelScroll      int
+	ChannelPending     bool
+	Syncing            bool
 
 	SelectedIdx  int
 	ScrollOffset int
@@ -171,21 +184,26 @@ type State struct {
 	SuggestIdx        int
 	DownloadProgress  map[string]download.Item
 
-	Autoplay     bool
-	SponsorBlock bool
-	AudioOnly    bool
-	DefaultMode  string
-	AudioVolume  int
-	PreviewMode  string
-	HideShorts   bool
-	Interleave   bool
-	CookiesMode  string
-	ThemeName    string
-	Quality      int
-	AppVersion   string
-	Width        int
-	Height       int
-	Ready        bool
+	Autoplay      bool
+	SponsorBlock  bool
+	AudioOnly     bool
+	DefaultMode   string
+	AudioVolume   int
+	PreviewMode   string
+	ThumbQuality  string
+	HideShorts    bool
+	Interleave    bool
+	FeedSize      int
+	SearchSize    int
+	CacheTTL      int
+	DownloadAudio bool
+	CookiesMode   string
+	ThemeName     string
+	Quality       int
+	AppVersion    string
+	Width         int
+	Height        int
+	Ready         bool
 
 	LiveLoading   map[model.Tab]bool
 	metaRequested map[string]bool
@@ -209,6 +227,7 @@ type State struct {
 	lyricsCancel  context.CancelFunc
 	lyricsSeq     uint64
 	statusCh      <-chan player.Status
+	escapeGuard   EscapeGuard
 	appCtx        context.Context
 	appCancel     context.CancelFunc
 }
@@ -252,20 +271,50 @@ func NewState(deps Dependencies) *State {
 	if cookiesMode == "" {
 		cookiesMode = "auto"
 	}
+	thumbQuality := normalizeThumbQuality(deps.InitialThumbQuality)
+	autoplay := true
+	if deps.InitialAutoplay != nil {
+		autoplay = *deps.InitialAutoplay
+	}
+	speed := 1.0
+	if deps.InitialSpeed > 0 {
+		speed = clampSpeed(deps.InitialSpeed)
+	}
+	feedSize := 100
+	if deps.InitialFeedSize > 0 {
+		feedSize = deps.InitialFeedSize
+	}
+	searchSize := 40
+	if deps.InitialSearchSize > 0 {
+		searchSize = deps.InitialSearchSize
+	}
+	cacheTTL := 900
+	if deps.InitialCacheTTL != nil && *deps.InitialCacheTTL >= 0 {
+		cacheTTL = *deps.InitialCacheTTL
+	}
+	downloadAudio := false
+	if deps.InitialDownloadAudio != nil {
+		downloadAudio = *deps.InitialDownloadAudio
+	}
 	return &State{
 		Deps:              deps,
 		View:              ViewHome,
 		PrevView:          ViewHome,
 		ActiveTab:         model.TabHome,
 		Focus:             FocusMain,
-		Autoplay:          true,
+		Autoplay:          autoplay,
 		SponsorBlock:      sponsorBlock,
 		AudioOnly:         deps.InitialAudioOnly || defMode == "audio",
 		DefaultMode:       defMode,
 		AudioVolume:       vol,
 		PreviewMode:       preview,
+		ThumbQuality:      thumbQuality,
 		HideShorts:        hideShorts,
 		Interleave:        interleave,
+		FeedSize:          feedSize,
+		SearchSize:        searchSize,
+		CacheTTL:          cacheTTL,
+		DownloadAudio:     downloadAudio,
 		CookiesMode:       cookiesMode,
 		ThemeName:         themeName,
 		Quality:           deps.InitialQuality,
@@ -278,11 +327,60 @@ func NewState(deps Dependencies) *State {
 		DownloadProgress:  make(map[string]download.Item),
 		SuggestIdx:        -1,
 		metaRequested:     make(map[string]bool),
-		PlayerStatus:      player.Status{Speed: 1.0},
+		PlayerStatus:      player.Status{Speed: speed},
 		LastInteractionAt: time.Now(),
 		appCtx:            ctx,
 		appCancel:         cancel,
 	}
+}
+
+func normalizeThumbQuality(v string) string {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "hq":
+		return "hq"
+	case "mq":
+		return "mq"
+	default:
+		return "max"
+	}
+}
+
+func clampSpeed(target float64) float64 {
+	if target < 0.5 {
+		target = 0.5
+	}
+	if target > 2.0 {
+		target = 2.0
+	}
+	return math.Round(target*100) / 100
+}
+
+// SearchCursorPos returns the current rune cursor position within SearchDraft,
+// snapping to the end if SearchDraft was modified externally without setSearchDraft.
+func (s *State) SearchCursorPos() int {
+	runes := []rune(s.SearchDraft)
+	if s.searchCursorSynced != s.SearchDraft {
+		s.SearchCursor = len(runes)
+		s.searchCursorSynced = s.SearchDraft
+	}
+	if s.SearchCursor < 0 {
+		s.SearchCursor = 0
+	} else if s.SearchCursor > len(runes) {
+		s.SearchCursor = len(runes)
+	}
+	return s.SearchCursor
+}
+
+func (s *State) setSearchDraft(draft string, cursor int) {
+	n := len([]rune(draft))
+	if cursor < 0 {
+		cursor = 0
+	} else if cursor > n {
+		cursor = n
+	}
+	s.SearchDraft = draft
+	s.SearchCursor = cursor
+	s.searchCursorSynced = draft
 }
 
 // HasPlayerBar reports whether the bottom player bar should be visible.
@@ -331,7 +429,9 @@ func (s *State) saveCurrentResumePosition() {
 	_ = s.Deps.ResumeStore.SavePosition(s.CurrentPlaying.ID, s.PlayerStatus.TimePos, s.PlayerStatus.Duration)
 }
 
-// VisibleItems returns the current list of videos filtered by the active chip.
+var shortsTagRe = regexp.MustCompile(`(?i)(?:^|[^a-z0-9_])#shorts?(?:[^a-z0-9_]|$)`)
+
+// VisibleItems returns the current list of videos filtered by active catalog filters and chips.
 func (s *State) VisibleItems() []model.Video {
 	if s.View == ViewSearch {
 		return filterByChip(s.SearchResults, SearchChips, s.SearchChip, s)
@@ -339,11 +439,111 @@ func (s *State) VisibleItems() []model.Video {
 	if s.View == ViewChannel {
 		return s.ChannelVideos
 	}
-	raw := s.Feeds[s.ActiveTab]
-	if s.ActiveTab == model.TabHome || s.ActiveTab == model.TabMusic {
-		return filterByChip(raw, HomeChips, s.HomeChip, s)
+	items := s.Feeds[s.ActiveTab]
+	if s.ActiveTab == model.TabHome || s.ActiveTab == model.TabMusic || s.ActiveTab == model.TabSubscriptions {
+		if s.HideShorts {
+			filtered := make([]model.Video, 0, len(items))
+			for _, v := range items {
+				if !isShortVideo(v) {
+					filtered = append(filtered, v)
+				}
+			}
+			items = filtered
+		}
+		if s.Interleave {
+			items = interleaveByChannel(items)
+		}
 	}
-	return raw
+	if s.ActiveTab == model.TabHome || s.ActiveTab == model.TabMusic {
+		return filterByChip(items, HomeChips, s.HomeChip, s)
+	}
+	return items
+}
+
+func isShortVideo(v model.Video) bool {
+	if v.IsLive || model.IsPlaylistID(v.ID) {
+		return false
+	}
+	if titleHasShortsTag(v.Title) {
+		return true
+	}
+	sec := parseDurationSeconds(v.Duration)
+	return sec > 0 && sec <= 60
+}
+
+func titleHasShortsTag(title string) bool {
+	if title == "" {
+		return false
+	}
+	return shortsTagRe.MatchString(title)
+}
+
+func parseDurationSeconds(dur string) int {
+	s := strings.TrimSpace(dur)
+	if s == "" {
+		return 0
+	}
+	parts := strings.Split(s, ":")
+	switch len(parts) {
+	case 2:
+		m, err1 := strconv.Atoi(parts[0])
+		sec, err2 := strconv.Atoi(parts[1])
+		if err1 != nil || err2 != nil || m < 0 || sec < 0 || sec >= 60 {
+			return 0
+		}
+		return m*60 + sec
+	case 3:
+		h, err1 := strconv.Atoi(parts[0])
+		m, err2 := strconv.Atoi(parts[1])
+		sec, err3 := strconv.Atoi(parts[2])
+		if err1 != nil || err2 != nil || err3 != nil || h < 0 || m < 0 || m >= 60 || sec < 0 || sec >= 60 {
+			return 0
+		}
+		return h*3600 + m*60 + sec
+	default:
+		return 0
+	}
+}
+
+func interleaveByChannel(items []model.Video) []model.Video {
+	if len(items) <= 2 {
+		return items
+	}
+	type bucket struct {
+		items []model.Video
+	}
+	byKey := make(map[string]int, len(items))
+	buckets := make([]bucket, 0, len(items))
+	for i, v := range items {
+		key := strings.ToLower(strings.TrimSpace(v.Channel))
+		if key == "" {
+			key = fmt.Sprintf("\x00%d", i)
+		}
+		idx, ok := byKey[key]
+		if !ok {
+			idx = len(buckets)
+			byKey[key] = idx
+			buckets = append(buckets, bucket{})
+		}
+		buckets[idx].items = append(buckets[idx].items, v)
+	}
+	if len(buckets) == len(items) {
+		return items
+	}
+	out := make([]model.Video, 0, len(items))
+	for round := 0; len(out) < len(items); round++ {
+		progressed := false
+		for i := range buckets {
+			if round < len(buckets[i].items) {
+				out = append(out, buckets[i].items[round])
+				progressed = true
+			}
+		}
+		if !progressed {
+			break
+		}
+	}
+	return out
 }
 
 func filterByChip(items []model.Video, chips []Chip, idx int, s *State) []model.Video {

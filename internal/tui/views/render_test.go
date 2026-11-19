@@ -599,10 +599,13 @@ func TestRenderPhase2Features(t *testing.T) {
 		}
 
 		s.SearchDraft = ""
-		outHist := Render(s, th, tr)
-		assertBounds(t, outHist, 140, 42)
-		if !strings.Contains(outHist, "Búsquedas recientes") {
-			t.Fatalf("expected 'Búsquedas recientes' when SearchDraft empty, got:\n%s", outHist)
+		outEmpty := Render(s, th, tr)
+		assertBounds(t, outEmpty, 140, 42)
+		if strings.Contains(outEmpty, "Búsquedas recientes") {
+			t.Fatalf("did not expect 'Búsquedas recientes' when SearchDraft empty, got:\n%s", outEmpty)
+		}
+		if strings.Contains(outEmpty, "pink floyd live") {
+			t.Fatalf("did not expect suggestions strip when SearchDraft empty, got:\n%s", outEmpty)
 		}
 	})
 
@@ -671,6 +674,185 @@ func TestRenderPhase2Features(t *testing.T) {
 		for _, want := range []string{"Ver Cola", "Velocidad", "Repetir pista", "Me gusta"} {
 			if !strings.Contains(out, want) {
 				t.Fatalf("expected %q in help overlay, got:\n%s", want, out)
+			}
+		}
+	})
+}
+
+func TestRenderSearchCursorAndWindowing(t *testing.T) {
+	th := theme.DefaultTheme()
+	tr := thumbs.NewTextRenderer()
+	pal := resolveRenderPalette("youtube-dark")
+
+	t.Run("empty_draft_placeholder_and_query_hint", func(t *testing.T) {
+		s := newTestState(app.ViewHome, 120, 36)
+		defer s.Close()
+		s.Focus = app.FocusSearch
+		s.SearchQuery = ""
+		s.SearchDraft = ""
+
+		outPlaceholder := Render(s, th, tr)
+		assertBounds(t, outPlaceholder, 120, 36)
+		if !strings.Contains(outPlaceholder, "Buscar en YouTube...") || !strings.Contains(outPlaceholder, "█") {
+			t.Fatalf("expected empty search placeholder and cursor, got:\n%s", outPlaceholder)
+		}
+
+		s.SearchQuery = "soda stereo"
+		outHint := Render(s, th, tr)
+		assertBounds(t, outHint, 120, 36)
+		if !strings.Contains(outHint, "█") || !strings.Contains(outHint, "soda stereo") {
+			t.Fatalf("expected cursor + dimmed query hint, got:\n%s", outHint)
+		}
+	})
+
+	t.Run("cursor_end_start_and_middle_highlight", func(t *testing.T) {
+		prevProfile := lipgloss.ColorProfile()
+		lipgloss.SetColorProfile(0)
+		defer lipgloss.SetColorProfile(prevProfile)
+
+		lineEnd := renderSearchInputLine("pink floyd", 10, 40, pal)
+		if !strings.Contains(lineEnd, "pink floyd█") {
+			t.Fatalf("expected block cursor at end, got %q", lineEnd)
+		}
+
+		lineStart := renderSearchInputLine("pink floyd", 0, 40, pal)
+		if strings.Contains(lineStart, "█") {
+			t.Fatalf("did not expect trailing block cursor when cursor=0, got %q", lineStart)
+		}
+		if (!strings.Contains(lineStart, ";7;") && !strings.Contains(lineStart, "[7;")) || !strings.Contains(lineStart, "mp\x1b[0m") {
+			t.Fatalf("expected reverse-video highlight on first rune 'p' when cursor=0, got %q", lineStart)
+		}
+
+		lineMid := renderSearchInputLine("pink floyd", 4, 40, pal)
+		if strings.Contains(lineMid, "█") {
+			t.Fatalf("did not expect trailing block cursor when cursor=4, got %q", lineMid)
+		}
+		if (!strings.Contains(lineMid, ";7;") && !strings.Contains(lineMid, "[7;")) || !strings.Contains(lineMid, "m \x1b[0m") {
+			t.Fatalf("expected reverse-video highlight on space at index 4, got %q", lineMid)
+		}
+	})
+
+	t.Run("long_draft_horizontal_windowing", func(t *testing.T) {
+		longDraft := "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+		avail := 24
+
+		lineStart := renderSearchInputLine(longDraft, 2, avail, pal)
+		if w := lipgloss.Width(lineStart); w > avail {
+			t.Fatalf("start window width %d > %d", w, avail)
+		}
+		if !strings.Contains(lineStart, "012") || !strings.Contains(lineStart, "…") {
+			t.Fatalf("expected prefix window with trailing ellipsis, got %q", lineStart)
+		}
+
+		lineMid := renderSearchInputLine(longDraft, 30, avail, pal)
+		if w := lipgloss.Width(lineMid); w > avail {
+			t.Fatalf("mid window width %d > %d", w, avail)
+		}
+		if !strings.Contains(lineMid, string(longDraft[30])) || strings.Count(lineMid, "…") != 2 {
+			t.Fatalf("expected mid window around rune %q with both ellipses, got %q", string(longDraft[30]), lineMid)
+		}
+
+		lineEnd := renderSearchInputLine(longDraft, len([]rune(longDraft)), avail, pal)
+		if w := lipgloss.Width(lineEnd); w > avail {
+			t.Fatalf("end window width %d > %d", w, avail)
+		}
+		if !strings.Contains(lineEnd, "…") || !strings.Contains(lineEnd, "XYZ█") {
+			t.Fatalf("expected tail window with leading ellipsis and block cursor, got %q", lineEnd)
+		}
+
+		s := newTestState(app.ViewHome, 80, 24)
+		defer s.Close()
+		s.Focus = app.FocusSearch
+		s.SearchDraft = "pink floyd"
+		s.SearchCursor = 4
+		out := Render(s, th, tr)
+		assertBounds(t, out, 80, 24)
+	})
+}
+
+func TestRenderSettingsStudioOverlay(t *testing.T) {
+	th := theme.DefaultTheme()
+	tr := thumbs.NewTextRenderer()
+
+	for _, sz := range [][2]int{{80, 24}, {120, 36}, {156, 45}} {
+		s := newTestState(app.ViewHome, sz[0], sz[1])
+		s.ShowSettings = true
+		out := Render(s, th, tr)
+		s.Close()
+		assertBounds(t, out, sz[0], sz[1])
+		for _, want := range []string{"Configuración", "◆", "1/16", "ⓘ", "[?] Atajos"} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("%dx%d: expected %q in settings studio overlay, got:\n%s", sz[0], sz[1], want, out)
+			}
+		}
+	}
+
+	t.Run("scrolled_to_cookies_shows_desc_and_indicator", func(t *testing.T) {
+		for _, sz := range [][2]int{{80, 24}, {120, 36}} {
+			s := newTestState(app.ViewHome, sz[0], sz[1])
+			s.ShowSettings = true
+			s.SettingsIdx = app.SettingIdxCookies
+			out := Render(s, th, tr)
+			s.Close()
+			assertBounds(t, out, sz[0], sz[1])
+			for _, want := range []string{"Cookies navegador", "16/16", "Usa cookies de Zen/Firefox"} {
+				if !strings.Contains(out, want) {
+					t.Fatalf("%dx%d: expected %q in scrolled settings overlay, got:\n%s", sz[0], sz[1], want, out)
+				}
+			}
+			if sz[1] == 24 && !strings.Contains(out, "↑") {
+				t.Fatalf("80x24: expected scroll-up indicator ↑ when scrolled to bottom, got:\n%s", out)
+			}
+		}
+	})
+}
+
+func TestRenderHelpStudioOverlay(t *testing.T) {
+	th := theme.DefaultTheme()
+	tr := thumbs.NewTextRenderer()
+
+	t.Run("wide_two_column_mode", func(t *testing.T) {
+		s := newTestState(app.ViewHome, 120, 36)
+		defer s.Close()
+		s.AppVersion = "0.4.6"
+		s.ShowHelp = true
+		out := Render(s, th, tr)
+		assertBounds(t, out, 120, 36)
+		for _, want := range []string{
+			"Atajos de teclado",
+			"v0.4.6",
+			"│",
+			"[S] Configuración",
+			"NAVEGACIÓN & VISTAS",
+			"BIBLIOTECA & COLA",
+			"REPRODUCCIÓN (MPV)",
+			"SISTEMA & AJUSTES",
+			"Activar/desactivar Autoplay",
+			"SponsorBlock · Cambiar tema",
+			"Ver Cola",
+			"Velocidad",
+			"Repetir pista",
+			"Me gusta",
+		} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("expected %q in 2-column help overlay, got:\n%s", want, out)
+			}
+		}
+		helpOnly := renderHelpOverlay(s, 120, 36, th, resolveRenderPalette(s.ThemeName))
+		if strings.Contains(helpOnly, "…") {
+			t.Fatalf("expected zero ellipsis truncation in wide 120x36 help overlay, got:\n%s", helpOnly)
+		}
+	})
+
+	t.Run("compact_single_column_80x24", func(t *testing.T) {
+		s := newTestState(app.ViewHome, 80, 24)
+		defer s.Close()
+		s.ShowHelp = true
+		out := Render(s, th, tr)
+		assertBounds(t, out, 80, 24)
+		for _, want := range []string{"Atajos de teclado", "[S] Configuración", "NAVEGACIÓN & VISTAS"} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("expected %q in compact help overlay, got:\n%s", want, out)
 			}
 		}
 	})

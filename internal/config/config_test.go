@@ -22,7 +22,7 @@ func TestDefault(t *testing.T) {
 	if cfg.FeedSize != 100 || cfg.SearchSize != 40 || cfg.CacheTTL != 900 || cfg.CookieTTL != 21600 {
 		t.Fatalf("unexpected numeric defaults: %+v", cfg)
 	}
-	if cfg.AudioVolume != 75 || cfg.Quality != 720 || cfg.Prefetch != 24 {
+	if cfg.AudioVolume != 75 || cfg.Quality != 720 || cfg.Prefetch != 24 || cfg.Speed != 1.0 {
 		t.Fatalf("unexpected media numeric defaults: %+v", cfg)
 	}
 	if cfg.MusicMode != "bg" || cfg.DefaultMode != "window" || cfg.Playback != "auto" {
@@ -31,7 +31,7 @@ func TestDefault(t *testing.T) {
 	if cfg.Home != "auto" || cfg.Lang != "auto" || cfg.Preview != "auto" || cfg.ThumbQuality != "max" {
 		t.Fatalf("unexpected display defaults: %+v", cfg)
 	}
-	if !cfg.HideShorts || !cfg.Interleave || !cfg.Notify || !cfg.SponsorBlock || cfg.DownloadAudio {
+	if !cfg.Autoplay || !cfg.HideShorts || !cfg.Interleave || !cfg.Notify || !cfg.SponsorBlock || cfg.DownloadAudio {
 		t.Fatalf("unexpected bool defaults: %+v", cfg)
 	}
 	if cfg.Theme != "youtube-dark" {
@@ -423,6 +423,60 @@ func TestLoadThemeAndSponsorBlock(t *testing.T) {
 			}
 			if cfg.SponsorBlock != tc.wantSponsorBlock {
 				t.Errorf("SponsorBlock = %v, want %v", cfg.SponsorBlock, tc.wantSponsorBlock)
+			}
+		})
+	}
+}
+
+func TestLoadAutoplayAndSpeed(t *testing.T) {
+	tests := []struct {
+		name         string
+		content      string
+		wantAutoplay bool
+		wantSpeed    float64
+	}{
+		{
+			name:         "valid disabled autoplay and custom speed",
+			content:      "YT_AUTOPLAY=0\nYT_SPEED=1.5\n",
+			wantAutoplay: false,
+			wantSpeed:    1.5,
+		},
+		{
+			name:         "boundary speeds 0.5 and 2.0",
+			content:      "YT_AUTOPLAY=1\nYT_SPEED=0.5\n",
+			wantAutoplay: true,
+			wantSpeed:    0.5,
+		},
+		{
+			name:         "out-of-range speed falls back to 1.0",
+			content:      "YT_AUTOPLAY=invalid\nYT_SPEED=3.25\n",
+			wantAutoplay: true,
+			wantSpeed:    1.0,
+		},
+		{
+			name:         "below-range or non-numeric speed falls back to 1.0",
+			content:      "YT_SPEED=fast\n",
+			wantAutoplay: true,
+			wantSpeed:    1.0,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			clearYTEnv(t)
+			path := filepath.Join(t.TempDir(), "config")
+			if err := os.WriteFile(path, []byte(tc.content), 0o600); err != nil {
+				t.Fatalf("WriteFile() error = %v", err)
+			}
+			cfg, err := Load(path)
+			if err != nil {
+				t.Fatalf("Load() error = %v", err)
+			}
+			if cfg.Autoplay != tc.wantAutoplay {
+				t.Errorf("Autoplay = %v, want %v", cfg.Autoplay, tc.wantAutoplay)
+			}
+			if cfg.Speed != tc.wantSpeed {
+				t.Errorf("Speed = %v, want %v", cfg.Speed, tc.wantSpeed)
 			}
 		})
 	}

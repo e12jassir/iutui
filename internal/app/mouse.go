@@ -239,7 +239,7 @@ func (s *State) handleLeftClick(x, y int) (*State, tea.Cmd) {
 		actionsW := 15
 		searchPanelW := max(24, (s.Width-sideW)-actionsW)
 		if x < sideW+searchPanelW {
-			btnStart, btnEnd, _ := s.headerSearchBounds()
+			btnStart, btnEnd, barStart := s.headerSearchBounds()
 			// [r] reload button on far right inside search panel
 			if x >= btnStart && x <= btnEnd {
 				s.Focus = FocusMain
@@ -252,8 +252,10 @@ func (s *State) handleLeftClick(x, y int) (*State, tea.Cmd) {
 				return s, tea.Batch(s.loadFeedCmd(s.ActiveTab, true), s.ensureAnimTick())
 			}
 			if s.Focus != FocusSearch {
-				s.openSearchFocus()
+				s.openSearchFocus(strings.TrimSpace(s.SearchQuery) != "")
+				return s, nil
 			}
+			s.setSearchCursorFromX(x, barStart, btnStart)
 			return s, nil
 		}
 
@@ -275,7 +277,8 @@ func (s *State) handleLeftClick(x, y int) (*State, tea.Cmd) {
 	if s.Focus == FocusSearch && len(s.SearchSuggestions) > 0 {
 		if idx, inside := s.suggestionRowAt(x, y); inside {
 			if idx >= 0 && idx < len(s.SearchSuggestions) {
-				s.SearchDraft = s.SearchSuggestions[idx]
+				sug := s.SearchSuggestions[idx]
+				s.setSearchDraft(sug, len([]rune(sug)))
 				return s.SubmitSearch()
 			}
 			return s, nil
@@ -364,7 +367,8 @@ func (s *State) handleLeftClick(x, y int) (*State, tea.Cmd) {
 			}
 			subIdx := y - 17
 			if subIdx >= 0 && subIdx < len(s.Subscriptions) && subIdx < 4 {
-				s.SearchDraft = s.Subscriptions[subIdx]
+				sub := s.Subscriptions[subIdx]
+				s.setSearchDraft(sub, len([]rune(sub)))
 				return s.SubmitSearch()
 			}
 			s.Focus = FocusSidebar
@@ -631,6 +635,48 @@ func (s *State) topBrandWidth() int {
 	default:
 		return 0
 	}
+}
+
+func (s *State) setSearchCursorFromX(x, barStart, btnStart int) {
+	runes := []rune(s.SearchDraft)
+	if len(runes) == 0 {
+		s.setSearchDraft(s.SearchDraft, 0)
+		return
+	}
+	relX := x - (barStart + 1)
+	if relX <= 0 {
+		s.setSearchDraft(s.SearchDraft, 0)
+		return
+	}
+	textAvail := max(4, btnStart-barStart-2)
+	totalW := runewidth.StringWidth(s.SearchDraft)
+	targetCol := relX
+	if totalW <= textAvail {
+		if relX >= totalW {
+			s.setSearchDraft(s.SearchDraft, len(runes))
+			return
+		}
+	} else {
+		targetCol = max(0, totalW-textAvail) + relX
+		if targetCol >= totalW {
+			s.setSearchDraft(s.SearchDraft, len(runes))
+			return
+		}
+	}
+	col := 0
+	cur := len(runes)
+	for i, r := range runes {
+		w := runewidth.RuneWidth(r)
+		if w <= 0 {
+			w = 1
+		}
+		if targetCol <= col || targetCol < col+w {
+			cur = i
+			break
+		}
+		col += w
+	}
+	s.setSearchDraft(s.SearchDraft, cur)
 }
 
 func (s *State) headerSearchBounds() (btnStart, btnEnd, barStart int) {

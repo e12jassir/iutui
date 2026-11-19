@@ -125,8 +125,133 @@ type YTDLPCatalog struct {
 	searchCache    map[string]searchCacheEntry
 	feedMu         sync.Mutex
 	feedGeneration map[model.Tab]uint64
+	cfgMu          sync.RWMutex
+	cacheDisabled  bool
 
 	wg sync.WaitGroup
+}
+
+// SetFeedSize updates the playlist item limit used for HTTP feed fetches.
+func (c *YTDLPCatalog) SetFeedSize(n int) {
+	if c == nil || n <= 0 {
+		return
+	}
+	c.cfgMu.Lock()
+	c.FeedSize = n
+	c.cfgMu.Unlock()
+}
+
+func (c *YTDLPCatalog) feedSize() int {
+	if c == nil {
+		return 30
+	}
+	c.cfgMu.RLock()
+	n := c.FeedSize
+	c.cfgMu.RUnlock()
+	if n <= 0 {
+		return 30
+	}
+	return n
+}
+
+// SetSearchSize updates the result limit for ytsearch queries and clears cached search results.
+func (c *YTDLPCatalog) SetSearchSize(n int) {
+	if c == nil || n <= 0 {
+		return
+	}
+	c.cfgMu.Lock()
+	c.SearchSize = n
+	c.cfgMu.Unlock()
+
+	c.searchMu.Lock()
+	c.searchCache = nil
+	c.searchMu.Unlock()
+}
+
+func (c *YTDLPCatalog) searchSize() int {
+	if c == nil {
+		return 20
+	}
+	c.cfgMu.RLock()
+	n := c.SearchSize
+	c.cfgMu.RUnlock()
+	if n <= 0 {
+		return 20
+	}
+	return n
+}
+
+// SetCacheTTL updates feed and search cache lifetime. Passing d <= 0 disables caching live.
+func (c *YTDLPCatalog) SetCacheTTL(d time.Duration) {
+	if c == nil {
+		return
+	}
+	c.cfgMu.Lock()
+	if d <= 0 {
+		c.CacheTTL = 0
+		c.cacheDisabled = true
+	} else {
+		c.CacheTTL = d
+		c.cacheDisabled = false
+	}
+	c.cfgMu.Unlock()
+
+	if d <= 0 {
+		c.searchMu.Lock()
+		c.searchCache = nil
+		c.searchMu.Unlock()
+	}
+}
+
+func (c *YTDLPCatalog) cacheTTLConfig() (time.Duration, bool) {
+	if c == nil {
+		return 0, true
+	}
+	c.cfgMu.RLock()
+	ttl := c.CacheTTL
+	disabled := c.cacheDisabled
+	c.cfgMu.RUnlock()
+	return ttl, disabled
+}
+
+// SetCookieJar updates the cookie jar path used for authenticated feed and channel requests.
+func (c *YTDLPCatalog) SetCookieJar(path string) {
+	if c == nil {
+		return
+	}
+	c.cfgMu.Lock()
+	c.CookieJarPath = strings.TrimSpace(path)
+	c.cfgMu.Unlock()
+}
+
+func (c *YTDLPCatalog) cookieJarPath() string {
+	if c == nil {
+		return ""
+	}
+	c.cfgMu.RLock()
+	p := c.CookieJarPath
+	c.cfgMu.RUnlock()
+	return p
+}
+
+// SetQuality updates the preferred max video height for yt-dlp format selection.
+func (c *YTDLPCatalog) SetQuality(q int) {
+	if c == nil || q < 0 {
+		return
+	}
+	c.cfgMu.Lock()
+	c.Quality = q
+	c.cfgMu.Unlock()
+}
+
+func (c *YTDLPCatalog) quality() int {
+	if c == nil {
+		return 0
+	}
+	c.cfgMu.RLock()
+	q := c.Quality
+	c.cfgMu.RUnlock()
+	return q
 }
 
 // NewYTDLPCatalog constructs a YTDLPCatalog with the given cache directory,
@@ -167,10 +292,11 @@ func (c *YTDLPCatalog) Feed(ctx context.Context, tab model.Tab) ([]model.Video, 
 	}
 
 	cachePath := c.cacheFilePath(cacheFile)
-	if cachePath != "" {
+	ttl, cacheDisabled := c.cacheTTLConfig()
+	if cachePath != "" && !cacheDisabled {
 		if videos, modTime, err := readCacheFile(cachePath); err == nil && len(videos) > 0 {
 			c.applyCachedMeta(videos)
-			if c.CacheTTL > 0 && time.Since(modTime) <= c.CacheTTL {
+			if ttl > 0 && time.Since(modTime) <= ttl {
 				return videos, nil
 			}
 			// Stale-while-revalidate: serve cached data immediately and refresh asynchronously.
@@ -252,32 +378,30 @@ func (c *YTDLPCatalog) Search(ctx context.Context, query string) ([]model.Video,
 		return nil, nil
 	}
 
-	ttl := c.CacheTTL
-	if ttl <= 0 {
-		ttl = 5 * time.Minute
-	}
-
-	c.searchMu.RLock()
-	if entry, ok := c.searchCache[query]; ok && time.Since(entry.fetchedAt) <= ttl {
-		videos := make([]model.Video, len(entry.videos))
-		copy(videos, entry.videos)
+	ttl, cacheDisabled := c.cacheTTLConfig()
+	if !cacheDisabled {
+		if ttl <= 0 {
+			ttl = 5 * time.Minute
+		}
+		c.searchMu.RLock()
+		if entry, ok := c.searchCache[query]; ok && time.Since(entry.fetchedAt) <= ttl {
+			videos := make([]model.Video, len(entry.videos))
+			copy(videos, entry.videos)
+			c.searchMu.RUnlock()
+			c.applyCachedMeta(videos)
+			return videos, nil
+		}
 		c.searchMu.RUnlock()
-		c.applyCachedMeta(videos)
-		return videos, nil
 	}
-	c.searchMu.RUnlock()
 
-	searchLimit := c.SearchSize
-	if searchLimit <= 0 {
-		searchLimit = 20
-	}
+	searchLimit := c.searchSize()
 	videos, err := c.fetchTarget(ctx, fmt.Sprintf("ytsearch%d:%s", searchLimit, query))
 	if err != nil {
 		return nil, err
 	}
 	c.applyCachedMeta(videos)
 
-	if len(videos) > 0 {
+	if !cacheDisabled && len(videos) > 0 {
 		now := time.Now()
 		c.searchMu.Lock()
 		if c.searchCache == nil {
@@ -331,19 +455,15 @@ func (c *YTDLPCatalog) fetchTarget(ctx context.Context, target string) ([]model.
 		"--socket-timeout", "8",
 	}
 	if strings.HasPrefix(target, "http://") || strings.HasPrefix(target, "https://") {
-		feedLimit := c.FeedSize
-		if feedLimit <= 0 {
-			feedLimit = 30
-		}
-		args = append(args, "--playlist-end", strconv.Itoa(feedLimit))
+		args = append(args, "--playlist-end", strconv.Itoa(c.feedSize()))
 	}
-	if c.CookieJarPath != "" && !strings.HasPrefix(target, "ytsearch") {
-		if info, err := os.Stat(c.CookieJarPath); err == nil && !info.IsDir() && info.Size() > 0 {
-			args = append(args, "--cookies", c.CookieJarPath)
+	if jar := c.cookieJarPath(); jar != "" && !strings.HasPrefix(target, "ytsearch") {
+		if info, err := os.Stat(jar); err == nil && !info.IsDir() && info.Size() > 0 {
+			args = append(args, "--cookies", jar)
 		}
 	}
-	if c.Quality > 0 {
-		args = append(args, "-f", BuildFormat(c.Quality))
+	if qual := c.quality(); qual > 0 {
+		args = append(args, "-f", BuildFormat(qual))
 	}
 	args = append(args, target)
 
