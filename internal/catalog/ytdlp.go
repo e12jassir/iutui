@@ -372,14 +372,22 @@ func (c *YTDLPCatalog) cacheFilePath(name string) string {
 	return filepath.Join(dir, name)
 }
 
-const youtubeMusicDiscoveryURL = "https://www.youtube.com/channel/UC-9-kyTW8ZkZNDHQJ6FgpwQ"
+const (
+	youtubeMusicDiscoveryURL   = "https://www.youtube.com/channel/UC-9-kyTW8ZkZNDHQJ6FgpwQ"
+	youtubeMusicSearchFallback = "ytsearch30:music official video"
+)
 
-// fetchTabVideos fetches target for tab and falls back to public music discovery
-// when logged-out TabHome returns zero videos without error.
+// fetchTabVideos fetches target for tab and falls back to public discovery
+// when logged-out TabHome or TabMusic returns zero videos without error.
 func (c *YTDLPCatalog) fetchTabVideos(ctx context.Context, tab model.Tab, target string) ([]model.Video, error) {
 	videos, err := c.fetchTarget(ctx, target)
-	if tab == model.TabHome && err == nil && len(videos) == 0 && ctx.Err() == nil {
-		return c.fetchTarget(ctx, youtubeMusicDiscoveryURL)
+	if err == nil && len(videos) == 0 && ctx.Err() == nil {
+		switch tab {
+		case model.TabHome:
+			return c.fetchTarget(ctx, youtubeMusicDiscoveryURL)
+		case model.TabMusic:
+			return c.fetchTarget(ctx, youtubeMusicSearchFallback)
+		}
 	}
 	return videos, err
 }
@@ -443,6 +451,7 @@ type ytdlpJSONEntry struct {
 	ID               string  `json:"id"`
 	Title            string  `json:"title"`
 	Channel          string  `json:"channel"`
+	ChannelID        string  `json:"channel_id"`
 	Uploader         string  `json:"uploader"`
 	DurationString   string  `json:"duration_string"`
 	Duration         float64 `json:"duration"`
@@ -537,6 +546,7 @@ func entryToVideo(e ytdlpJSONEntry) (model.Video, bool) {
 		ID:        id,
 		Title:     strings.TrimSpace(e.Title),
 		Channel:   channel,
+		ChannelID: strings.TrimSpace(e.ChannelID),
 		Duration:  dur,
 		Views:     views,
 		Published: published,

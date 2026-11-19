@@ -24,15 +24,17 @@ const (
 	metaCacheFileName         = "video_meta.json"
 )
 
-// VideoMeta holds enriched view count and publish date metadata for a single video.
+// VideoMeta holds enriched view count, publish date, and channel ID metadata for a single video.
 type VideoMeta struct {
 	Views     string `json:"views,omitempty"`
 	Published string `json:"published,omitempty"`
+	ChannelID string `json:"channel_id,omitempty"`
 }
 
 type cachedVideoMeta struct {
 	Views     string    `json:"views,omitempty"`
 	Published string    `json:"published,omitempty"`
+	ChannelID string    `json:"channel_id,omitempty"`
 	FetchedAt time.Time `json:"fetched_at"`
 }
 
@@ -104,7 +106,7 @@ func (m *MetadataEnricher) ensureLoadedLocked() {
 	now := m.now()
 	ttl := m.ttl()
 	for id, entry := range disk {
-		if entry.Views == "" && entry.Published == "" {
+		if entry.Views == "" && entry.Published == "" && entry.ChannelID == "" {
 			continue
 		}
 		if now.Sub(entry.FetchedAt) <= ttl {
@@ -132,13 +134,13 @@ func (m *MetadataEnricher) Cached(id string) (VideoMeta, bool) {
 	if !ok || now.Sub(entry.FetchedAt) > ttl {
 		return VideoMeta{}, false
 	}
-	if entry.Views == "" && entry.Published == "" {
+	if entry.Views == "" && entry.Published == "" && entry.ChannelID == "" {
 		return VideoMeta{}, false
 	}
-	return VideoMeta{Views: entry.Views, Published: entry.Published}, true
+	return VideoMeta{Views: entry.Views, Published: entry.Published, ChannelID: entry.ChannelID}, true
 }
 
-// ApplyCached fills missing Views and Published fields in videos from the local cache.
+// ApplyCached fills missing Views, Published, and ChannelID fields in videos from the local cache.
 func (m *MetadataEnricher) ApplyCached(videos []model.Video) {
 	if m == nil || len(videos) == 0 {
 		return
@@ -152,7 +154,7 @@ func (m *MetadataEnricher) ApplyCached(videos []model.Video) {
 
 	for i := range videos {
 		v := &videos[i]
-		if v.Views != "" && v.Published != "" {
+		if v.Views != "" && v.Published != "" && v.ChannelID != "" {
 			continue
 		}
 		if !isSingleYouTubeID(v.ID) {
@@ -167,6 +169,9 @@ func (m *MetadataEnricher) ApplyCached(videos []model.Video) {
 		}
 		if v.Published == "" && entry.Published != "" {
 			v.Published = entry.Published
+		}
+		if v.ChannelID == "" && entry.ChannelID != "" {
+			v.ChannelID = entry.ChannelID
 		}
 	}
 }
@@ -212,8 +217,8 @@ func (m *MetadataEnricher) Enrich(ctx context.Context, ids []string) (map[string
 		}
 		seen[id] = struct{}{}
 
-		if entry, ok := m.cache[id]; ok && now.Sub(entry.FetchedAt) <= ttl && (entry.Views != "" || entry.Published != "") {
-			result[id] = VideoMeta{Views: entry.Views, Published: entry.Published}
+		if entry, ok := m.cache[id]; ok && now.Sub(entry.FetchedAt) <= ttl && (entry.Views != "" || entry.Published != "" || entry.ChannelID != "") {
+			result[id] = VideoMeta{Views: entry.Views, Published: entry.Published, ChannelID: entry.ChannelID}
 			continue
 		}
 		if len(toFetch) < maxBatch {
@@ -267,6 +272,7 @@ func (m *MetadataEnricher) Enrich(ctx context.Context, ids []string) (map[string
 			m.cache[id] = cachedVideoMeta{
 				Views:     meta.Views,
 				Published: meta.Published,
+				ChannelID: meta.ChannelID,
 				FetchedAt: fetchedAt,
 			}
 			result[id] = meta
@@ -347,6 +353,7 @@ func (m *MetadataEnricher) fetchSingle(ctx context.Context, videoID string) (Vid
 	var payload struct {
 		VideoDetails struct {
 			ViewCount string `json:"viewCount"`
+			ChannelID string `json:"channelId"`
 		} `json:"videoDetails"`
 		Microformat struct {
 			PlayerMicroformatRenderer struct {
@@ -370,8 +377,9 @@ func (m *MetadataEnricher) fetchSingle(ctx context.Context, videoID string) (Vid
 		pub = strings.TrimSpace(payload.Microformat.PlayerMicroformatRenderer.UploadDate)
 	}
 	meta.Published = pub
+	meta.ChannelID = strings.TrimSpace(payload.VideoDetails.ChannelID)
 
-	if meta.Views == "" && meta.Published == "" {
+	if meta.Views == "" && meta.Published == "" && meta.ChannelID == "" {
 		return VideoMeta{}, false
 	}
 	return meta, true
@@ -394,7 +402,7 @@ func (m *MetadataEnricher) persistToDisk() {
 			delete(m.cache, id)
 			continue
 		}
-		if entry.Views == "" && entry.Published == "" {
+		if entry.Views == "" && entry.Published == "" && entry.ChannelID == "" {
 			continue
 		}
 		snapshot[id] = entry

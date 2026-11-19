@@ -46,13 +46,6 @@ if [ ! -f "$IUTUI_CONFIG_DEST/config" ]; then
     echo "==> Default config written to $IUTUI_CONFIG_DEST/config"
 fi
 
-CONFIG_DEST="${XDG_CONFIG_HOME:-$HOME/.config}/yt"
-if [ ! -f "$CONFIG_DEST/config" ]; then
-    mkdir -p "$CONFIG_DEST"
-    cp "$SRC/config.example" "$CONFIG_DEST/config"
-    echo "==> Default config written to $CONFIG_DEST/config"
-fi
-
 hint() {
     if   command -v pacman  >/dev/null 2>&1; then echo "sudo pacman -S $*"
     elif command -v apt-get >/dev/null 2>&1; then echo "sudo apt install $*"

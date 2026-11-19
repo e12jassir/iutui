@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Smoke tests for yt. No network, no real fzf/yt-dlp/mpv: they are stubbed.
 # Run: make test   (or: bash tests/smoke.sh)
+# shellcheck source-path=SCRIPTDIR
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d)"
@@ -255,7 +256,11 @@ eq "quoted value" "$YT_SEARCH_SIZE" "7"
 eq "\${BROWSER:-x} supported" "$YT_BROWSER_CMD" "fallbackbrowser"
 eq "tilde expands" "$YT_DOWNLOAD_DIR" "$HOME/dl"
 eq "bad number falls back to default" "$YT_QUALITY" "1080"
-[ ! -e "$TMP/pwned1" ] && [ ! -e "$TMP/pwned2" ] && ok "config is data, never executed" || bad "config executed code"
+if [ ! -e "$TMP/pwned1" ] && [ ! -e "$TMP/pwned2" ]; then
+    ok "config is data, never executed"
+else
+    bad "config executed code"
+fi
 eq "env beats config file" "$( ( YT_FEED_SIZE=9; init light; echo "$YT_FEED_SIZE" ) )" "9"
 rm -f "$XDG_CONFIG_HOME/yt/config"; unset YT_FEED_SIZE YT_SEARCH_SIZE YT_BROWSER_CMD YT_DOWNLOAD_DIR YT_QUALITY; init light
 eq "YT_PLAYBACK defaults to auto" "$( ( unset YT_PLAYBACK; set_defaults; echo "$YT_PLAYBACK" ) )" "auto"
@@ -263,7 +268,7 @@ eq "YT_PLAYBACK defaults to auto" "$( ( unset YT_PLAYBACK; set_defaults; echo "$
 echo "cookies"
 prepare_cookies
 JAR="$CACHE_DIR/cookies.txt"
-[ -s "$JAR" ] && ok "jar created" || bad "jar missing"
+if [ -s "$JAR" ]; then ok "jar created"; else bad "jar missing"; fi
 hasnt "foreign-domain cookies are dropped" "$(cat "$JAR")" "evil.example"
 has "HttpOnly youtube cookie kept" "$(cat "$JAR")" "#HttpOnly_.youtube.com"
 has "google cookie kept" "$(cat "$JAR")" ".google.com"
@@ -281,11 +286,11 @@ emit_view foryou auto >/dev/null
 eq "fresh cache: no second network call" "$(grep -c 'youtube.com/' "$STUB_LOG")" "$N1"
 emit_view foryou refresh >/dev/null
 eq "refresh forces a call" "$(grep -c 'youtube.com/' "$STUB_LOG")" "$((N1 + 1))"
-[ "$(emit_view foryou cached | wc -l)" -gt 0 ] && ok "cached mode serves stale data" || bad "cached mode empty"
+if [ "$(emit_view foryou cached | wc -l)" -gt 0 ]; then ok "cached mode serves stale data"; else bad "cached mode empty"; fi
 S="$(emit_view search auto "rust lang" | cut -f1 | head -n 1)"
 eq "search results" "$S" "srch0000001"
 touch -d '2 hours ago' "$(view_cache_file foryou)" 2>/dev/null || touch -t 200001010000 "$(view_cache_file foryou)"
-needs_sync foryou "" && ok "stale cache triggers background sync" || bad "stale cache not detected"
+if needs_sync foryou ""; then ok "stale cache triggers background sync"; else bad "stale cache not detected"; fi
 
 echo "views & saved list"
 E="$(emit_view later cached | cut -f1)"
@@ -347,11 +352,14 @@ eq "build_format 0 (max)" "$(build_format window 0)" "bestvideo+bestaudio/best"
 eq "build_format 720" "$(build_format window 720)" "bestvideo[height<=720]+bestaudio/best"
 
 # Test portable version_ge and glob-safe YT_YTDLP_ARGS
-version_ge 0.58.0 0.44.0 && ok "version_ge 0.58.0 >= 0.44.0" || bad "version_ge 0.58.0 >= 0.44.0"
-version_ge 0.43.9 0.44.0 && bad "version_ge 0.43.9 < 0.44.0" || ok "version_ge 0.43.9 < 0.44.0"
+if version_ge 0.58.0 0.44.0; then ok "version_ge 0.58.0 >= 0.44.0"; else bad "version_ge 0.58.0 >= 0.44.0"; fi
+if version_ge 0.43.9 0.44.0; then bad "version_ge 0.43.9 < 0.44.0"; else ok "version_ge 0.43.9 < 0.44.0"; fi
 touch "$TMP/evil.mp4"
-( cd "$TMP" && YT_YTDLP_ARGS="-o *.mp4" && set_defaults && [ "${YTDLP_EXTRA[1]}" = "*.mp4" ] ) \
-    && ok "YT_YTDLP_ARGS does not glob-expand" || bad "YT_YTDLP_ARGS expanded globs"
+if ( cd "$TMP" && YT_YTDLP_ARGS="-o *.mp4" && set_defaults && [ "${YTDLP_EXTRA[1]}" = "*.mp4" ] ); then
+    ok "YT_YTDLP_ARGS does not glob-expand"
+else
+    bad "YT_YTDLP_ARGS expanded globs"
+fi
 
 # Test set_config_val updates without sed -i
 set_config_val YT_QUALITY 720
@@ -392,11 +400,17 @@ hasnt "menu options do not include trending" "$(build_menu_options)" "tendencias
 
 echo "doctor exit codes"
 eq "doctor is quiet on a clean setup" "$(bash "$ROOT/bin/yt" --doctor >/dev/null 2>&1; echo $?)" "0"
-RC1=$( ( have() { case $1 in deno|node|bun|qjs|quickjs) return 1 ;; esac; command -v "$1" >/dev/null 2>&1; }
-         doctor >/dev/null; echo $? ) )
+RC1=$( (
+    # shellcheck disable=SC2329
+    have() { case $1 in deno|node|bun|qjs|quickjs) return 1 ;; esac; command -v "$1" >/dev/null 2>&1; }
+    doctor >/dev/null; echo $?
+) )
 eq "doctor returns 1 when only warnings remain" "$RC1" "1"
-RC2=$( ( have() { [ "$1" = fzf ] && return 1; command -v "$1" >/dev/null 2>&1; }
-         doctor >/dev/null; echo $? ) )
+RC2=$( (
+    # shellcheck disable=SC2329
+    have() { [ "$1" = fzf ] && return 1; command -v "$1" >/dev/null 2>&1; }
+    doctor >/dev/null; echo $?
+) )
 eq "doctor returns 2 when a required dep is missing" "$RC2" "2"
 
 echo "log"
@@ -481,7 +495,7 @@ stop_ipc_server() {
     IPC_PID=""
 }
 
-start_ipc_server && ok "mock mpv IPC socket is listening" || bad "mock mpv IPC socket did not start"
+if start_ipc_server; then ok "mock mpv IPC socket is listening"; else bad "mock mpv IPC socket did not start"; fi
 eq "mpv_is_running sees the live socket" "$(mpv_is_running; echo $?)" "0"
 
 : > "$IPC_LOG"
@@ -490,13 +504,13 @@ has "mpv_send forwards loadfile arguments" "$(cat "$IPC_LOG")" '["loadfile", "ht
 : > "$IPC_LOG"
 mpv_send loadfile 'https://example.test/a"b' >/dev/null
 has "mpv_send escapes JSON strings" "$(cat "$IPC_LOG")" 'a\"b'
-eq "mpv_ipc_cmd fails without a socket" "$( YT_SOCK="$TMP/missing.sock"; mpv_ipc_cmd '{"command": ["pause"]}' >/dev/null 2>&1; echo $? )" "1"
+eq "mpv_ipc_cmd fails without a socket" "$( YT_SOCK="$TMP/missing.sock" mpv_ipc_cmd '{"command": ["pause"]}' >/dev/null 2>&1; echo $? )" "1"
 
 STATUS="$(mpv_get_status)"
 eq "mpv_get_status prints the status object" \
     "$(printf '%s' "$STATUS" | python3 -c 'import json, sys; d = json.load(sys.stdin); print(" ".join(str(d[k]) for k in ("title", "time_pos", "duration", "paused", "volume", "playlist_count")))')" \
     "Test Video 42.5 300 False 75 3"
-eq "mpv_get_status fails without a player" "$( YT_SOCK="$TMP/missing.sock"; mpv_get_status >/dev/null 2>&1; echo $? )" "1"
+eq "mpv_get_status fails without a player" "$( YT_SOCK="$TMP/missing.sock" mpv_get_status >/dev/null 2>&1; echo $? )" "1"
 
 : > "$IPC_LOG"
 eq "yt --status exits 0" "$(bash "$ROOT/bin/yt" --status >/dev/null 2>&1; echo $?)" "0"
@@ -529,7 +543,7 @@ has "yt --stop stops playback" "$(cat "$IPC_LOG")" '["stop"]'
 eq "enqueue_video succeeds against the player" "$(enqueue_video vidAAAAAAA3 'https://www.youtube.com/watch?v=vidAAAAAAA3' 'A three' 'Chan A' '3:00'; echo $?)" "0"
 has "enqueue_video appends to the playlist" "$(cat "$IPC_LOG")" '"append-play"'
 has "enqueue_video notifies the user" "$(cat "$NOTIFY_LOG")" "➕ Encolado: A three"
-eq "enqueue_video fails without a player" "$( YT_SOCK="$TMP/missing.sock"; enqueue_video vidAAAAAAA3 'https://x' 'A three' - - >/dev/null 2>&1; echo $? )" "1"
+eq "enqueue_video fails without a player" "$( YT_SOCK="$TMP/missing.sock" enqueue_video vidAAAAAAA3 'https://x' 'A three' - - >/dev/null 2>&1; echo $? )" "1"
 
 : > "$IPC_LOG"
 sleep 10 & LIVE_PID=$!
@@ -549,7 +563,7 @@ eq "stop_prev_playback trusts IPC over the process kill" "$(kill -0 "$OLD_PID" 2
 kill "$OLD_PID" 2>/dev/null || true
 
 printf '' > "$TMP/not-a-socket"
-eq "a plain file is not a running player" "$( YT_SOCK="$TMP/not-a-socket"; mpv_is_running; echo $? )" "1"
+eq "a plain file is not a running player" "$( YT_SOCK="$TMP/not-a-socket" mpv_is_running; echo $? )" "1"
 
 stop_ipc_server
 eq "mpv_is_running is false once the player exits" "$(mpv_is_running; echo $?)" "1"
@@ -689,10 +703,10 @@ DL_ID="vidDL000001"
 download_video "$DL_ID" "https://www.youtube.com/watch?v=$DL_ID" "Download Me" >/dev/null 2>&1
 for _ in $(seq 1 300); do
     DL_STATUS=$(cut -f3 "$DOWNLOADS_DIR/$DL_ID".*.rec 2>/dev/null | head -n 1)
-    [ "$DL_STATUS" = done ] && break
+    [ "$DL_STATUS" = "done" ] && break
     sleep 0.02
 done
-eq "download: a tracking record is created" "$(ls "$DOWNLOADS_DIR"/*.rec 2>/dev/null | wc -l | tr -d ' ')" "1"
+eq "download: a tracking record is created" "$(find "$DOWNLOADS_DIR" -maxdepth 1 -name '*.rec' 2>/dev/null | wc -l | tr -d ' ')" "1"
 eq "download: record keeps the title" "$(cut -f2 "$DOWNLOADS_DIR"/*.rec | head -n 1)" "Download Me"
 eq "download: record reaches done" "$(cut -f3 "$DOWNLOADS_DIR"/*.rec | head -n 1)" "done"
 has "download still invokes yt-dlp for the URL" "$(grep 'vidDL000001' "$STUB_LOG" | tail -n 1)" "youtube.com/watch?v=vidDL000001"
@@ -707,7 +721,7 @@ has "--downloads is an alias for --queue" "$(bash "$ROOT/bin/yt" --downloads 2>&
 export YT_STUB_FAIL='disk full'
 download_video vidDL000002 "https://www.youtube.com/watch?v=vidDL000002" "Broken" >/dev/null 2>&1
 for _ in $(seq 1 300); do
-    [ "$(cut -f3 "$DOWNLOADS_DIR"/vidDL000002.*.rec 2>/dev/null | head -n 1)" = failed ] && break
+    [ "$(cut -f3 "$DOWNLOADS_DIR"/vidDL000002.*.rec 2>/dev/null | head -n 1)" = "failed" ] && break
     sleep 0.02
 done
 unset YT_STUB_FAIL

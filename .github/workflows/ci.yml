@@ -2,21 +2,28 @@ name: ci
 on: [push, pull_request]
 jobs:
   verify:
-    # Future targets: macos-latest, windows-latest (via internal/platform build tags)
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
           cache: true
-      - name: install shellcheck (linux)
+      - name: install shellcheck and python3 (linux)
+        if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y shellcheck python3
       - name: verify go.mod tidy
+        if: runner.os == 'Linux'
         run: |
           go mod tidy
           git diff --exit-code go.mod go.sum
-      - run: make verify
+      - name: lint and smoke tests (linux)
+        if: runner.os == 'Linux'
+        run: make verify
       - name: go vet and race tests
         run: |
           go vet ./...

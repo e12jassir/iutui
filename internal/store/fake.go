@@ -14,6 +14,7 @@ import (
 type FakeStore struct {
 	mu            sync.Mutex
 	SavedVideos   []model.Video
+	LikedVideos   []model.Video
 	HistoryVideos []model.Video
 	Subs          []string
 	Err           error
@@ -55,6 +56,40 @@ func (f *FakeStore) ToggleSaved(ctx context.Context, v model.Video) (bool, error
 		}
 	}
 	f.SavedVideos = append(f.SavedVideos, v)
+	return true, nil
+}
+
+// Liked returns a copy of LikedVideos.
+func (f *FakeStore) Liked(ctx context.Context) ([]model.Video, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.Err != nil {
+		return nil, f.Err
+	}
+	return slices.Clone(f.LikedVideos), nil
+}
+
+// ToggleLiked adds or removes v from LikedVideos and reports whether it is now liked.
+func (f *FakeStore) ToggleLiked(ctx context.Context, v model.Video) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.Err != nil {
+		return false, f.Err
+	}
+
+	for i, item := range f.LikedVideos {
+		if item.ID == v.ID {
+			f.LikedVideos = append(f.LikedVideos[:i], f.LikedVideos[i+1:]...)
+			return false, nil
+		}
+	}
+	f.LikedVideos = append([]model.Video{v}, f.LikedVideos...)
 	return true, nil
 }
 

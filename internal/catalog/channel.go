@@ -90,7 +90,7 @@ func (c *YTDLPCatalog) ChannelVideos(ctx context.Context, v model.Video, limit i
 		bin = c.BinPath
 		cookies = c.CookieJarPath
 	}
-	channelID, channelName := inferChannelRef(v.Channel)
+	channelID, channelName := videoChannelRef(v)
 	return FetchChannelVideos(ctx, bin, cookies, channelID, channelName, limit)
 }
 
@@ -100,8 +100,16 @@ func (h *HybridCatalog) ChannelVideos(ctx context.Context, v model.Video, limit 
 	if h != nil && h.Direct != nil {
 		return h.Direct.ChannelVideos(ctx, v, limit)
 	}
-	channelID, channelName := inferChannelRef(v.Channel)
+	channelID, channelName := videoChannelRef(v)
 	return FetchChannelVideos(ctx, "yt-dlp", "", channelID, channelName, limit)
+}
+
+func videoChannelRef(v model.Video) (channelID, channelName string) {
+	channelID, channelName = inferChannelRef(v.Channel)
+	if cid := strings.TrimSpace(v.ChannelID); cid != "" {
+		channelID = cid
+	}
+	return channelID, channelName
 }
 
 func resolveChannelTarget(channelID, channelName string, limit int) (string, error) {

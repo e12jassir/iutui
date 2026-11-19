@@ -65,6 +65,7 @@ type Video struct {
 	ID        string `json:"id"`
 	Title     string `json:"title"`
 	Channel   string `json:"channel"`
+	ChannelID string `json:"channel_id,omitempty"`
 	Duration  string `json:"duration"`
 	Views     string `json:"views"`
 	Published string `json:"published"`

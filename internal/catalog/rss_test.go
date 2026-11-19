@@ -2,8 +2,12 @@ package catalog
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"slices"
+	"sync"
 	"testing"
 	"time"
 )
@@ -244,4 +248,210 @@ func TestFetchRSSFeed(t *testing.T) {
 			}
 		})
 	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func newRSSRedirectClient(srv *httptest.Server) *http.Client {
+	targetURL, err := url.Parse(srv.URL)
+	if err != nil {
+		panic(err)
+	}
+	base := srv.Client().Transport
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	return &http.Client{
+		Timeout: 5 * time.Second,
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			cloned := req.Clone(req.Context())
+			cloned.URL.Scheme = targetURL.Scheme
+			cloned.URL.Host = targetURL.Host
+			return base.RoundTrip(cloned)
+		}),
+	}
+}
+
+func TestFetchSubscriptionsRSS(t *testing.T) {
+	const (
+		chanOne  = "UCchanOne111111111111111"
+		chanTwo  = "UCchanTwo222222222222222"
+		chanFail = "UCchanFail33333333333333"
+	)
+
+	feedOne := `<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns:yt="http://www.youtube.com/xml/schemas/2015" xmlns:media="http://search.yahoo.com/mrss/" xmlns="http://www.w3.org/2005/Atom">
+  <title>Channel One</title>
+  <entry>
+    <yt:videoId>vidOld00001</yt:videoId>
+    <title>Old Video</title>
+    <author><name>Channel One</name></author>
+    <published>2024-02-01T10:00:00Z</published>
+  </entry>
+  <entry>
+    <yt:videoId>vidOverlap1</yt:videoId>
+    <title>Overlap Video</title>
+    <author><name>Channel One</name></author>
+    <published>2024-05-10T12:00:00Z</published>
+    <media:group><media:community><media:statistics views="1200"/></media:community></media:group>
+  </entry>
+  <entry>
+    <yt:videoId>vidNewest01</yt:videoId>
+    <title>Newest Video</title>
+    <author><name>Channel One</name></author>
+    <published>2024-06-01T08:00:00Z</published>
+  </entry>
+</feed>`
+
+	feedTwo := `<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns:yt="http://www.youtube.com/xml/schemas/2015" xmlns:media="http://search.yahoo.com/mrss/" xmlns="http://www.w3.org/2005/Atom">
+  <title>Channel Two</title>
+  <entry>
+    <yt:videoId>vidOverlap1</yt:videoId>
+    <title>Overlap Video</title>
+    <author><name>Channel Two</name></author>
+    <published>2024-05-10T12:00:00Z</published>
+  </entry>
+  <entry>
+    <yt:videoId>vidMid00002</yt:videoId>
+    <title>Middle Video</title>
+    <author><name>Channel Two</name></author>
+    <published>2024-04-15T09:30:00Z</published>
+  </entry>
+</feed>`
+
+	t.Run("merges feeds, deduplicates IDs, sorts newest-first, tolerates failures, ignores non-UC refs", func(t *testing.T) {
+		var (
+			mu   sync.Mutex
+			hits = make(map[string]int)
+		)
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			cid := r.URL.Query().Get("channel_id")
+			mu.Lock()
+			hits[cid]++
+			mu.Unlock()
+
+			switch cid {
+			case chanOne:
+				_, _ = w.Write([]byte(feedOne))
+			case chanTwo:
+				_, _ = w.Write([]byte(feedTwo))
+			case chanFail:
+				http.Error(w, "upstream error", http.StatusInternalServerError)
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer srv.Close()
+
+		refs := []string{
+			chanOne,
+			"https://www.youtube.com/channel/" + chanTwo,
+			"https://www.youtube.com/channel/" + chanOne, // duplicate feed URL
+			chanFail,
+			"@PinkFloyd",
+			"Soda Stereo",
+			"   ",
+		}
+
+		videos, err := FetchSubscriptionsRSS(context.Background(), newRSSRedirectClient(srv), refs)
+		if err != nil {
+			t.Fatalf("FetchSubscriptionsRSS error: %v", err)
+		}
+
+		gotIDs := make([]string, len(videos))
+		for i, v := range videos {
+			gotIDs[i] = v.ID
+		}
+		wantIDs := []string{"vidNewest01", "vidOverlap1", "vidMid00002", "vidOld00001"}
+		if !slices.Equal(gotIDs, wantIDs) {
+			t.Fatalf("got IDs %v, want %v", gotIDs, wantIDs)
+		}
+
+		if videos[0].ChannelID != chanOne {
+			t.Errorf("videos[0].ChannelID = %q, want %q", videos[0].ChannelID, chanOne)
+		}
+		if videos[2].ChannelID != chanTwo {
+			t.Errorf("videos[2].ChannelID = %q, want %q", videos[2].ChannelID, chanTwo)
+		}
+		if videos[1].Views != "1.2K vistas" {
+			t.Errorf("videos[1].Views = %q, want 1.2K vistas", videos[1].Views)
+		}
+
+		mu.Lock()
+		defer mu.Unlock()
+		if hits[chanOne] != 1 {
+			t.Errorf("expected deduplicated channel one to be fetched once, got %d", hits[chanOne])
+		}
+		if hits[chanTwo] != 1 {
+			t.Errorf("expected channel two to be fetched once, got %d", hits[chanTwo])
+		}
+		if hits[chanFail] != 1 {
+			t.Errorf("expected failing channel to be attempted once, got %d", hits[chanFail])
+		}
+	})
+
+	t.Run("returns empty slice without error when no refs resolve to RSS URL", func(t *testing.T) {
+		videos, err := FetchSubscriptionsRSS(context.Background(), nil, []string{"", "@Handle", "Channel Name", "https://www.youtube.com/watch?v=dQw4w9WgXcQ"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(videos) != 0 {
+			t.Fatalf("expected 0 videos, got %+v", videos)
+		}
+	})
+
+	t.Run("returns error when every resolved feed fails", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "bad gateway", http.StatusBadGateway)
+		}))
+		defer srv.Close()
+
+		_, err := FetchSubscriptionsRSS(context.Background(), newRSSRedirectClient(srv), []string{chanOne, chanTwo})
+		if err == nil {
+			t.Fatal("expected error when all feeds fail, got nil")
+		}
+	})
+
+	t.Run("caps merged items at 100 newest-first", func(t *testing.T) {
+		buildLargeFeed := func(prefix string, startHour int) string {
+			out := `<?xml version="1.0" encoding="UTF-8"?><feed xmlns:yt="http://www.youtube.com/xml/schemas/2015" xmlns="http://www.w3.org/2005/Atom"><title>Large</title>`
+			base := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+			for i := 0; i < 60; i++ {
+				ts := base.Add(time.Duration(startHour+i) * time.Hour).Format(time.RFC3339)
+				out += fmt.Sprintf(`<entry><yt:videoId>%s%04d</yt:videoId><title>Video %s %d</title><published>%s</published></entry>`, prefix, i, prefix, i, ts)
+			}
+			return out + `</feed>`
+		}
+
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Query().Get("channel_id") {
+			case chanOne:
+				_, _ = w.Write([]byte(buildLargeFeed("aa", 0)))
+			case chanTwo:
+				_, _ = w.Write([]byte(buildLargeFeed("bb", 60)))
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer srv.Close()
+
+		videos, err := FetchSubscriptionsRSS(context.Background(), newRSSRedirectClient(srv), []string{chanOne, chanTwo})
+		if err != nil {
+			t.Fatalf("FetchSubscriptionsRSS error: %v", err)
+		}
+		if len(videos) != 100 {
+			t.Fatalf("got %d videos, want cap of 100", len(videos))
+		}
+		if videos[0].ID != "bb0059" {
+			t.Errorf("videos[0].ID = %q, want newest bb0059", videos[0].ID)
+		}
+		if videos[99].ID != "aa0020" {
+			t.Errorf("videos[99].ID = %q, want aa0020", videos[99].ID)
+		}
+	})
 }

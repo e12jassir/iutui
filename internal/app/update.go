@@ -21,12 +21,13 @@ const (
 	channelTimeout          = 20 * time.Second
 	lyricsTimeout           = 6 * time.Second
 	feedTimeout             = 30 * time.Second
-	toastTTL                = 4 * time.Second
 	uiTickRate              = 250 * time.Millisecond // 4 Hz cap
 	animTickRate            = 90 * time.Millisecond
 	stillWatchingTrackLimit = 8
 	stillWatchingIdleLimit  = 60 * time.Minute
 )
+
+var toastTTL = 4 * time.Second
 
 // FeedLoadedMsg arrives when a catalog feed finishes loading.
 type FeedLoadedMsg struct {
@@ -50,9 +51,10 @@ type SearchDoneMsg struct {
 	Err    error
 }
 
-// SavedLoadedMsg arrives when saved/history/subscriptions finish loading.
+// SavedLoadedMsg arrives when saved/liked/history/subscriptions finish loading.
 type SavedLoadedMsg struct {
 	Saved   []model.Video
+	Liked   []model.Video
 	History []model.Video
 	Subs    []string
 }
@@ -62,6 +64,18 @@ type ToggledSaveMsg struct {
 	Video model.Video
 	Saved bool
 	Err   error
+}
+
+// ToggledLikeMsg arrives after Store.ToggleLiked completes.
+type ToggledLikeMsg struct {
+	Video model.Video
+	Liked bool
+	Err   error
+}
+
+// ThumbReadyMsg notifies the TUI that an async thumbnail finished downloading or uploading.
+type ThumbReadyMsg struct {
+	ID string
 }
 
 // PlayerStatusMsg carries a pushed status update from Engine.Subscribe.
@@ -197,6 +211,10 @@ func (s *State) Update(msg tea.Msg) (*State, tea.Cmd) {
 		for _, v := range msg.Saved {
 			s.SavedIDs[v.ID] = true
 		}
+		s.LikedIDs = make(map[string]bool, len(msg.Liked))
+		for _, v := range msg.Liked {
+			s.LikedIDs[v.ID] = true
+		}
 		s.HistoryIDs = make(map[string]bool, len(msg.History))
 		for _, v := range msg.History {
 			s.HistoryIDs[v.ID] = true
@@ -209,7 +227,7 @@ func (s *State) Update(msg tea.Msg) (*State, tea.Cmd) {
 			s.Feeds[model.TabWatchLater] = append([]model.Video(nil), msg.Saved...)
 		}
 		if _, ok := s.Feeds[model.TabLiked]; !ok {
-			s.Feeds[model.TabLiked] = append([]model.Video(nil), msg.Saved...)
+			s.Feeds[model.TabLiked] = append([]model.Video(nil), msg.Liked...)
 		}
 		return s, s.enrichVisibleMetadataCmd(s.VisibleItems(), s.SelectedIdx)
 
@@ -219,18 +237,32 @@ func (s *State) Update(msg tea.Msg) (*State, tea.Cmd) {
 		}
 		if msg.Saved {
 			s.SavedIDs[msg.Video.ID] = true
-			for _, t := range []model.Tab{model.TabWatchLater, model.TabLiked} {
-				s.Feeds[t] = prependUniqueVideo(s.Feeds[t], msg.Video)
-			}
+			s.Feeds[model.TabWatchLater] = prependUniqueVideo(s.Feeds[model.TabWatchLater], msg.Video)
 			s.SetSelection(s.SelectedIdx)
 			return s, s.toastCmd("★ Guardado: " + msg.Video.Title)
 		}
 		delete(s.SavedIDs, msg.Video.ID)
-		for _, t := range []model.Tab{model.TabWatchLater, model.TabLiked} {
-			s.Feeds[t] = removeVideoByID(s.Feeds[t], msg.Video.ID)
-		}
+		s.Feeds[model.TabWatchLater] = removeVideoByID(s.Feeds[model.TabWatchLater], msg.Video.ID)
 		s.SetSelection(s.SelectedIdx)
 		return s, s.toastCmd("Quitado de guardados")
+
+	case ToggledLikeMsg:
+		if msg.Err != nil {
+			return s, s.toastCmd(fmt.Sprintf("Error en Me gusta: %v", msg.Err))
+		}
+		if msg.Liked {
+			s.LikedIDs[msg.Video.ID] = true
+			s.Feeds[model.TabLiked] = prependUniqueVideo(s.Feeds[model.TabLiked], msg.Video)
+			s.SetSelection(s.SelectedIdx)
+			return s, s.toastCmd("♥ Me gusta: " + msg.Video.Title)
+		}
+		delete(s.LikedIDs, msg.Video.ID)
+		s.Feeds[model.TabLiked] = removeVideoByID(s.Feeds[model.TabLiked], msg.Video.ID)
+		s.SetSelection(s.SelectedIdx)
+		return s, s.toastCmd("Quitado de Me gusta")
+
+	case ThumbReadyMsg:
+		return s, nil
 
 	case ActionResultMsg:
 		if msg.Err != nil {
@@ -744,6 +776,8 @@ func (s *State) handleKey(msg tea.KeyMsg) (*State, tea.Cmd) {
 		return s.PlaySelected("mix")
 	case "w":
 		return s.ToggleSaveSelected()
+	case "W":
+		return s.ToggleLikeSelected()
 	case "s":
 		return s.ToggleSubscribeSelected()
 	case "g", "G":
@@ -1449,6 +1483,30 @@ func (s *State) ToggleSaveSelected() (*State, tea.Cmd) {
 	}
 }
 
+type likedProvider interface {
+	Liked(ctx context.Context) ([]model.Video, error)
+}
+
+type likedToggler interface {
+	ToggleLiked(ctx context.Context, v model.Video) (bool, error)
+}
+
+// ToggleLikeSelected persists liked state cleanly separate from Watch Later.
+func (s *State) ToggleLikeSelected() (*State, tea.Cmd) {
+	v, ok := s.SelectedVideo()
+	if !ok || s.Deps.Store == nil {
+		return s, nil
+	}
+	lt, ok := s.Deps.Store.(likedToggler)
+	if !ok {
+		return s, s.toastCmd("Me gusta no disponible")
+	}
+	return s, func() tea.Msg {
+		liked, err := lt.ToggleLiked(s.appCtx, v)
+		return ToggledLikeMsg{Video: v, Liked: liked, Err: err}
+	}
+}
+
 type feedRefresher interface {
 	RefreshFeed(ctx context.Context, tab model.Tab) ([]model.Video, error)
 }
@@ -1502,9 +1560,13 @@ func (s *State) loadStoreCmd() tea.Cmd {
 	}
 	return func() tea.Msg {
 		saved, _ := s.Deps.Store.Saved(s.appCtx)
+		var liked []model.Video
+		if lp, ok := s.Deps.Store.(likedProvider); ok {
+			liked, _ = lp.Liked(s.appCtx)
+		}
 		history, _ := s.Deps.Store.History(s.appCtx)
 		subs, _ := s.Deps.Store.Subscriptions(s.appCtx)
-		return SavedLoadedMsg{Saved: saved, History: history, Subs: subs}
+		return SavedLoadedMsg{Saved: saved, Liked: liked, History: history, Subs: subs}
 	}
 }
 
@@ -1692,8 +1754,15 @@ func (s *State) ToggleSubscribeSelected() (*State, tea.Cmd) {
 	if !ok || s.Deps.Store == nil {
 		return s, nil
 	}
-	ch := strings.TrimSpace(v.Channel)
-	if ch == "" {
+	subRef := strings.TrimSpace(v.ChannelID)
+	label := strings.TrimSpace(v.Channel)
+	if subRef == "" {
+		subRef = label
+	}
+	if label == "" {
+		label = subRef
+	}
+	if subRef == "" {
 		return s, s.toastCmd("Este video no tiene canal para suscribirse")
 	}
 	st, ok := s.Deps.Store.(subscriptionToggler)
@@ -1701,12 +1770,12 @@ func (s *State) ToggleSubscribeSelected() (*State, tea.Cmd) {
 		return s, s.toastCmd("Suscripciones rápidas no disponibles")
 	}
 	return s, func() tea.Msg {
-		subscribed, err := st.ToggleSubscription(s.appCtx, ch)
+		subscribed, err := st.ToggleSubscription(s.appCtx, subRef)
 		if err != nil {
-			return SubscriptionToggledMsg{Channel: ch, Err: err}
+			return SubscriptionToggledMsg{Channel: label, Err: err}
 		}
 		subs, _ := s.Deps.Store.Subscriptions(s.appCtx)
-		return SubscriptionToggledMsg{Channel: ch, Subscribed: subscribed, Subs: subs}
+		return SubscriptionToggledMsg{Channel: label, Subscribed: subscribed, Subs: subs}
 	}
 }
 

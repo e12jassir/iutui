@@ -22,6 +22,10 @@ import (
 	"github.com/e12jassir/iutui/internal/store"
 )
 
+func init() {
+	toastTTL = 15 * time.Millisecond
+}
+
 func newTestState() (*State, *catalog.FakeCatalog, *player.FakeEngine, *store.FakeStore) {
 	cat := &catalog.FakeCatalog{
 		Feeds: map[model.Tab][]model.Video{
@@ -1933,5 +1937,58 @@ func TestMetadataEnrichmentAndDeduplication(t *testing.T) {
 	// Second trigger on the same items must deduplicate cleanly without re-fetching.
 	if dupCmd := s.enrichVisibleMetadataCmd(s.Feeds[model.TabHome], 0); dupCmd != nil {
 		t.Fatal("expected nil cmd on repeated enrichment request for already requested IDs")
+	}
+}
+
+func TestPhase1LikedSeparateThumbReadyAndChannelIDSubscribe(t *testing.T) {
+	s, _, _, st := newTestState()
+	defer s.Close()
+
+	videos := []model.Video{
+		{ID: "vidOne11111", Title: "Liked Video", Channel: "Soda Stereo", ChannelID: "UC_MAancGcA0YeACrpSwokhQ"},
+		{ID: "vidTwo22222", Title: "Saved Later", Channel: "Other"},
+	}
+	s, _ = s.Update(FeedLoadedMsg{Tab: model.TabHome, Videos: videos})
+
+	// 'w' saves to TabWatchLater only (not TabLiked).
+	var cmd tea.Cmd
+	s.SelectedIdx = 1
+	s, cmd = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'w'}})
+	for _, m := range collectNonTickMsgs(cmd, 150*time.Millisecond) {
+		s, _ = s.Update(m)
+	}
+	if !s.SavedIDs["vidTwo22222"] || s.LikedIDs["vidTwo22222"] {
+		t.Fatalf("expected vidTwo22222 only in SavedIDs, got saved=%v liked=%v", s.SavedIDs, s.LikedIDs)
+	}
+	if len(s.Feeds[model.TabWatchLater]) != 1 || len(s.Feeds[model.TabLiked]) != 0 {
+		t.Fatalf("expected TabWatchLater=[vidTwo22222] and empty TabLiked, got wl=%+v liked=%+v", s.Feeds[model.TabWatchLater], s.Feeds[model.TabLiked])
+	}
+
+	// 'W' likes to TabLiked only (not TabWatchLater).
+	s.SelectedIdx = 0
+	s, cmd = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'W'}})
+	for _, m := range collectNonTickMsgs(cmd, 150*time.Millisecond) {
+		s, _ = s.Update(m)
+	}
+	if !s.LikedIDs["vidOne11111"] || s.SavedIDs["vidOne11111"] {
+		t.Fatalf("expected vidOne11111 only in LikedIDs, got saved=%v liked=%v", s.SavedIDs, s.LikedIDs)
+	}
+	if len(s.Feeds[model.TabLiked]) != 1 || s.Feeds[model.TabLiked][0].ID != "vidOne11111" {
+		t.Fatalf("expected TabLiked=[vidOne11111], got %+v", s.Feeds[model.TabLiked])
+	}
+
+	// 's' prefers ChannelID (UC...) when present.
+	s, cmd = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	for _, m := range collectNonTickMsgs(cmd, 150*time.Millisecond) {
+		s, _ = s.Update(m)
+	}
+	if len(st.Subs) != 1 || st.Subs[0] != "UC_MAancGcA0YeACrpSwokhQ" {
+		t.Fatalf("expected ChannelID persisted in store.Subs, got %v", st.Subs)
+	}
+
+	// ThumbReadyMsg is handled cleanly as a no-op re-render signal.
+	nextState, readyCmd := s.Update(ThumbReadyMsg{ID: "vidOne11111"})
+	if nextState != s || readyCmd != nil {
+		t.Fatalf("expected ThumbReadyMsg to return (s, nil), got (%v, %v)", nextState, readyCmd)
 	}
 }

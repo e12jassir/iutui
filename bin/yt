@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # yt — terminal YouTube client: fzf UI · yt-dlp metadata · mpv playback
 # https://github.com/e12jassir/Youtube-CLI  (MIT)
+# shellcheck source-path=SCRIPTDIR
 
 VERSION="0.2.0"
 
@@ -98,9 +99,13 @@ migrate_watchlater() {
     [ -s "$WATCHLATER_FILE" ] || return 0
     grep -q $'\033' "$WATCHLATER_FILE" 2>/dev/null || return 0
     local tmp="$WATCHLATER_FILE.tmp.$$"
-    awk -F'\t' -v OFS='\t' '
+    if awk -F'\t' -v OFS='\t' '
         index($1, sprintf("%c", 27)) && NF >= 6 { print $5, $2, $3, $4, $6, "NA", "NA", 0; next }
-        { print }' "$WATCHLATER_FILE" > "$tmp" && mv -f "$tmp" "$WATCHLATER_FILE" || rm -f "$tmp"
+        { print }' "$WATCHLATER_FILE" > "$tmp"; then
+        mv -f "$tmp" "$WATCHLATER_FILE" || rm -f "$tmp"
+    else
+        rm -f "$tmp"
+    fi
 }
 
 housekeeping() {
@@ -233,12 +238,12 @@ doctor() {
     if [ -n "$js" ]; then row ✓ "js runtime" "${js# }"
     else row '!' "js runtime" "none found — YouTube needs one since yt-dlp 2025.11 (install deno: https://deno.com)"; warn=1; fi
 
-    have mpv && row ✓ mpv "$(mpv --version 2>/dev/null | head -n 1 | cut -d' ' -f1-2)" || { row ✗ mpv missing; fail=1; }
-    have ffmpeg && row ✓ ffmpeg "found" || { row '!' ffmpeg "missing (needed for HD stream muxing & audio extraction)"; warn=1; }
-    have curl && row ✓ curl "found" || { row '!' curl "missing (no thumbnails)"; warn=1; }
-    have "$PYTHON" && row ✓ python3 "$("$PYTHON" -V 2>&1)" || { row ✗ python3 missing; fail=1; }
-    [ -n "$FMT" ] && row ✓ yt-fmt "$FMT" || { row ✗ yt-fmt "not found (make install)"; fail=1; }
-    [ -n "$PREVIEW" ] && row ✓ preview "$PREVIEW" || { row ✗ preview "not found (make install)"; fail=1; }
+    if have mpv; then row ✓ mpv "$(mpv --version 2>/dev/null | head -n 1 | cut -d' ' -f1-2)"; else row ✗ mpv missing; fail=1; fi
+    if have ffmpeg; then row ✓ ffmpeg "found"; else row '!' ffmpeg "missing (needed for HD stream muxing & audio extraction)"; warn=1; fi
+    if have curl; then row ✓ curl "found"; else row '!' curl "missing (no thumbnails)"; warn=1; fi
+    if have "$PYTHON"; then row ✓ python3 "$("$PYTHON" -V 2>&1)"; else row ✗ python3 missing; fail=1; fi
+    if [ -n "$FMT" ]; then row ✓ yt-fmt "$FMT"; else row ✗ yt-fmt "not found (make install)"; fail=1; fi
+    if [ -n "$PREVIEW" ]; then row ✓ preview "$PREVIEW"; else row ✗ preview "not found (make install)"; fail=1; fi
 
     if is_kitty_term && { have kitten || have kitty; }; then row ✓ images "kitty graphics"
     elif have chafa; then row ✓ images "chafa (text fallback)"
@@ -246,7 +251,7 @@ doctor() {
 
     r=""
     for v in wl-copy xclip xsel pbcopy clip.exe; do have "$v" && r="$v" && break; done
-    [ -n "$r" ] && row ✓ clipboard "$r" || row '!' clipboard "none (falls back to OSC 52)"
+    if [ -n "$r" ]; then row ✓ clipboard "$r"; else row '!' clipboard "none (falls back to OSC 52)"; fi
     if have notify-send || have osascript; then row ✓ notify "ok"; else row '!' notify "none"; fi
 
     printf '\n  cookies\n'

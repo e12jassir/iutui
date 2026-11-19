@@ -18,6 +18,7 @@ import (
 
 const (
 	watchLaterFile    = "watchlater.tsv"
+	likedFile         = "liked.tsv"
 	historyFile       = "history.tsv"
 	subscriptionsFile = "subscriptions.tsv"
 )
@@ -92,6 +93,57 @@ func (s *TSVStore) ToggleSaved(ctx context.Context, v model.Video) (bool, error)
 		return false, err
 	}
 	return saved, nil
+}
+
+// Liked returns all videos stored in liked.tsv.
+func (s *TSVStore) Liked(ctx context.Context) ([]model.Video, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.readVideos(filepath.Join(s.StateDir, likedFile))
+}
+
+// ToggleLiked adds v to liked.tsv if absent (returning true) or removes it
+// if already present (returning false). Writes are atomic.
+func (s *TSVStore) ToggleLiked(ctx context.Context, v model.Video) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if strings.TrimSpace(v.ID) == "" {
+		return false, errors.New("video ID is required")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	path := filepath.Join(s.StateDir, likedFile)
+	existing, err := s.readVideos(path)
+	if err != nil {
+		return false, err
+	}
+
+	found := false
+	updated := make([]model.Video, 0, len(existing)+1)
+	for _, item := range existing {
+		if item.ID == v.ID {
+			found = true
+			continue
+		}
+		updated = append(updated, item)
+	}
+
+	liked := !found
+	if liked {
+		updated = append([]model.Video{v}, updated...)
+	}
+
+	if err := writeVideosAtomic(path, updated); err != nil {
+		return false, err
+	}
+	return liked, nil
 }
 
 // History returns all videos stored in history.tsv.

@@ -295,3 +295,34 @@ func TestToggleSubscription(t *testing.T) {
 		t.Fatalf("FakeStore remove = (%v, %v), want (false, nil)", subscribed, err)
 	}
 }
+
+func TestTSVStoreLikedSeparateFromSaved(t *testing.T) {
+	ctx := context.Background()
+	s := NewTSVStore(t.TempDir())
+	v1 := model.Video{ID: "like1111111", Title: "Liked Song", Channel: "Artist"}
+	v2 := model.Video{ID: "save2222222", Title: "Saved Later", Channel: "Channel"}
+
+	if _, err := s.ToggleSaved(ctx, v2); err != nil {
+		t.Fatalf("ToggleSaved error: %v", err)
+	}
+	liked, err := s.ToggleLiked(ctx, v1)
+	if err != nil || !liked {
+		t.Fatalf("ToggleLiked add = (%v, %v), want (true, nil)", liked, err)
+	}
+	likedList, err := s.Liked(ctx)
+	if err != nil || len(likedList) != 1 || likedList[0].ID != v1.ID {
+		t.Fatalf("Liked() = (%+v, %v), want [%s]", likedList, err, v1.ID)
+	}
+	savedList, err := s.Saved(ctx)
+	if err != nil || len(savedList) != 1 || savedList[0].ID != v2.ID {
+		t.Fatalf("Saved() = (%+v, %v), want [%s]", savedList, err, v2.ID)
+	}
+
+	fs := NewFakeStore()
+	if on, err := fs.ToggleLiked(ctx, v1); err != nil || !on {
+		t.Fatalf("FakeStore.ToggleLiked = (%v, %v), want (true, nil)", on, err)
+	}
+	if got, err := fs.Liked(ctx); err != nil || len(got) != 1 || got[0].ID != v1.ID {
+		t.Fatalf("FakeStore.Liked = (%+v, %v), want [%s]", got, err, v1.ID)
+	}
+}

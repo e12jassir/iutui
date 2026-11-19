@@ -2,6 +2,8 @@ package tui
 
 import (
 	"bytes"
+	"container/list"
+	"context"
 	_ "embed"
 	"encoding/base64"
 	"fmt"
@@ -10,28 +12,325 @@ import (
 	"image/color"
 	_ "image/jpeg"
 	"image/png"
+	"io"
+	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/charmbracelet/lipgloss"
-	"github.com/e12jassir/iutui/internal/data"
+	"github.com/e12jassir/iutui/internal/platform"
+	"github.com/e12jassir/iutui/internal/tui/thumbs"
 )
 
-var (
-	thumbCache    = make(map[string]string)
-	thumbCacheMu  sync.RWMutex
-	fetchingMap   = make(map[string]bool)
-	fetchingMu    sync.Mutex
-	preparingMap  = make(map[string]bool)
-	prepareMu     sync.Mutex
-	prepareSem    = make(chan struct{}, 4)
-	kittyUploaded = make(map[uint32]bool)
-	kittyUploadMu sync.Mutex
-	ttyWriteMu    sync.Mutex
+const (
+	maxThumbCacheEntries = 128
+	maxKittyImages       = 96
+	brandImgID           = uint32(0x495554) // "IUT"
+	defaultThumbBaseURL  = "https://i.ytimg.com/vi"
+	maxThumbBytes        = 10 << 20
 )
+
+type thumbCacheValue struct {
+	ansi       string
+	kittyImgID uint32
+}
+
+type lruEntry[K comparable, V any] struct {
+	key    K
+	val    V
+	pinned bool
+}
+
+type lruCache[K comparable, V any] struct {
+	mu       sync.Mutex
+	maxSize  int
+	unpinned int
+	items    map[K]*list.Element
+	order    *list.List // front = most recently used, back = least recently used
+}
+
+func newLRUCache[K comparable, V any](maxSize int) *lruCache[K, V] {
+	return &lruCache[K, V]{
+		maxSize: maxSize,
+		items:   make(map[K]*list.Element),
+		order:   list.New(),
+	}
+}
+
+func (c *lruCache[K, V]) get(key K) (V, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	elem, ok := c.items[key]
+	if !ok {
+		var zero V
+		return zero, false
+	}
+	c.order.MoveToFront(elem)
+	return elem.Value.(*lruEntry[K, V]).val, true
+}
+
+func (c *lruCache[K, V]) touch(key K) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	elem, ok := c.items[key]
+	if !ok {
+		return false
+	}
+	c.order.MoveToFront(elem)
+	return true
+}
+
+func (c *lruCache[K, V]) put(key K, val V, pinned bool) []K {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.putLocked(key, val, pinned)
+}
+
+func (c *lruCache[K, V]) putLocked(key K, val V, pinned bool) []K {
+	if elem, ok := c.items[key]; ok {
+		entry := elem.Value.(*lruEntry[K, V])
+		entry.val = val
+		if !entry.pinned && pinned {
+			entry.pinned = true
+			c.unpinned--
+		}
+		c.order.MoveToFront(elem)
+	} else {
+		entry := &lruEntry[K, V]{key: key, val: val, pinned: pinned}
+		elem := c.order.PushFront(entry)
+		c.items[key] = elem
+		if !pinned {
+			c.unpinned++
+		}
+	}
+
+	var evicted []K
+	for c.unpinned > c.maxSize {
+		victim := c.oldestUnpinnedLocked()
+		if victim == nil {
+			break
+		}
+		entry := victim.Value.(*lruEntry[K, V])
+		c.order.Remove(victim)
+		delete(c.items, entry.key)
+		c.unpinned--
+		evicted = append(evicted, entry.key)
+	}
+	return evicted
+}
+
+func (c *lruCache[K, V]) oldestUnpinnedLocked() *list.Element {
+	for elem := c.order.Back(); elem != nil; elem = elem.Prev() {
+		if !elem.Value.(*lruEntry[K, V]).pinned {
+			return elem
+		}
+	}
+	return nil
+}
+
+func (c *lruCache[K, V]) del(key K) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	elem, ok := c.items[key]
+	if !ok {
+		return
+	}
+	entry := elem.Value.(*lruEntry[K, V])
+	c.order.Remove(elem)
+	delete(c.items, key)
+	if !entry.pinned {
+		c.unpinned--
+	}
+}
+
+func (c *lruCache[K, V]) clear() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.items = make(map[K]*list.Element)
+	c.order.Init()
+	c.unpinned = 0
+}
+
+func (c *lruCache[K, V]) len() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.items)
+}
+
+func (c *lruCache[K, V]) unpinnedLen() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.unpinned
+}
+
+var (
+	thumbCacheLRU = newLRUCache[string, thumbCacheValue](maxThumbCacheEntries)
+	kittyLRU      = newLRUCache[uint32, struct{}](maxKittyImages)
+
+	fetchingMu   sync.Mutex
+	fetchingMap  = make(map[string]bool)
+	fetchSem     = make(chan struct{}, 6)
+	prepareMu    sync.Mutex
+	preparingMap = make(map[string]bool)
+	prepareSem   = make(chan struct{}, 4)
+
+	thumbCfgMu             sync.RWMutex
+	thumbCacheDir          string
+	defaultThumbHTTPClient = &http.Client{Timeout: 5 * time.Second}
+	thumbHTTPClient        = defaultThumbHTTPClient
+	thumbBaseURL           = defaultThumbBaseURL
+	onThumbReady           func(videoID string)
+
+	ttyWriteMu sync.Mutex
+	ttyWriter  io.Writer
+	ttyOpener  = defaultTTYOpener
+
+	asyncWG sync.WaitGroup
+)
+
+func defaultTTYOpener() (io.WriteCloser, error) {
+	return os.OpenFile("/dev/tty", os.O_WRONLY, 0)
+}
+
+// SetThumbCacheDir overrides the base cache directory used for storing and reading thumbnails.
+// Passing an empty string restores platform.ResolvePaths().CacheDir.
+func SetThumbCacheDir(dir string) {
+	trimmed := strings.TrimSpace(dir)
+	thumbCfgMu.Lock()
+	changed := thumbCacheDir != trimmed
+	thumbCacheDir = trimmed
+	thumbCfgMu.Unlock()
+	if changed {
+		thumbCacheLRU.clear()
+	}
+}
+
+func getThumbCacheDir() string {
+	thumbCfgMu.RLock()
+	dir := thumbCacheDir
+	thumbCfgMu.RUnlock()
+	if dir != "" {
+		return dir
+	}
+	return platform.ResolvePaths().CacheDir
+}
+
+// SetThumbHTTPClient overrides the HTTP client used for background thumbnail downloads.
+// Passing nil restores the default 5-second timeout client.
+func SetThumbHTTPClient(c *http.Client) {
+	thumbCfgMu.Lock()
+	if c == nil {
+		thumbHTTPClient = defaultThumbHTTPClient
+	} else {
+		thumbHTTPClient = c
+	}
+	thumbCfgMu.Unlock()
+}
+
+func getThumbHTTPClient() *http.Client {
+	thumbCfgMu.RLock()
+	c := thumbHTTPClient
+	thumbCfgMu.RUnlock()
+	if c == nil {
+		return defaultThumbHTTPClient
+	}
+	return c
+}
+
+// SetThumbBaseURL overrides the base URL used for thumbnail downloads (default "https://i.ytimg.com/vi").
+// Passing an empty string restores the default URL.
+func SetThumbBaseURL(base string) {
+	trimmed := strings.TrimRight(strings.TrimSpace(base), "/")
+	thumbCfgMu.Lock()
+	if trimmed == "" {
+		thumbBaseURL = defaultThumbBaseURL
+	} else {
+		thumbBaseURL = trimmed
+	}
+	thumbCfgMu.Unlock()
+}
+
+func getThumbBaseURL() string {
+	thumbCfgMu.RLock()
+	base := thumbBaseURL
+	thumbCfgMu.RUnlock()
+	if base == "" {
+		return defaultThumbBaseURL
+	}
+	return base
+}
+
+// SetOnThumbReady registers a callback invoked asynchronously when a thumbnail is
+// downloaded or prepared for rendering. Passing nil clears the callback.
+func SetOnThumbReady(fn func(videoID string)) {
+	thumbCfgMu.Lock()
+	onThumbReady = fn
+	thumbCfgMu.Unlock()
+}
+
+func notifyThumbReady(videoID string) {
+	thumbCfgMu.RLock()
+	fn := onThumbReady
+	thumbCfgMu.RUnlock()
+	if fn == nil {
+		return
+	}
+	asyncWG.Add(1)
+	go func() {
+		defer asyncWG.Done()
+		fn(videoID)
+	}()
+}
+
+func setTTYWriter(w io.Writer) {
+	ttyWriteMu.Lock()
+	ttyWriter = w
+	ttyWriteMu.Unlock()
+}
+
+func setTTYOpener(fn func() (io.WriteCloser, error)) {
+	ttyWriteMu.Lock()
+	if fn == nil {
+		ttyOpener = defaultTTYOpener
+	} else {
+		ttyOpener = fn
+	}
+	ttyWriteMu.Unlock()
+}
+
+func checkTTY() error {
+	ttyWriteMu.Lock()
+	w := ttyWriter
+	opener := ttyOpener
+	ttyWriteMu.Unlock()
+	if w != nil {
+		return nil
+	}
+	tty, err := opener()
+	if err != nil {
+		return err
+	}
+	return tty.Close()
+}
+
+func writeTTY(b []byte) error {
+	ttyWriteMu.Lock()
+	defer ttyWriteMu.Unlock()
+	if ttyWriter != nil {
+		_, err := ttyWriter.Write(b)
+		return err
+	}
+	tty, err := ttyOpener()
+	if err != nil {
+		return err
+	}
+	defer tty.Close()
+	_, err = tty.Write(b)
+	return err
+}
 
 // kittyDiacritics maps indices 0..63 to Kitty's official row/column combining diacritics for U+10EEEE placeholders.
 var kittyDiacritics = []rune{
@@ -45,15 +344,15 @@ var kittyDiacritics = []rune{
 	0x05A9, 0x05AA, 0x05AB, 0x05AC, 0x05AD, 0x05AE, 0x05AF, 0x05C4,
 }
 
-// isKittyGraphicsSupported returns true when running inside Kitty or Ghostty terminal.
+// isKittyGraphicsSupported returns true when running inside Kitty or Ghostty terminal,
+// or when YT_PREVIEW explicitly selects kitty.
 func isKittyGraphicsSupported() bool {
-	if os.Getenv("YT_PREVIEW") == "chafa" || os.Getenv("YT_PREVIEW") == "none" {
-		return false
-	}
-	if os.Getenv("KITTY_WINDOW_ID") != "" || os.Getenv("TERM") == "xterm-kitty" || os.Getenv("TERM_PROGRAM") == "ghostty" {
-		return true
-	}
-	return false
+	return thumbs.DetectBackend(
+		os.Getenv("YT_PREVIEW"),
+		os.Getenv("KITTY_WINDOW_ID"),
+		os.Getenv("TERM"),
+		os.Getenv("TERM_PROGRAM"),
+	) == thumbs.BackendKitty
 }
 
 // cleanThumbID strips playlist/mix prefixes like "RD" so YouTube's i.ytimg.com returns a valid thumbnail.
@@ -65,28 +364,34 @@ func cleanThumbID(id string) string {
 	return id
 }
 
+func isValidCleanThumbID(cleanID string) bool {
+	if cleanID == "" || cleanID == "." || cleanID == ".." {
+		return false
+	}
+	return !strings.ContainsAny(cleanID, "/\\")
+}
+
 // GetThumbnailFile returns the path to a cached thumbnail image (preferring 16:9 HD).
 func GetThumbnailFile(id string) string {
 	cleanID := cleanThumbID(id)
-	if cleanID == "" {
+	if !isValidCleanThumbID(cleanID) {
 		return ""
 	}
-	cacheDir, _ := data.DefaultPaths()
-	thumbsDir := filepath.Join(cacheDir, "thumbs")
+	thumbsDir := filepath.Join(getThumbCacheDir(), "thumbs")
 	for _, q := range []string{"maxresdefault", "mqdefault", "hqdefault"} {
 		f := filepath.Join(thumbsDir, fmt.Sprintf("%s_%s.jpg", cleanID, q))
-		if info, err := os.Stat(f); err == nil && info.Size() > 1000 {
+		if info, err := os.Stat(f); err == nil && !info.IsDir() && info.Size() >= 1000 {
 			return f
 		}
 	}
 	return ""
 }
 
-// FetchThumbnailAsync triggers a background download for missing thumbnails using maxresdefault (1280x720)
+// FetchThumbnailAsync triggers a bounded background download for missing thumbnails using maxresdefault (1280x720)
 // and falls back to mqdefault (320x180). Both are true 16:9 and lack the 45px black letterbox bars of hqdefault.
 func FetchThumbnailAsync(id string) {
 	cleanID := cleanThumbID(id)
-	if len(cleanID) < 5 {
+	if len(cleanID) < 5 || !isValidCleanThumbID(cleanID) {
 		return
 	}
 	fetchingMu.Lock()
@@ -97,33 +402,96 @@ func FetchThumbnailAsync(id string) {
 	fetchingMap[cleanID] = true
 	fetchingMu.Unlock()
 
+	asyncWG.Add(1)
 	go func() {
-		cacheDir, _ := data.DefaultPaths()
-		thumbsDir := filepath.Join(cacheDir, "thumbs")
-		_ = os.MkdirAll(thumbsDir, 0755)
+		defer asyncWG.Done()
+		downloaded := false
 
-		// 1. Try maxresdefault (1280x720 16:9, crystal clear HD)
-		targetMax := filepath.Join(thumbsDir, fmt.Sprintf("%s_maxresdefault.jpg", cleanID))
-		urlMax := fmt.Sprintf("https://i.ytimg.com/vi/%s/maxresdefault.jpg", cleanID)
-		cmdMax := exec.Command("curl", "-sfL", "--max-time", "4", "-o", targetMax, urlMax)
-		if err := cmdMax.Run(); err != nil || isFileTooSmall(targetMax, 3000) {
-			_ = os.Remove(targetMax)
+		fetchSem <- struct{}{}
+		func() {
+			defer func() { <-fetchSem }()
+			thumbsDir := filepath.Join(getThumbCacheDir(), "thumbs")
+			if err := os.MkdirAll(thumbsDir, 0o755); err != nil {
+				return
+			}
+
+			// 1. Try maxresdefault (1280x720 16:9, crystal clear HD)
+			targetMax := filepath.Join(thumbsDir, fmt.Sprintf("%s_maxresdefault.jpg", cleanID))
+			if err := downloadThumbToFile(cleanID, "maxresdefault", targetMax, 3000); err == nil {
+				downloaded = true
+				return
+			}
+
 			// 2. Fallback to mqdefault (320x180 16:9, clean without black bars)
 			targetMq := filepath.Join(thumbsDir, fmt.Sprintf("%s_mqdefault.jpg", cleanID))
-			urlMq := fmt.Sprintf("https://i.ytimg.com/vi/%s/mqdefault.jpg", cleanID)
-			cmdMq := exec.Command("curl", "-sfL", "--max-time", "4", "-o", targetMq, urlMq)
-			_ = cmdMq.Run()
-		}
+			if err := downloadThumbToFile(cleanID, "mqdefault", targetMq, 1000); err == nil {
+				downloaded = true
+			}
+		}()
 
 		fetchingMu.Lock()
 		delete(fetchingMap, cleanID)
 		fetchingMu.Unlock()
+
+		if downloaded {
+			notifyThumbReady(id)
+		}
 	}()
 }
 
-func isFileTooSmall(path string, minBytes int64) bool {
-	info, err := os.Stat(path)
-	return err != nil || info.Size() < minBytes
+func downloadThumbToFile(cleanID, variant, targetPath string, minBytes int64) error {
+	url := fmt.Sprintf("%s/%s/%s.jpg", getThumbBaseURL(), cleanID, variant)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return err
+	}
+
+	resp, err := getThumbHTTPClient().Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("unexpected status %d for %s", resp.StatusCode, url)
+	}
+
+	tmpFile, err := os.CreateTemp(filepath.Dir(targetPath), ".thumb-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmpFile.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+
+	n, err := io.Copy(tmpFile, io.LimitReader(resp.Body, maxThumbBytes+1))
+	closeErr := tmpFile.Close()
+	if err != nil {
+		return err
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	if n > maxThumbBytes {
+		return fmt.Errorf("thumbnail exceeds max size (%d bytes)", n)
+	}
+	if n < minBytes {
+		return fmt.Errorf("thumbnail too small (%d < %d bytes)", n, minBytes)
+	}
+
+	if err := os.Rename(tmpPath, targetPath); err != nil {
+		return err
+	}
+	cleanup = false
+	return nil
 }
 
 // RenderThumbnailANSI renders real pixel HD images inside cards via Kitty Unicode Placeholders (when running
@@ -135,11 +503,12 @@ func RenderThumbnailANSI(id string, width, height int) string {
 	useKitty := isKittyGraphicsSupported()
 	cacheKey := fmt.Sprintf("%s_%dx%d_k=%v", id, width, height, useKitty)
 
-	thumbCacheMu.RLock()
-	cached, ok := thumbCache[cacheKey]
-	thumbCacheMu.RUnlock()
-	if ok {
-		return cached
+	if entry, ok := thumbCacheLRU.get(cacheKey); ok {
+		if !useKitty || entry.kittyImgID == 0 || kittyLRU.touch(entry.kittyImgID) {
+			return entry.ansi
+		}
+		// Kitty image was evicted from Kitty LRU; drop stale cache entry and re-upload.
+		thumbCacheLRU.del(cacheKey)
 	}
 
 	file := GetThumbnailFile(id)
@@ -158,10 +527,7 @@ func RenderThumbnailANSI(id string, width, height int) string {
 		return renderEmptyThumb(width, height)
 	}
 
-	thumbCacheMu.Lock()
-	thumbCache[cacheKey] = ansiStr
-	thumbCacheMu.Unlock()
-
+	thumbCacheLRU.put(cacheKey, thumbCacheValue{ansi: ansiStr}, false)
 	return ansiStr
 }
 
@@ -174,19 +540,26 @@ func prepareKittyAsync(cacheKey, id, file string, width, height int) {
 	preparingMap[cacheKey] = true
 	prepareMu.Unlock()
 
+	asyncWG.Add(1)
 	go func() {
+		defer asyncWG.Done()
+		ready := false
+
 		prepareSem <- struct{}{}
-		defer func() {
-			<-prepareSem
-			prepareMu.Lock()
-			delete(preparingMap, cacheKey)
-			prepareMu.Unlock()
+		func() {
+			defer func() { <-prepareSem }()
+			if kittyStr, imgID, err := renderKittyPlaceholder(id, file, width, height); err == nil && kittyStr != "" {
+				thumbCacheLRU.put(cacheKey, thumbCacheValue{ansi: kittyStr, kittyImgID: imgID}, false)
+				ready = true
+			}
 		}()
 
-		if kittyStr, err := renderKittyPlaceholder(id, file, width, height); err == nil && kittyStr != "" {
-			thumbCacheMu.Lock()
-			thumbCache[cacheKey] = kittyStr
-			thumbCacheMu.Unlock()
+		prepareMu.Lock()
+		delete(preparingMap, cacheKey)
+		prepareMu.Unlock()
+
+		if ready {
+			notifyThumbReady(id)
 		}
 	}()
 }
@@ -196,34 +569,52 @@ func videoImageID(id string, cols, rows int) uint32 {
 	_, _ = h.Write([]byte(fmt.Sprintf("%s_%dx%d", cleanThumbID(id), cols, rows)))
 	// 24-bit non-zero ID (1 .. 16,777,215) so it fits in 24-bit RGB foreground color
 	val := h.Sum32() & 0xFFFFFF
-	if val == 0 {
-		val = 1
+	if val == 0 || val == brandImgID {
+		val++
 	}
 	return val
 }
 
-// renderKittyPlaceholder uploads the downscaled PNG (320x180) once to /dev/tty using Kitty Graphics Protocol
+func ensureKittyImageUploaded(imgID uint32, pinned bool, transmit func() error) error {
+	kittyLRU.mu.Lock()
+	defer kittyLRU.mu.Unlock()
+
+	if elem, ok := kittyLRU.items[imgID]; ok {
+		kittyLRU.order.MoveToFront(elem)
+		return nil
+	}
+
+	if err := transmit(); err != nil {
+		return err
+	}
+
+	evicted := kittyLRU.putLocked(imgID, struct{}{}, pinned)
+	for _, oldID := range evicted {
+		deleteKittyImage(oldID)
+	}
+	return nil
+}
+
+func deleteKittyImage(imgID uint32) {
+	seq := fmt.Sprintf("\x1b_Ga=d,d=i,i=%d,q=2\x1b\\", imgID)
+	_ = writeTTY([]byte(seq))
+}
+
+// renderKittyPlaceholder uploads the downscaled PNG (480x270) once to /dev/tty using Kitty Graphics Protocol
 // and returns a grid of U+10EEEE Unicode placeholder cells that Lipgloss can safely wrap with borders.
-func renderKittyPlaceholder(id, path string, cols, rows int) (string, error) {
+func renderKittyPlaceholder(id, path string, cols, rows int) (string, uint32, error) {
 	if cols <= 0 || rows <= 0 || cols > len(kittyDiacritics) || rows > len(kittyDiacritics) {
-		return "", fmt.Errorf("invalid kitty dimensions %dx%d", cols, rows)
+		return "", 0, fmt.Errorf("invalid kitty dimensions %dx%d", cols, rows)
 	}
 	imgID := videoImageID(id, cols, rows)
 
-	kittyUploadMu.Lock()
-	uploaded := kittyUploaded[imgID]
-	kittyUploadMu.Unlock()
-
-	if !uploaded {
+	if !kittyLRU.touch(imgID) {
 		if err := uploadKittyImage(imgID, path, cols, rows); err != nil {
-			return "", err
+			return "", 0, err
 		}
-		kittyUploadMu.Lock()
-		kittyUploaded[imgID] = true
-		kittyUploadMu.Unlock()
 	}
 
-	return formatKittyPlaceholders(imgID, cols, rows), nil
+	return formatKittyPlaceholders(imgID, cols, rows), imgID, nil
 }
 
 func formatKittyPlaceholders(imgID uint32, cols, rows int) string {
@@ -231,7 +622,7 @@ func formatKittyPlaceholders(imgID uint32, cols, rows int) string {
 	gColor := (imgID >> 8) & 0xFF
 	bColor := imgID & 0xFF
 
-	var lines []string
+	lines := make([]string, 0, rows)
 	for r := 0; r < rows; r++ {
 		var sb strings.Builder
 		fmt.Fprintf(&sb, "\x1b[38;2;%d;%d;%dm", rColor, gColor, bColor)
@@ -257,35 +648,24 @@ func RenderBrandLogo(cols, rows int) string {
 		return ""
 	}
 	cacheKey := fmt.Sprintf("__brand_logo_%dx%d", cols, rows)
-	thumbCacheMu.RLock()
-	cached, ok := thumbCache[cacheKey]
-	thumbCacheMu.RUnlock()
-	if ok {
-		return cached
+	if entry, ok := thumbCacheLRU.get(cacheKey); ok && kittyLRU.touch(brandImgID) {
+		return entry.ansi
 	}
 
-	const brandImgID uint32 = 0x495554 // "IUT"
-	kittyUploadMu.Lock()
-	uploaded := kittyUploaded[brandImgID]
-	kittyUploadMu.Unlock()
-
-	if !uploaded {
+	if !kittyLRU.touch(brandImgID) {
 		pngBytes, err := renderYouTubeBrandPNG()
 		if err != nil {
 			return ""
 		}
-		if err := transmitKittyPNG(brandImgID, pngBytes, cols, rows); err != nil {
+		if err := ensureKittyImageUploaded(brandImgID, true, func() error {
+			return transmitKittyPNG(brandImgID, pngBytes, cols, rows)
+		}); err != nil {
 			return ""
 		}
-		kittyUploadMu.Lock()
-		kittyUploaded[brandImgID] = true
-		kittyUploadMu.Unlock()
 	}
 
 	out := formatKittyPlaceholders(brandImgID, cols, rows)
-	thumbCacheMu.Lock()
-	thumbCache[cacheKey] = out
-	thumbCacheMu.Unlock()
+	thumbCacheLRU.put(cacheKey, thumbCacheValue{ansi: out, kittyImgID: brandImgID}, true)
 	return out
 }
 
@@ -299,14 +679,12 @@ func renderYouTubeBrandPNG() ([]byte, error) {
 	return embeddedBrandLogoPNG, nil
 }
 
-// uploadKittyImage decodes the JPEG, scales it cleanly to 320x180 PNG in memory, and sends it to /dev/tty
-// using Kitty's APC graphics sequence with U=1 (virtual placement for Unicode placeholders).
+// uploadKittyImage decodes the image, scales it cleanly to 480x270 PNG in memory, and sends it to /dev/tty
+// (or the injected ttyWriter) using Kitty's APC graphics sequence with U=1 (virtual placement).
 func uploadKittyImage(imgID uint32, path string, cols, rows int) error {
-	tty, err := os.OpenFile("/dev/tty", os.O_WRONLY, 0)
-	if err != nil {
+	if err := checkTTY(); err != nil {
 		return err
 	}
-	_ = tty.Close()
 
 	f, err := os.Open(path)
 	if err != nil {
@@ -379,10 +757,16 @@ func uploadKittyImage(imgID uint32, path string, cols, rows int) error {
 	if err := png.Encode(&pngBuf, dst); err != nil {
 		return err
 	}
-	return transmitKittyPNG(imgID, pngBuf.Bytes(), cols, rows)
+
+	return ensureKittyImageUploaded(imgID, false, func() error {
+		return transmitKittyPNG(imgID, pngBuf.Bytes(), cols, rows)
+	})
 }
 
 func transmitKittyPNG(imgID uint32, pngBytes []byte, cols, rows int) error {
+	if len(pngBytes) == 0 {
+		return fmt.Errorf("empty png payload")
+	}
 	b64 := base64.StdEncoding.EncodeToString(pngBytes)
 
 	var out bytes.Buffer
@@ -404,20 +788,10 @@ func transmitKittyPNG(imgID uint32, pngBytes []byte, cols, rows int) error {
 		}
 	}
 
-	ttyWriteMu.Lock()
-	defer ttyWriteMu.Unlock()
-
-	tty, err := os.OpenFile("/dev/tty", os.O_WRONLY, 0)
-	if err != nil {
-		return err
-	}
-	defer tty.Close()
-
-	_, err = tty.Write(out.Bytes())
-	return err
+	return writeTTY(out.Bytes())
 }
 
-// renderHighDefBlocks decodes the JPEG in pure Go, performs area-averaged subpixel downsampling
+// renderHighDefBlocks decodes the thumbnail image in pure Go, performs area-averaged subpixel downsampling
 // with contrast/unsharp boost, and renders crisp 24-bit truecolor half-block / quadrant cells.
 func renderHighDefBlocks(path string, cols, rows int) (string, error) {
 	f, err := os.Open(path)
@@ -539,7 +913,7 @@ func renderHighDefBlocks(path string, cols, rows int) (string, error) {
 		}
 	}
 
-	var lines []string
+	lines := make([]string, 0, rows)
 	for row := 0; row < rows; row++ {
 		var sb strings.Builder
 		for col := 0; col < cols; col++ {
@@ -643,7 +1017,7 @@ func clampByte(v float64) uint8 {
 }
 
 func renderEmptyThumb(width, height int) string {
-	var lines []string
+	lines := make([]string, 0, height)
 	bgStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#6B7280")).
 		Background(lipgloss.Color("#161925"))

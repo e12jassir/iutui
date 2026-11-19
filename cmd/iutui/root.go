@@ -228,6 +228,7 @@ func runTUI(paths platform.Paths) error {
 	cat := catalog.NewHybridCatalog(bashCat, ytdlpCat)
 
 	st := store.NewTSVStore(paths.StateDir)
+	cat.SubscriptionsProvider = st.Subscriptions
 	eng := player.NewIPCClient(
 		player.WithSocketPath(paths.SocketPath),
 		player.WithLaunchDefaults(player.LaunchOpts{
@@ -313,6 +314,10 @@ func runTUI(paths platform.Paths) error {
 		tea.WithAltScreen(),
 		tea.WithMouseAllMotion(),
 	)
+	tui.SetOnThumbReady(func(id string) {
+		p.Send(app.ThumbReadyMsg{ID: id})
+	})
+	defer tui.SetOnThumbReady(nil)
 	_, err := p.Run()
 	return err
 }

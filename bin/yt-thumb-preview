@@ -19,7 +19,7 @@ icat() {
 clear_icat() {
     if is_kitty && [ -t 1 ] && [ -c /dev/tty ] && { : >/dev/tty; } 2>/dev/null; then
         icat --clear --silent </dev/tty >/dev/tty 2>/dev/null || true
-        printf '\033_Ga=d,d=a\033\\' >/dev/tty 2>/dev/null || true
+        printf '\033_Ga=d,d=a\033\134' >/dev/tty 2>/dev/null || true
     fi
 }
 

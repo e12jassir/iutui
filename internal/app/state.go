@@ -116,6 +116,7 @@ type State struct {
 	ResultScroll int
 
 	SavedIDs        map[string]bool
+	LikedIDs        map[string]bool
 	HistoryIDs      map[string]bool
 	Subscriptions   []string
 	Queue           []model.Video
@@ -242,6 +243,7 @@ func NewState(deps Dependencies) *State {
 		AppVersion:        strings.TrimSpace(deps.AppVersion),
 		Feeds:             make(map[model.Tab][]model.Video),
 		SavedIDs:          make(map[string]bool),
+		LikedIDs:          make(map[string]bool),
 		HistoryIDs:        make(map[string]bool),
 		LiveLoading:       make(map[model.Tab]bool),
 		metaRequested:     make(map[string]bool),

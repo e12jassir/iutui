@@ -38,5 +38,5 @@ verify: lint test
 
 lint:
 	@for s in bin/yt bin/yt-thumb-preview install.sh tests/smoke.sh lib/*.sh; do bash -n "$$s" || exit 1; done
-	@if command -v shellcheck >/dev/null 2>&1; then shellcheck -x bin/yt bin/yt-thumb-preview install.sh tests/smoke.sh; fi
+	@if command -v shellcheck >/dev/null 2>&1; then shellcheck -x -P bin -P tests bin/yt bin/yt-thumb-preview install.sh tests/smoke.sh; fi
 	@python3 -m py_compile bin/yt-fmt
