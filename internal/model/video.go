@@ -71,6 +71,7 @@ type Video struct {
 	Published string `json:"published"`
 	IsLive    bool   `json:"is_live"`
 	Thumbnail string `json:"thumbnail,omitempty"`
+	LocalPath string `json:"local_path,omitempty"`
 }
 
 // Badge returns the visual badge text (e.g. "[🔴 EN VIVO]" or "[05:18]").

@@ -4,12 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/e12jassir/iutui/internal/catalog"
+	"github.com/e12jassir/iutui/internal/download"
 	"github.com/e12jassir/iutui/internal/lyrics"
 	"github.com/e12jassir/iutui/internal/model"
 	"github.com/e12jassir/iutui/internal/player"
@@ -27,7 +30,10 @@ const (
 	stillWatchingIdleLimit  = 60 * time.Minute
 )
 
-var toastTTL = 4 * time.Second
+var (
+	toastTTL        = 4 * time.Second
+	suggestDebounce = 180 * time.Millisecond
+)
 
 // FeedLoadedMsg arrives when a catalog feed finishes loading.
 type FeedLoadedMsg struct {
@@ -150,6 +156,37 @@ type LyricsLoadedMsg struct {
 // MetadataEnrichedMsg delivers asynchronously enriched views and publish dates.
 type MetadataEnrichedMsg struct {
 	Meta map[string]catalog.VideoMeta
+}
+
+// SuggestTickMsg triggers a debounced autocomplete query when the user pauses typing.
+type SuggestTickMsg struct {
+	Seq   uint64
+	Draft string
+}
+
+// SuggestionsLoadedMsg delivers search autocomplete results for the active search draft.
+type SuggestionsLoadedMsg struct {
+	Seq   uint64
+	Query string
+	Items []string
+	Err   error
+}
+
+// QueueLoadedMsg delivers the live mpv playlist items for the Queue overlay.
+type QueueLoadedMsg struct {
+	Items []player.PlaylistItem
+	Err   error
+}
+
+// LoopToggledMsg reports completion of toggling single-track repeat in the player engine.
+type LoopToggledMsg struct {
+	Enabled bool
+	Err     error
+}
+
+// DownloadProgressMsg delivers incremental progress updates for active downloads.
+type DownloadProgressMsg struct {
+	Item download.Item
 }
 
 // Init starts initial feed/store loading and subscribes to player status push updates.
@@ -319,6 +356,7 @@ func (s *State) Update(msg tea.Msg) (*State, tea.Cmd) {
 		return s, nil
 
 	case DownloadDoneMsg:
+		delete(s.DownloadProgress, msg.Video.ID)
 		if msg.Err != nil {
 			return s, s.toastCmd(fmt.Sprintf("Error descargando: %v", msg.Err))
 		}
@@ -328,6 +366,15 @@ func (s *State) Update(msg tea.Msg) (*State, tea.Cmd) {
 			reload = s.loadFeedCmd(model.TabDownloads, true)
 		}
 		return s, tea.Batch(s.toastCmd("✓ Descargado: "+msg.Video.Title), reload)
+
+	case DownloadProgressMsg:
+		if s.DownloadProgress == nil {
+			s.DownloadProgress = make(map[string]download.Item)
+		}
+		if msg.Item.Video.ID != "" {
+			s.DownloadProgress[msg.Item.Video.ID] = msg.Item
+		}
+		return s, nil
 
 	case VideoModeToggledMsg:
 		if msg.Err != nil {
@@ -431,8 +478,51 @@ func (s *State) Update(msg tea.Msg) (*State, tea.Cmd) {
 		s.applyEnrichedMetadata(msg.Meta)
 		return s, nil
 
+	case SuggestTickMsg:
+		if s.Focus != FocusSearch || msg.Seq != s.suggestSeq || msg.Draft != s.SearchDraft {
+			return s, nil
+		}
+		return s, s.fetchSuggestionsCmd(msg.Seq, msg.Draft)
+
+	case SuggestionsLoadedMsg:
+		if s.Focus != FocusSearch || msg.Seq != s.suggestSeq || msg.Query != s.SearchDraft {
+			return s, nil
+		}
+		if msg.Err == nil {
+			s.SearchSuggestions = msg.Items
+			s.SuggestIdx = -1
+		}
+		return s, nil
+
+	case QueueLoadedMsg:
+		if msg.Err == nil && len(msg.Items) > 0 {
+			s.MPVPlaylist = msg.Items
+		} else if len(s.Queue) > 0 {
+			s.MPVPlaylist = s.localQueuePlaylist()
+		}
+		if s.QueueIdx >= len(s.MPVPlaylist) {
+			s.QueueIdx = max(0, len(s.MPVPlaylist)-1)
+		}
+		return s, nil
+
+	case LoopToggledMsg:
+		if msg.Err != nil {
+			return s, s.toastCmd(fmt.Sprintf("Error en repetir: %v", msg.Err))
+		}
+		s.PlayerStatus.LoopFile = msg.Enabled
+		if msg.Enabled {
+			return s, s.toastCmd("🔁 Repetir: ACTIVADO")
+		}
+		return s, s.toastCmd("🔁 Repetir: DESACTIVADO")
+
 	case PlayerStatusMsg:
 		wasPlaying := s.PlayerStatus.IsRunning && !s.PlayerStatus.Paused
+		prevRunning := s.PlayerStatus.IsRunning
+		prevPos := s.PlayerStatus.TimePos
+		prevDur := s.PlayerStatus.Duration
+		if prevRunning && !msg.Status.IsRunning && !s.playInFlight && s.CurrentPlaying.ID != "" && s.Deps.ResumeStore != nil {
+			_ = s.Deps.ResumeStore.SavePosition(s.CurrentPlaying.ID, prevPos, prevDur)
+		}
 		isStaleTitle := s.playInFlight && s.PlayLoadingTitle != "" && msg.Status.Title != "" && msg.Status.Title != s.PlayLoadingTitle
 		if isStaleTitle {
 			// Avoid flashing the outgoing track title/position while switching to the new video.
@@ -545,6 +635,31 @@ func (s *State) handleKey(msg tea.KeyMsg) (*State, tea.Cmd) {
 		return s, nil
 	}
 
+	if s.ShowQueue {
+		switch key {
+		case "esc", "u", "q":
+			s.ShowQueue = false
+			return s, nil
+		case "j", "down":
+			if len(s.MPVPlaylist) > 0 && s.QueueIdx < len(s.MPVPlaylist)-1 {
+				s.QueueIdx++
+			}
+			return s, nil
+		case "k", "up":
+			if s.QueueIdx > 0 {
+				s.QueueIdx--
+			}
+			return s, nil
+		case "enter", " ":
+			return s.PlayQueueSelected()
+		case "x", "d", "backspace", "delete":
+			return s.RemoveQueueSelected()
+		case "c":
+			return s.ClearQueue()
+		}
+		return s, nil
+	}
+
 	if s.ShowChapters {
 		switch key {
 		case "esc", "C", "q":
@@ -637,29 +752,62 @@ func (s *State) handleKey(msg tea.KeyMsg) (*State, tea.Cmd) {
 		case "esc":
 			s.Focus = FocusMain
 			s.SearchDraft = ""
+			s.SearchSuggestions = nil
+			s.SuggestIdx = -1
+			if s.suggestCancel != nil {
+				s.suggestCancel()
+			}
 			return s, nil
 		case "enter":
+			if s.SuggestIdx >= 0 && s.SuggestIdx < len(s.SearchSuggestions) {
+				s.SearchDraft = s.SearchSuggestions[s.SuggestIdx]
+			}
 			return s.SubmitSearch()
+		case "down":
+			if len(s.SearchSuggestions) > 0 {
+				s.SuggestIdx = (s.SuggestIdx + 1) % len(s.SearchSuggestions)
+			}
+			return s, nil
+		case "up":
+			if len(s.SearchSuggestions) > 0 {
+				if s.SuggestIdx <= 0 {
+					s.SuggestIdx = len(s.SearchSuggestions) - 1
+				} else {
+					s.SuggestIdx--
+				}
+			}
+			return s, nil
+		case "tab":
+			if len(s.SearchSuggestions) > 0 {
+				if s.SuggestIdx < 0 || s.SuggestIdx >= len(s.SearchSuggestions) {
+					s.SuggestIdx = 0
+				}
+				s.SearchDraft = s.SearchSuggestions[s.SuggestIdx]
+				return s, s.onSearchDraftChanged()
+			}
+			return s, nil
 		case "ctrl+u":
 			s.SearchDraft = ""
-			return s, nil
+			return s, s.onSearchDraftChanged()
 		case "ctrl+w", "alt+backspace":
 			s.SearchDraft = deleteLastWord(s.SearchDraft)
-			return s, nil
+			return s, s.onSearchDraftChanged()
 		case "backspace", "ctrl+h", "delete":
 			r := []rune(s.SearchDraft)
 			if len(r) > 0 {
 				s.SearchDraft = string(r[:len(r)-1])
 			}
-			return s, nil
+			return s, s.onSearchDraftChanged()
 		case " ":
 			s.SearchDraft += " "
-			return s, nil
+			return s, s.onSearchDraftChanged()
 		default:
 			if msg.Type == tea.KeySpace {
 				s.SearchDraft += " "
+				return s, s.onSearchDraftChanged()
 			} else if msg.Type == tea.KeyRunes {
 				s.SearchDraft += sanitizeSearchRunes(msg.Runes)
+				return s, s.onSearchDraftChanged()
 			}
 			return s, nil
 		}
@@ -675,9 +823,10 @@ func (s *State) handleKey(msg tea.KeyMsg) (*State, tea.Cmd) {
 	case "S":
 		s.ShowSettings = !s.ShowSettings
 		return s, nil
+	case "u":
+		return s.OpenQueue()
 	case "/":
-		s.Focus = FocusSearch
-		s.SearchDraft = ""
+		s.openSearchFocus()
 		return s, nil
 	case "tab":
 		if s.Width >= miniGuideMinW {
@@ -818,6 +967,14 @@ func (s *State) handleKey(msg tea.KeyMsg) (*State, tea.Cmd) {
 		return s.SeekRelative(10)
 	case ",", "<":
 		return s.SeekRelative(-10)
+	case "{":
+		return s.AdjustSpeed(-0.25)
+	case "}":
+		return s.AdjustSpeed(0.25)
+	case "0":
+		return s.SetPlaybackSpeed(1.0)
+	case "R":
+		return s.ToggleLoop()
 	case "r":
 		s.Syncing = true
 		return s, tea.Batch(s.loadFeedCmd(s.ActiveTab, true), s.ensureAnimTick())
@@ -971,10 +1128,18 @@ func isMixTarget(id, mode string) bool {
 // SubmitSearch cancels any in-flight search and starts a new one.
 func (s *State) SubmitSearch() (*State, tea.Cmd) {
 	q := strings.TrimSpace(s.SearchDraft)
+	s.SearchSuggestions = nil
+	s.SuggestIdx = -1
+	if s.suggestCancel != nil {
+		s.suggestCancel()
+	}
 	if q == "" {
 		s.Focus = FocusMain
 		s.SearchDraft = ""
 		return s, nil
+	}
+	if s.Deps.SearchHistory != nil {
+		_ = s.Deps.SearchHistory.Record(q)
 	}
 	if s.searchCancel != nil {
 		s.searchCancel()
@@ -1101,26 +1266,49 @@ func (s *State) playVideo(v model.Video, mode string) (*State, tea.Cmd) {
 		return s, nil
 	}
 	s.LyricsScroll = 0
-	if s.CurrentPlaying.ID != "" && s.CurrentPlaying.ID != v.ID && !s.skipHistoryPush {
-		s.PlayStack = append(s.PlayStack, s.CurrentPlaying)
-		if len(s.PlayStack) > 50 {
-			s.PlayStack = s.PlayStack[len(s.PlayStack)-50:]
+	if s.CurrentPlaying.ID != "" && s.CurrentPlaying.ID != v.ID {
+		s.saveCurrentResumePosition()
+		if !s.skipHistoryPush {
+			s.PlayStack = append(s.PlayStack, s.CurrentPlaying)
+			if len(s.PlayStack) > 50 {
+				s.PlayStack = s.PlayStack[len(s.PlayStack)-50:]
+			}
 		}
 	}
 	s.skipHistoryPush = false
 	s.CurrentPlaying = v
 
-	if p, ok := s.Deps.Engine.(streamPrefetcher); ok {
-		items := s.VisibleItems()
-		idx := s.indexOfVisibleVideo(v.ID)
-		if idx < 0 {
-			idx = s.activeIdx()
+	targetVideo := v
+	offlineLocal := false
+	if !isMixTarget(v.ID, mode) {
+		if lp, ok := s.Deps.Downloader.(localFileProvider); ok {
+			if localPath := strings.TrimSpace(lp.LocalFile(v.ID)); localPath != "" {
+				targetVideo.LocalPath = localPath
+				offlineLocal = true
+			}
 		}
-		if idx >= 0 && idx+1 < len(items) {
-			p.Prefetch(items[idx+1])
+	}
+
+	var resumePos float64
+	if !isMixTarget(v.ID, mode) && s.Deps.ResumeStore != nil {
+		if pos, ok := s.Deps.ResumeStore.GetPosition(v.ID); ok && pos >= 30 {
+			resumePos = pos
 		}
-		if idx >= 0 && idx+2 < len(items) {
-			p.Prefetch(items[idx+2])
+	}
+
+	if !offlineLocal {
+		if p, ok := s.Deps.Engine.(streamPrefetcher); ok {
+			items := s.VisibleItems()
+			idx := s.indexOfVisibleVideo(v.ID)
+			if idx < 0 {
+				idx = s.activeIdx()
+			}
+			if idx >= 0 && idx+1 < len(items) {
+				p.Prefetch(items[idx+1])
+			}
+			if idx >= 0 && idx+2 < len(items) {
+				p.Prefetch(items[idx+2])
+			}
 		}
 	}
 
@@ -1129,7 +1317,7 @@ func (s *State) playVideo(v model.Video, mode string) (*State, tea.Cmd) {
 	s.PlayLoading = true
 	s.PlayLoadingTitle = v.Title
 	s.PlayerStatus.Title = v.Title
-	s.PlayerStatus.TimePos = 0
+	s.PlayerStatus.TimePos = resumePos
 	s.PlayerStatus.Duration = 0
 	s.RegisterUserActivity()
 	s.lastTrackTitle = v.Title
@@ -1150,15 +1338,28 @@ func (s *State) playVideo(v model.Video, mode string) (*State, tea.Cmd) {
 		}
 		s.Feeds[model.TabHistory] = updated
 	}
-	toastPrefix := "▶ Abriendo en mpv: "
+
+	toastMsg := "▶ Abriendo en mpv: " + v.Title
 	if mode == "audio" || (mode == "auto" && s.AudioOnly) {
-		toastPrefix = "🎧 Solo audio: "
+		toastMsg = "🎧 Solo audio: " + v.Title
 	} else if isMixTarget(v.ID, mode) {
-		toastPrefix = "📻 Abriendo Mix: "
+		toastMsg = "📻 Abriendo Mix: " + v.Title
+	} else if offlineLocal {
+		toastMsg = "💾 Sin conexión: " + v.Title
 	}
-	toastCmd := s.toastCmd(toastPrefix + v.Title)
+	pf, hasPlayFrom := s.Deps.Engine.(playFromStarter)
+	if resumePos > 0 && hasPlayFrom {
+		toastMsg = "⏩ Reanudando en " + formatClockApp(resumePos)
+	}
+	toastCmd := s.toastCmd(toastMsg)
 	playCmd := func() tea.Msg {
-		if err := s.Deps.Engine.Play(s.appCtx, v, mode); err != nil {
+		var err error
+		if resumePos > 0 && hasPlayFrom {
+			err = pf.PlayFrom(s.appCtx, targetVideo, mode, resumePos)
+		} else {
+			err = s.Deps.Engine.Play(s.appCtx, targetVideo, mode)
+		}
+		if err != nil {
 			return ActionResultMsg{Err: err}
 		}
 		if s.Deps.Store != nil {
@@ -1288,6 +1489,254 @@ type qualitySetter interface {
 
 type playbackProfileSetter interface {
 	SetPlaybackProfile(ctx context.Context, quality int, audioOnly bool) error
+}
+
+type localFileProvider interface {
+	LocalFile(videoID string) string
+}
+
+type speedController interface {
+	SetSpeed(ctx context.Context, speed float64) error
+}
+
+type loopToggler interface {
+	ToggleLoop(ctx context.Context) (bool, error)
+}
+
+type playlistController interface {
+	Playlist(ctx context.Context) ([]player.PlaylistItem, error)
+	PlayPlaylistIndex(ctx context.Context, index int) error
+	RemovePlaylistIndex(ctx context.Context, index int) error
+	ClearPlaylist(ctx context.Context) error
+}
+
+type playFromStarter interface {
+	PlayFrom(ctx context.Context, v model.Video, mode string, startPos float64) error
+}
+
+func (s *State) openSearchFocus() {
+	s.Focus = FocusSearch
+	s.SearchDraft = ""
+	s.SuggestIdx = -1
+	s.loadSearchHistorySuggestions()
+}
+
+func (s *State) loadSearchHistorySuggestions() {
+	if s.Deps.SearchHistory == nil {
+		s.SearchSuggestions = nil
+		return
+	}
+	hist, err := s.Deps.SearchHistory.List()
+	if err != nil || len(hist) == 0 {
+		s.SearchSuggestions = nil
+		return
+	}
+	if len(hist) > 6 {
+		hist = hist[:6]
+	}
+	s.SearchSuggestions = append([]string(nil), hist...)
+}
+
+func (s *State) onSearchDraftChanged() tea.Cmd {
+	s.SuggestIdx = -1
+	if s.suggestCancel != nil {
+		s.suggestCancel()
+	}
+	if strings.TrimSpace(s.SearchDraft) == "" {
+		s.suggestSeq++
+		s.loadSearchHistorySuggestions()
+		return nil
+	}
+	if s.Deps.SuggestProvider == nil {
+		return nil
+	}
+	s.suggestSeq++
+	seq := s.suggestSeq
+	draft := s.SearchDraft
+	return tea.Tick(suggestDebounce, func(time.Time) tea.Msg {
+		return SuggestTickMsg{Seq: seq, Draft: draft}
+	})
+}
+
+func (s *State) fetchSuggestionsCmd(seq uint64, query string) tea.Cmd {
+	if s.Deps.SuggestProvider == nil || strings.TrimSpace(query) == "" {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(s.appCtx, 2*time.Second)
+	s.suggestCancel = cancel
+	prov := s.Deps.SuggestProvider
+	return func() tea.Msg {
+		items, err := prov.Suggest(ctx, query)
+		return SuggestionsLoadedMsg{Seq: seq, Query: query, Items: items, Err: err}
+	}
+}
+
+func (s *State) localQueuePlaylist() []player.PlaylistItem {
+	items := make([]player.PlaylistItem, 0, len(s.Queue)+1)
+	if s.CurrentPlaying.ID != "" {
+		items = append(items, player.PlaylistItem{
+			Index:    0,
+			Title:    s.CurrentPlaying.Title,
+			Filename: s.CurrentPlaying.ID,
+			Current:  true,
+		})
+	}
+	for _, v := range s.Queue {
+		items = append(items, player.PlaylistItem{
+			Index:    len(items),
+			Title:    v.Title,
+			Filename: v.ID,
+		})
+	}
+	return items
+}
+
+// OpenQueue opens the live mpv queue modal and refreshes playlist entries from Engine.
+func (s *State) OpenQueue() (*State, tea.Cmd) {
+	s.ShowHelp = false
+	s.ShowSettings = false
+	s.ShowQualityModal = false
+	s.ShowChapters = false
+	s.ShowQueue = true
+
+	if pc, ok := s.Deps.Engine.(playlistController); ok {
+		if len(s.MPVPlaylist) == 0 && len(s.Queue) > 0 {
+			s.MPVPlaylist = s.localQueuePlaylist()
+		}
+		if s.QueueIdx >= len(s.MPVPlaylist) {
+			s.QueueIdx = max(0, len(s.MPVPlaylist)-1)
+		}
+		return s, func() tea.Msg {
+			items, err := pc.Playlist(s.appCtx)
+			return QueueLoadedMsg{Items: items, Err: err}
+		}
+	}
+
+	s.MPVPlaylist = s.localQueuePlaylist()
+	if s.QueueIdx >= len(s.MPVPlaylist) {
+		s.QueueIdx = max(0, len(s.MPVPlaylist)-1)
+	}
+	return s, nil
+}
+
+// PlayQueueSelected jumps playback to the currently highlighted Queue overlay item.
+func (s *State) PlayQueueSelected() (*State, tea.Cmd) {
+	if s.QueueIdx < 0 || s.QueueIdx >= len(s.MPVPlaylist) {
+		s.ShowQueue = false
+		return s, nil
+	}
+	item := s.MPVPlaylist[s.QueueIdx]
+	s.ShowQueue = false
+	if pc, ok := s.Deps.Engine.(playlistController); ok && s.PlayerStatus.IsRunning {
+		idx := item.Index
+		if idx < 0 {
+			idx = s.QueueIdx
+		}
+		title := item.Title
+		if title == "" {
+			title = fmt.Sprintf("Pista %d", idx+1)
+		}
+		return s, s.engineCmd(func(ctx context.Context) error {
+			return pc.PlayPlaylistIndex(ctx, idx)
+		}, "▶ Cola: "+title)
+	}
+	// Fallback when mpv is not running yet: play directly from local s.Queue if matched.
+	for i, v := range s.Queue {
+		if v.ID == item.Filename || v.Title == item.Title {
+			s.Queue = append(s.Queue[:i], s.Queue[i+1:]...)
+			return s.playVideo(v, "auto")
+		}
+	}
+	return s, nil
+}
+
+// RemoveQueueSelected removes the highlighted track from the Queue overlay and mpv playlist.
+func (s *State) RemoveQueueSelected() (*State, tea.Cmd) {
+	if s.QueueIdx < 0 || s.QueueIdx >= len(s.MPVPlaylist) {
+		return s, nil
+	}
+	removed := s.MPVPlaylist[s.QueueIdx]
+	s.MPVPlaylist = append(s.MPVPlaylist[:s.QueueIdx], s.MPVPlaylist[s.QueueIdx+1:]...)
+	if s.QueueIdx >= len(s.MPVPlaylist) && s.QueueIdx > 0 {
+		s.QueueIdx--
+	}
+	for i, v := range s.Queue {
+		if (removed.Filename != "" && v.ID == removed.Filename) || v.Title == removed.Title {
+			s.Queue = append(s.Queue[:i], s.Queue[i+1:]...)
+			break
+		}
+	}
+	if pc, ok := s.Deps.Engine.(playlistController); ok && s.PlayerStatus.IsRunning {
+		idx := removed.Index
+		toast := s.toastCmd("✕ Quitado de la cola")
+		rmCmd := func() tea.Msg {
+			if err := pc.RemovePlaylistIndex(s.appCtx, idx); err != nil {
+				return ActionResultMsg{Err: err}
+			}
+			items, err := pc.Playlist(s.appCtx)
+			return QueueLoadedMsg{Items: items, Err: err}
+		}
+		return s, tea.Batch(toast, rmCmd)
+	}
+	return s, s.toastCmd("✕ Quitado de la cola")
+}
+
+// ClearQueue clears queued tracks in state and in the active mpv playlist.
+func (s *State) ClearQueue() (*State, tea.Cmd) {
+	s.Queue = nil
+	s.MPVPlaylist = nil
+	s.QueueIdx = 0
+	if pc, ok := s.Deps.Engine.(playlistController); ok && s.PlayerStatus.IsRunning {
+		return s, s.engineCmd(func(ctx context.Context) error {
+			return pc.ClearPlaylist(ctx)
+		}, "🗑 Cola vaciada")
+	}
+	return s, s.toastCmd("🗑 Cola vaciada")
+}
+
+// AdjustSpeed steps playback speed within [0.5x, 2.0x].
+func (s *State) AdjustSpeed(delta float64) (*State, tea.Cmd) {
+	cur := s.PlayerStatus.Speed
+	if cur <= 0 {
+		cur = 1.0
+	}
+	return s.SetPlaybackSpeed(cur + delta)
+}
+
+// SetPlaybackSpeed sets playback speed clamped to [0.5, 2.0].
+func (s *State) SetPlaybackSpeed(target float64) (*State, tea.Cmd) {
+	if target < 0.5 {
+		target = 0.5
+	}
+	if target > 2.0 {
+		target = 2.0
+	}
+	target = math.Round(target*100) / 100
+	s.PlayerStatus.Speed = target
+	label := fmt.Sprintf("⚡ Velocidad %sx", strconv.FormatFloat(target, 'f', -1, 64))
+	if sc, ok := s.Deps.Engine.(speedController); ok && s.Deps.Engine != nil {
+		return s, s.engineCmd(func(ctx context.Context) error {
+			return sc.SetSpeed(ctx, target)
+		}, label)
+	}
+	return s, s.toastCmd(label)
+}
+
+// ToggleLoop toggles single-track repeat in the player engine.
+func (s *State) ToggleLoop() (*State, tea.Cmd) {
+	if s.Deps.Engine == nil {
+		return s, nil
+	}
+	lt, ok := s.Deps.Engine.(loopToggler)
+	if !ok {
+		return s, s.toastCmd("Repetir no soportado")
+	}
+	next := !s.PlayerStatus.LoopFile
+	s.PlayerStatus.LoopFile = next
+	return s, func() tea.Msg {
+		enabled, err := lt.ToggleLoop(s.appCtx)
+		return LoopToggledMsg{Enabled: enabled, Err: err}
+	}
 }
 
 // QualityOption describes one preset in the interactive Resolution & Audio-Only modal.
@@ -1462,6 +1911,14 @@ func (s *State) DownloadSelected(audioOnly bool) (*State, tea.Cmd) {
 	}
 	if s.Deps.Downloader == nil {
 		return s, s.toastCmd("Descargas no configuradas")
+	}
+	if s.DownloadProgress == nil {
+		s.DownloadProgress = make(map[string]download.Item)
+	}
+	s.DownloadProgress[v.ID] = download.Item{
+		Video:     v,
+		AudioOnly: audioOnly,
+		Status:    download.StatusPending,
 	}
 	toastCmd := s.toastCmd("⬇ Descargando: " + v.Title)
 	dlCmd := func() tea.Msg {

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -2538,4 +2539,666 @@ func TestIPCClient_PlayResetsGlobalStartAndPassesPerFileStartNone(t *testing.T) 
 	if st.Title != "Fresh Song" || st.TimePos != 0 || st.Duration != 0 {
 		t.Fatalf("expected clean reset status for Fresh Song, got %+v", st)
 	}
+}
+
+func TestIPCClient_ObserveSpeedAndLoopFile(t *testing.T) {
+	srv := startTestMPVServer(t, nil)
+	client := NewIPCClient(
+		WithSocketPath(srv.sockPath),
+		WithBackoff(20*time.Millisecond, 100*time.Millisecond),
+	)
+	defer client.Close()
+
+	if got := client.Status().Speed; got != 1.0 {
+		t.Fatalf("initial Speed = %v, want 1.0", got)
+	}
+
+	var serverConn net.Conn
+	select {
+	case serverConn = <-srv.accepts:
+	case <-time.After(time.Second):
+		t.Fatalf("server did not accept client connection")
+	}
+
+	subCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ch := client.Subscribe(subCtx)
+
+	waitStatus := func(desc string, pred func(Status) bool) Status {
+		t.Helper()
+		if st := client.Status(); pred(st) {
+			return st
+		}
+		deadline := time.After(2 * time.Second)
+		for {
+			select {
+			case st := <-ch:
+				if pred(st) {
+					return st
+				}
+			case <-deadline:
+				t.Fatalf("timed out waiting for %s; last=%+v", desc, client.Status())
+			}
+		}
+	}
+
+	if err := srv.SendJSON(serverConn, map[string]any{"event": "property-change", "name": "speed", "data": 1.5}); err != nil {
+		t.Fatalf("send speed: %v", err)
+	}
+	waitStatus("speed=1.5", func(st Status) bool { return st.Speed == 1.5 })
+
+	if err := srv.SendJSON(serverConn, map[string]any{"event": "property-change", "name": "speed", "data": 0}); err != nil {
+		t.Fatalf("send speed=0: %v", err)
+	}
+	waitStatus("speed<=0 resets to 1.0", func(st Status) bool { return st.Speed == 1.0 })
+
+	if err := srv.SendJSON(serverConn, map[string]any{"event": "property-change", "name": "speed", "data": -2.5}); err != nil {
+		t.Fatalf("send speed=-2.5: %v", err)
+	}
+	if err := srv.SendJSON(serverConn, map[string]any{"event": "property-change", "name": "loop-file", "data": "inf"}); err != nil {
+		t.Fatalf("send loop-file=inf: %v", err)
+	}
+	waitStatus("loop-file=inf", func(st Status) bool { return st.Speed == 1.0 && st.LoopFile })
+
+	for _, offVal := range []any{"no", "false", "", false} {
+		// First enable via bool or string, then disable with offVal.
+		if err := srv.SendJSON(serverConn, map[string]any{"event": "property-change", "name": "loop-file", "data": "yes"}); err != nil {
+			t.Fatalf("send loop-file=yes: %v", err)
+		}
+		waitStatus("loop-file=yes", func(st Status) bool { return st.LoopFile })
+
+		if err := srv.SendJSON(serverConn, map[string]any{"event": "property-change", "name": "loop-file", "data": offVal}); err != nil {
+			t.Fatalf("send loop-file=%v: %v", offVal, err)
+		}
+		waitStatus(fmt.Sprintf("loop-file=%v", offVal), func(st Status) bool { return !st.LoopFile })
+	}
+
+	if err := srv.SendJSON(serverConn, map[string]any{"event": "property-change", "name": "loop-file", "data": "true"}); err != nil {
+		t.Fatalf("send loop-file=true: %v", err)
+	}
+	waitStatus("loop-file=true", func(st Status) bool { return st.LoopFile })
+
+	// Disconnect must reset Speed=1.0 and LoopFile=false.
+	srv.CloseConnections()
+	waitStatus("disconnect reset", func(st Status) bool {
+		return !st.IsRunning && st.Speed == 1.0 && !st.LoopFile
+	})
+}
+
+func TestIPCClient_SetSpeedAndToggleLoop(t *testing.T) {
+	t.Run("connected commands, clamping, and broadcasts", func(t *testing.T) {
+		var (
+			mu      sync.Mutex
+			cmds    [][]any
+			failCmd string
+		)
+		srv := startTestMPVServer(t, func(conn net.Conn, cmd []any, reqID int64) {
+			cp := make([]any, len(cmd))
+			copy(cp, cmd)
+			mu.Lock()
+			if len(cmd) > 0 && fmt.Sprint(cmd[0]) != "observe_property" {
+				cmds = append(cmds, cp)
+			}
+			shouldFail := failCmd != "" && len(cmd) > 1 && fmt.Sprint(cmd[1]) == failCmd
+			mu.Unlock()
+
+			errStr := "success"
+			if shouldFail {
+				errStr = "property unavailable"
+			}
+			_ = json.NewEncoder(conn).Encode(map[string]any{
+				"error":      errStr,
+				"request_id": reqID,
+			})
+		})
+
+		client := NewIPCClient(WithSocketPath(srv.sockPath), WithCommandTimeout(2*time.Second))
+		defer client.Close()
+
+		subCtx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		ch := client.Subscribe(subCtx)
+
+		ctx := context.Background()
+		if err := client.SetSpeed(ctx, 1.5); err != nil {
+			t.Fatalf("SetSpeed(1.5): %v", err)
+		}
+		if err := client.SetSpeed(ctx, 0.1); err != nil {
+			t.Fatalf("SetSpeed(0.1): %v", err)
+		}
+		if err := client.SetSpeed(ctx, 5.0); err != nil {
+			t.Fatalf("SetSpeed(5.0): %v", err)
+		}
+		if err := client.SetSpeed(ctx, math.NaN()); err != nil {
+			t.Fatalf("SetSpeed(NaN): %v", err)
+		}
+
+		// Verify broadcasts received.
+		var speeds []float64
+		deadline := time.After(2 * time.Second)
+		for len(speeds) < 4 {
+			select {
+			case st := <-ch:
+				speeds = append(speeds, st.Speed)
+			case <-deadline:
+				t.Fatalf("timed out waiting for SetSpeed broadcasts; got %v", speeds)
+			}
+		}
+		if !slices.Equal(speeds, []float64{1.5, 0.5, 2.0, 1.0}) {
+			t.Fatalf("broadcast speeds = %v, want [1.5 0.5 2 1]", speeds)
+		}
+
+		// ToggleLoop false -> true -> false.
+		loopOn, err := client.ToggleLoop(ctx)
+		if err != nil || !loopOn || !client.Status().LoopFile {
+			t.Fatalf("first ToggleLoop = (%v, %v), status.LoopFile=%v", loopOn, err, client.Status().LoopFile)
+		}
+		loopOn, err = client.ToggleLoop(ctx)
+		if err != nil || loopOn || client.Status().LoopFile {
+			t.Fatalf("second ToggleLoop = (%v, %v), status.LoopFile=%v", loopOn, err, client.Status().LoopFile)
+		}
+
+		// Verify mpv errors do not mutate cached status.
+		mu.Lock()
+		failCmd = "speed"
+		mu.Unlock()
+		if err := client.SetSpeed(ctx, 1.75); err == nil {
+			t.Fatal("expected error from SetSpeed when mpv fails")
+		}
+		if client.Status().Speed != 1.0 {
+			t.Fatalf("Speed mutated on error: got %v, want 1.0", client.Status().Speed)
+		}
+
+		mu.Lock()
+		failCmd = "loop-file"
+		mu.Unlock()
+		if loopOn, err := client.ToggleLoop(ctx); err == nil || loopOn {
+			t.Fatalf("expected error from ToggleLoop when mpv fails, got (%v, %v)", loopOn, err)
+		}
+
+		mu.Lock()
+		gotCmds := slices.Clone(cmds)
+		mu.Unlock()
+
+		want := [][]any{
+			{"set_property", "speed", 1.5},
+			{"set_property", "speed", 0.5},
+			{"set_property", "speed", 2.0},
+			{"set_property", "speed", 1.0},
+			{"set_property", "loop-file", "inf"},
+			{"set_property", "loop-file", "no"},
+			{"set_property", "speed", 1.75},
+			{"set_property", "loop-file", "inf"},
+		}
+		if !reflect.DeepEqual(gotCmds, want) {
+			t.Fatalf("sent commands = %#v, want %#v", gotCmds, want)
+		}
+	})
+
+	t.Run("disconnected errors", func(t *testing.T) {
+		client := NewIPCClient(WithSocketPath(filepath.Join(t.TempDir(), "missing.sock")))
+		defer client.Close()
+
+		if err := client.SetSpeed(context.Background(), 1.25); err == nil {
+			t.Fatal("expected error from SetSpeed when disconnected")
+		}
+		if _, err := client.ToggleLoop(context.Background()); err == nil {
+			t.Fatal("expected error from ToggleLoop when disconnected")
+		}
+	})
+}
+
+func TestIPCClient_PlaylistMethods(t *testing.T) {
+	t.Run("Playlist, PlayPlaylistIndex, RemovePlaylistIndex, ClearPlaylist", func(t *testing.T) {
+		var (
+			mu   sync.Mutex
+			mode = "ok"
+			cmds [][]any
+		)
+		srv := startTestMPVServer(t, func(conn net.Conn, cmd []any, reqID int64) {
+			if len(cmd) > 0 && fmt.Sprint(cmd[0]) != "observe_property" {
+				cp := make([]any, len(cmd))
+				copy(cp, cmd)
+				mu.Lock()
+				cmds = append(cmds, cp)
+				mu.Unlock()
+			}
+
+			mu.Lock()
+			curMode := mode
+			mu.Unlock()
+
+			if len(cmd) >= 2 && fmt.Sprint(cmd[0]) == "get_property" && fmt.Sprint(cmd[1]) == "playlist" {
+				switch curMode {
+				case "ok":
+					_ = json.NewEncoder(conn).Encode(map[string]any{
+						"data": []any{
+							map[string]any{"title": "Pink Floyd - Time", "filename": "https://yt/1", "current": true},
+							map[string]any{"title": "", "filename": "https://yt/2", "current": false},
+							map[string]any{"filename": "https://yt/3"},
+						},
+						"error":      "success",
+						"request_id": reqID,
+					})
+				case "nil":
+					_ = json.NewEncoder(conn).Encode(map[string]any{
+						"data":       nil,
+						"error":      "success",
+						"request_id": reqID,
+					})
+				case "badtype":
+					_ = json.NewEncoder(conn).Encode(map[string]any{
+						"data":       "not-a-slice",
+						"error":      "success",
+						"request_id": reqID,
+					})
+				case "err":
+					_ = json.NewEncoder(conn).Encode(map[string]any{
+						"error":      "property unavailable",
+						"request_id": reqID,
+					})
+				}
+				return
+			}
+
+			if curMode == "err" {
+				_ = json.NewEncoder(conn).Encode(map[string]any{
+					"error":      "command failed",
+					"request_id": reqID,
+				})
+				return
+			}
+
+			_ = json.NewEncoder(conn).Encode(map[string]any{
+				"error":      "success",
+				"request_id": reqID,
+			})
+		})
+
+		client := NewIPCClient(WithSocketPath(srv.sockPath), WithCommandTimeout(2*time.Second))
+		defer client.Close()
+
+		ctx := context.Background()
+		items, err := client.Playlist(ctx)
+		if err != nil {
+			t.Fatalf("Playlist() error: %v", err)
+		}
+		wantItems := []PlaylistItem{
+			{Index: 0, Title: "Pink Floyd - Time", Filename: "https://yt/1", Current: true},
+			{Index: 1, Title: "https://yt/2", Filename: "https://yt/2", Current: false},
+			{Index: 2, Title: "https://yt/3", Filename: "https://yt/3", Current: false},
+		}
+		if !reflect.DeepEqual(items, wantItems) {
+			t.Fatalf("Playlist() = %+v, want %+v", items, wantItems)
+		}
+
+		mu.Lock()
+		mode = "nil"
+		mu.Unlock()
+		emptyItems, err := client.Playlist(ctx)
+		if err != nil || len(emptyItems) != 0 {
+			t.Fatalf("Playlist(nil) = (%+v, %v), want empty non-error", emptyItems, err)
+		}
+
+		mu.Lock()
+		mode = "badtype"
+		mu.Unlock()
+		if _, err := client.Playlist(ctx); err == nil {
+			t.Fatal("expected error for unexpected playlist payload type")
+		}
+
+		mu.Lock()
+		mode = "ok"
+		mu.Unlock()
+		if err := client.PlayPlaylistIndex(ctx, 2); err != nil {
+			t.Fatalf("PlayPlaylistIndex(2): %v", err)
+		}
+		if err := client.RemovePlaylistIndex(ctx, 1); err != nil {
+			t.Fatalf("RemovePlaylistIndex(1): %v", err)
+		}
+		if err := client.ClearPlaylist(ctx); err != nil {
+			t.Fatalf("ClearPlaylist(): %v", err)
+		}
+
+		if err := client.PlayPlaylistIndex(ctx, -1); err == nil {
+			t.Fatal("expected error for negative PlayPlaylistIndex")
+		}
+		if err := client.RemovePlaylistIndex(ctx, -1); err == nil {
+			t.Fatal("expected error for negative RemovePlaylistIndex")
+		}
+
+		mu.Lock()
+		mode = "err"
+		mu.Unlock()
+		if _, err := client.Playlist(ctx); err == nil {
+			t.Fatal("expected error from Playlist when mpv fails")
+		}
+		if err := client.PlayPlaylistIndex(ctx, 0); err == nil {
+			t.Fatal("expected error from PlayPlaylistIndex when mpv fails")
+		}
+
+		mu.Lock()
+		gotCmds := slices.Clone(cmds)
+		mu.Unlock()
+
+		// Confirm expected command sequence for PlayPlaylistIndex, RemovePlaylistIndex, ClearPlaylist.
+		foundPos, foundClearTitle, foundRemove, foundClear := false, false, false, false
+		for i, c := range gotCmds {
+			if len(c) == 3 && fmt.Sprint(c[0]) == "set_property" && fmt.Sprint(c[1]) == "playlist-pos" && c[2] == float64(2) {
+				foundPos = true
+				if i+1 < len(gotCmds) {
+					next := gotCmds[i+1]
+					if len(next) == 3 && fmt.Sprint(next[0]) == "set_property" && fmt.Sprint(next[1]) == "force-media-title" && fmt.Sprint(next[2]) == "" {
+						foundClearTitle = true
+					}
+				}
+			}
+			if len(c) == 2 && fmt.Sprint(c[0]) == "playlist-remove" && c[1] == float64(1) {
+				foundRemove = true
+			}
+			if len(c) == 1 && fmt.Sprint(c[0]) == "playlist-clear" {
+				foundClear = true
+			}
+		}
+		if !foundPos || !foundClearTitle || !foundRemove || !foundClear {
+			t.Fatalf("missing expected playlist IPC commands in %#v", gotCmds)
+		}
+	})
+
+	t.Run("disconnected playlist methods fail", func(t *testing.T) {
+		client := NewIPCClient(WithSocketPath(filepath.Join(t.TempDir(), "missing.sock")))
+		defer client.Close()
+
+		ctx := context.Background()
+		if _, err := client.Playlist(ctx); err == nil {
+			t.Fatal("expected Playlist error when disconnected")
+		}
+		if err := client.PlayPlaylistIndex(ctx, 0); err == nil {
+			t.Fatal("expected PlayPlaylistIndex error when disconnected")
+		}
+		if err := client.RemovePlaylistIndex(ctx, 0); err == nil {
+			t.Fatal("expected RemovePlaylistIndex error when disconnected")
+		}
+		if err := client.ClearPlaylist(ctx); err == nil {
+			t.Fatal("expected ClearPlaylist error when disconnected")
+		}
+	})
+}
+
+func TestIPCClient_PlayFrom(t *testing.T) {
+	tmpDir := t.TempDir()
+	binDir := filepath.Join(tmpDir, "bin")
+	argsFile := filepath.Join(tmpDir, "mpv-args.txt")
+
+	writeStubBin(t, binDir, "mpv", fmt.Sprintf("printf '%%s\\n' \"$@\" > %q\nexit 0", argsFile))
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	sockPath := filepath.Join(tmpDir, "run", "mpv.sock")
+	client := NewIPCClient(
+		WithSocketPath(sockPath),
+		WithLaunchDefaults(LaunchOpts{
+			SocketPath: sockPath,
+			Mode:       "window",
+			Quality:    720,
+		}),
+	)
+	client.SetAutoplay(false)
+	defer client.Close()
+
+	vid := model.Video{ID: "resume12345", Title: "Resume Track"}
+	if err := client.PlayFrom(context.Background(), vid, "window", 42.5); err != nil {
+		t.Fatalf("PlayFrom error: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	var rawArgs []byte
+	for time.Now().Before(deadline) {
+		b, err := os.ReadFile(argsFile)
+		if err == nil && len(b) > 0 {
+			rawArgs = b
+			break
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+	if len(rawArgs) == 0 {
+		t.Fatalf("timed out waiting for stub mpv args file")
+	}
+
+	argsText := string(rawArgs)
+	if !strings.Contains(argsText, "--start=42.5") {
+		t.Fatalf("expected --start=42.5 in mpv args, got:\n%s", argsText)
+	}
+	if !strings.Contains(argsText, "--force-media-title=Resume Track") {
+		t.Fatalf("expected --force-media-title=Resume Track in mpv args, got:\n%s", argsText)
+	}
+	if st := client.Status(); st.Title != "Resume Track" || st.TimePos != 42.5 {
+		t.Fatalf("unexpected status after PlayFrom: %+v", st)
+	}
+}
+
+func TestGetStatus_SpeedAndLoopFile(t *testing.T) {
+	t.Run("populates speed and loop-file when available", func(t *testing.T) {
+		srv := startTestMPVServer(t, func(conn net.Conn, cmd []any, reqID int64) {
+			prop := ""
+			if len(cmd) >= 2 {
+				prop = fmt.Sprint(cmd[1])
+			}
+			switch prop {
+			case "pause":
+				_ = json.NewEncoder(conn).Encode(map[string]any{"data": false, "error": "success"})
+			case "media-title":
+				_ = json.NewEncoder(conn).Encode(map[string]any{"data": "Shine On", "error": "success"})
+			case "speed":
+				_ = json.NewEncoder(conn).Encode(map[string]any{"data": 1.25, "error": "success"})
+			case "loop-file":
+				_ = json.NewEncoder(conn).Encode(map[string]any{"data": "inf", "error": "success"})
+			default:
+				_ = json.NewEncoder(conn).Encode(map[string]any{"error": "property unavailable"})
+			}
+		})
+
+		t.Setenv("YT_SOCK", srv.sockPath)
+		st, err := GetStatus()
+		if err != nil {
+			t.Fatalf("GetStatus() error: %v", err)
+		}
+		if !st.IsRunning || st.Title != "Shine On" || st.Speed != 1.25 || !st.LoopFile {
+			t.Fatalf("GetStatus() = %+v, want IsRunning=true Title='Shine On' Speed=1.25 LoopFile=true", st)
+		}
+	})
+
+	t.Run("non-fatal when speed and loop-file are unavailable", func(t *testing.T) {
+		srv := startTestMPVServer(t, func(conn net.Conn, cmd []any, reqID int64) {
+			prop := ""
+			if len(cmd) >= 2 {
+				prop = fmt.Sprint(cmd[1])
+			}
+			if prop == "pause" {
+				_ = json.NewEncoder(conn).Encode(map[string]any{"data": true, "error": "success"})
+				return
+			}
+			_ = json.NewEncoder(conn).Encode(map[string]any{"error": "property unavailable"})
+		})
+
+		t.Setenv("YT_SOCK", srv.sockPath)
+		st, err := GetStatus()
+		if err != nil {
+			t.Fatalf("GetStatus() error: %v", err)
+		}
+		if !st.IsRunning || !st.Paused || st.Speed != 0 || st.LoopFile {
+			t.Fatalf("GetStatus() = %+v, want IsRunning=true Paused=true Speed=0 LoopFile=false", st)
+		}
+	})
+}
+
+func TestFakeEngine_SpeedLoopPlaylistAndPlayFrom(t *testing.T) {
+	fake := NewFakeEngine()
+	defer fake.Close()
+
+	if fake.Status().Speed != 1.0 {
+		t.Fatalf("initial Speed = %v, want 1.0", fake.Status().Speed)
+	}
+
+	ctx := context.Background()
+	subCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	ch := fake.Subscribe(subCtx)
+
+	if err := fake.SetSpeed(ctx, 0.2); err != nil {
+		t.Fatalf("SetSpeed(0.2): %v", err)
+	}
+	if fake.Status().Speed != 0.5 {
+		t.Fatalf("Speed after low clamp = %v, want 0.5", fake.Status().Speed)
+	}
+	if err := fake.SetSpeed(ctx, 3.0); err != nil {
+		t.Fatalf("SetSpeed(3.0): %v", err)
+	}
+	if fake.Status().Speed != 2.0 {
+		t.Fatalf("Speed after high clamp = %v, want 2.0", fake.Status().Speed)
+	}
+	if err := fake.SetSpeed(ctx, 1.25); err != nil {
+		t.Fatalf("SetSpeed(1.25): %v", err)
+	}
+	if fake.Status().Speed != 1.25 {
+		t.Fatalf("Speed = %v, want 1.25", fake.Status().Speed)
+	}
+
+	loopOn, err := fake.ToggleLoop(ctx)
+	if err != nil || !loopOn || !fake.Status().LoopFile {
+		t.Fatalf("first ToggleLoop = (%v, %v), status=%+v", loopOn, err, fake.Status())
+	}
+	loopOn, err = fake.ToggleLoop(ctx)
+	if err != nil || loopOn || fake.Status().LoopFile {
+		t.Fatalf("second ToggleLoop = (%v, %v), status=%+v", loopOn, err, fake.Status())
+	}
+
+	seedPlaylist := []PlaylistItem{
+		{Index: 0, Title: "Track 0", Filename: "f0", Current: true},
+		{Index: 1, Title: "Track 1", Filename: "f1", Current: false},
+		{Index: 2, Title: "Track 2", Filename: "f2", Current: false},
+	}
+	fake.SetPlaylist(seedPlaylist)
+	if fake.Status().PlaylistCount != 3 {
+		t.Fatalf("PlaylistCount = %d, want 3", fake.Status().PlaylistCount)
+	}
+
+	gotPl, err := fake.Playlist(ctx)
+	if err != nil || !reflect.DeepEqual(gotPl, seedPlaylist) {
+		t.Fatalf("Playlist = (%+v, %v), want %+v", gotPl, err, seedPlaylist)
+	}
+	// Mutating returned slice must not alias internal slice.
+	gotPl[0].Title = "Mutated"
+	gotPl2, _ := fake.Playlist(ctx)
+	if !reflect.DeepEqual(gotPl2, seedPlaylist) {
+		t.Fatalf("FakeEngine Playlist returned aliased slice: %+v", gotPl2)
+	}
+
+	if err := fake.PlayPlaylistIndex(ctx, 2); err != nil {
+		t.Fatalf("PlayPlaylistIndex(2): %v", err)
+	}
+	gotPl, _ = fake.Playlist(ctx)
+	if !gotPl[2].Current || gotPl[0].Current || fake.Status().Title != "Track 2" {
+		t.Fatalf("unexpected state after PlayPlaylistIndex(2): pl=%+v status=%+v", gotPl, fake.Status())
+	}
+
+	if err := fake.RemovePlaylistIndex(ctx, 0); err != nil {
+		t.Fatalf("RemovePlaylistIndex(0): %v", err)
+	}
+	gotPl, _ = fake.Playlist(ctx)
+	wantAfterRemove := []PlaylistItem{
+		{Index: 0, Title: "Track 1", Filename: "f1", Current: false},
+		{Index: 1, Title: "Track 2", Filename: "f2", Current: true},
+	}
+	if !reflect.DeepEqual(gotPl, wantAfterRemove) || fake.Status().PlaylistCount != 2 {
+		t.Fatalf("after RemovePlaylistIndex(0): pl=%+v count=%d", gotPl, fake.Status().PlaylistCount)
+	}
+
+	if err := fake.ClearPlaylist(ctx); err != nil {
+		t.Fatalf("ClearPlaylist(): %v", err)
+	}
+	gotPl, _ = fake.Playlist(ctx)
+	wantAfterClear := []PlaylistItem{
+		{Index: 0, Title: "Track 2", Filename: "f2", Current: true},
+	}
+	if !reflect.DeepEqual(gotPl, wantAfterClear) || fake.Status().PlaylistCount != 1 {
+		t.Fatalf("after ClearPlaylist: pl=%+v count=%d", gotPl, fake.Status().PlaylistCount)
+	}
+
+	if err := fake.PlayFrom(ctx, model.Video{ID: "abc123", Title: "Resumed"}, "audio", 91.5); err != nil {
+		t.Fatalf("PlayFrom: %v", err)
+	}
+	if st := fake.Status(); !st.IsRunning || st.Title != "Resumed" || st.TimePos != 91.5 || st.Paused {
+		t.Fatalf("after PlayFrom: status=%+v", st)
+	}
+
+	// Drain at least one broadcast update.
+	select {
+	case <-ch:
+	case <-time.After(time.Second):
+		t.Fatal("expected status update on Subscribe channel")
+	}
+
+	// Verify error injection and negative/out-of-range index validation.
+	if err := fake.PlayPlaylistIndex(ctx, -1); err == nil {
+		t.Fatal("expected error for negative PlayPlaylistIndex")
+	}
+	if err := fake.PlayPlaylistIndex(ctx, 99); err == nil {
+		t.Fatal("expected error for out-of-range PlayPlaylistIndex")
+	}
+	if err := fake.RemovePlaylistIndex(ctx, -1); err == nil {
+		t.Fatal("expected error for negative RemovePlaylistIndex")
+	}
+	if err := fake.RemovePlaylistIndex(ctx, 99); err == nil {
+		t.Fatal("expected error for out-of-range RemovePlaylistIndex")
+	}
+
+	wantErr := fmt.Errorf("boom")
+	fake.SetError(wantErr)
+	if err := fake.SetSpeed(ctx, 1.0); err == nil {
+		t.Fatal("expected SetSpeed error")
+	}
+	if _, err := fake.ToggleLoop(ctx); err == nil {
+		t.Fatal("expected ToggleLoop error")
+	}
+	if _, err := fake.Playlist(ctx); err == nil {
+		t.Fatal("expected Playlist error")
+	}
+	if err := fake.PlayPlaylistIndex(ctx, 0); err == nil {
+		t.Fatal("expected PlayPlaylistIndex error")
+	}
+	if err := fake.RemovePlaylistIndex(ctx, 0); err == nil {
+		t.Fatal("expected RemovePlaylistIndex error")
+	}
+	if err := fake.ClearPlaylist(ctx); err == nil {
+		t.Fatal("expected ClearPlaylist error")
+	}
+	if err := fake.PlayFrom(ctx, model.Video{ID: "x"}, "auto", 10); err == nil {
+		t.Fatal("expected PlayFrom error")
+	}
+	fake.SetError(nil)
+
+	// Concurrent stress test under -race.
+	var wg sync.WaitGroup
+	for g := 0; g < 6; g++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for i := 0; i < 20; i++ {
+				fake.SetPlaylist([]PlaylistItem{
+					{Index: 0, Title: "A", Current: true},
+					{Index: 1, Title: "B", Current: false},
+				})
+				_ = fake.SetSpeed(ctx, 0.5+float64(i%4)*0.5)
+				_, _ = fake.ToggleLoop(ctx)
+				_, _ = fake.Playlist(ctx)
+				_ = fake.PlayPlaylistIndex(ctx, id%2)
+				_ = fake.RemovePlaylistIndex(ctx, 0)
+				_ = fake.ClearPlaylist(ctx)
+				_ = fake.PlayFrom(ctx, model.Video{ID: "v", Title: "T"}, "window", float64(i))
+				_ = fake.Status()
+				_ = fake.Calls()
+			}
+		}(g)
+	}
+	wg.Wait()
 }

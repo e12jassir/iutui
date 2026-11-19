@@ -24,10 +24,18 @@ func (s *State) handleMouse(msg tea.MouseMsg) (*State, tea.Cmd) {
 	case msg.Button == tea.MouseButtonWheelDown:
 		if s.Focus == FocusSearch && s.SearchDraft == "" {
 			s.Focus = FocusMain
+			s.SearchSuggestions = nil
+			s.SuggestIdx = -1
 		}
 		if s.ShowQualityModal {
 			if s.QualityIdx < len(QualityOptions)-1 {
 				s.QualityIdx++
+			}
+			return s, nil
+		}
+		if s.ShowQueue {
+			if len(s.MPVPlaylist) > 0 && s.QueueIdx < len(s.MPVPlaylist)-1 {
+				s.QueueIdx++
 			}
 			return s, nil
 		}
@@ -55,10 +63,18 @@ func (s *State) handleMouse(msg tea.MouseMsg) (*State, tea.Cmd) {
 	case msg.Button == tea.MouseButtonWheelUp:
 		if s.Focus == FocusSearch && s.SearchDraft == "" {
 			s.Focus = FocusMain
+			s.SearchSuggestions = nil
+			s.SuggestIdx = -1
 		}
 		if s.ShowQualityModal {
 			if s.QualityIdx > 0 {
 				s.QualityIdx--
+			}
+			return s, nil
+		}
+		if s.ShowQueue {
+			if s.QueueIdx > 0 {
+				s.QueueIdx--
 			}
 			return s, nil
 		}
@@ -108,6 +124,12 @@ func (s *State) handleMouseMotion(x, y int) *State {
 		}
 		return s
 	}
+	if s.ShowQueue {
+		if idx, inside := s.queueModalRowAt(x, y); inside && idx >= 0 {
+			s.QueueIdx = idx
+		}
+		return s
+	}
 	if s.ShowChapters {
 		if idx, inside := s.chaptersModalRowAt(x, y); inside && idx >= 0 {
 			s.ChapterIdx = idx
@@ -119,6 +141,8 @@ func (s *State) handleMouseMotion(x, y int) *State {
 		// Unstick FocusSearch if pointer moves back over the main grid without an active draft.
 		if s.Focus == FocusSearch && s.SearchDraft == "" {
 			s.Focus = FocusMain
+			s.SearchSuggestions = nil
+			s.SuggestIdx = -1
 		}
 	}
 
@@ -142,6 +166,18 @@ func (s *State) handleLeftClick(x, y int) (*State, tea.Cmd) {
 		}
 		if idx >= 0 && idx < len(QualityOptions) {
 			return s.ApplyQualityOption(idx)
+		}
+		return s, nil
+	}
+	if s.ShowQueue {
+		idx, inside := s.queueModalRowAt(x, y)
+		if !inside {
+			s.ShowQueue = false
+			return s, nil
+		}
+		if idx >= 0 && idx < len(s.MPVPlaylist) {
+			s.QueueIdx = idx
+			return s.PlayQueueSelected()
 		}
 		return s, nil
 	}
@@ -196,8 +232,7 @@ func (s *State) handleLeftClick(x, y int) (*State, tea.Cmd) {
 				return s, tea.Batch(s.loadFeedCmd(s.ActiveTab, true), s.ensureAnimTick())
 			}
 			if s.Focus != FocusSearch {
-				s.Focus = FocusSearch
-				s.SearchDraft = ""
+				s.openSearchFocus()
 			}
 			return s, nil
 		}
@@ -220,6 +255,8 @@ func (s *State) handleLeftClick(x, y int) (*State, tea.Cmd) {
 	// Clicking outside top search panel blurs search focus
 	if s.Focus == FocusSearch {
 		s.Focus = FocusMain
+		s.SearchSuggestions = nil
+		s.SuggestIdx = -1
 	}
 
 	// 2. Bottom Player panel (y == s.Height-5 .. s.Height-1) when visible
@@ -453,6 +490,40 @@ func (s *State) ChaptersModalWindow() (start, end, boxW, leftX, topY, boxH, optS
 
 func (s *State) chaptersModalRowAt(x, y int) (idx int, inside bool) {
 	start, end, boxW, leftX, topY, boxH, optStartY := s.ChaptersModalWindow()
+	if x < leftX || x >= leftX+boxW || y < topY || y >= topY+boxH {
+		return -1, false
+	}
+	rel := y - optStartY
+	if rel >= 0 && start+rel < end {
+		return start + rel, true
+	}
+	return -1, true
+}
+
+// QueueModalWindow computes the visible slice and exact screen placement of the Live Queue modal.
+func (s *State) QueueModalWindow() (start, end, boxW, leftX, topY, boxH, optStartY int) {
+	n := len(s.MPVPlaylist)
+	maxVisible := max(4, min(n, s.Height-10))
+	if n == 0 {
+		maxVisible = 1
+	}
+	start = 0
+	if s.QueueIdx >= maxVisible {
+		start = s.QueueIdx - maxVisible + 1
+	}
+	end = min(n, start+maxVisible)
+	visRows := max(1, end-start)
+	boxW = min(72, max(38, s.Width-8))
+	// title(1) + blank(1) + visible(visRows) + blank(1) + footer(1) + border(2)
+	boxH = visRows + 6
+	leftX = (s.Width - boxW) / 2
+	topY = (s.Height - boxH) / 2
+	optStartY = topY + 3
+	return start, end, boxW, leftX, topY, boxH, optStartY
+}
+
+func (s *State) queueModalRowAt(x, y int) (idx int, inside bool) {
+	start, end, boxW, leftX, topY, boxH, optStartY := s.QueueModalWindow()
 	if x < leftX || x >= leftX+boxW || y < topY || y >= topY+boxH {
 		return -1, false
 	}

@@ -2,6 +2,7 @@ package player
 
 import (
 	"context"
+	"fmt"
 	"sync"
 
 	"github.com/e12jassir/iutui/internal/model"
@@ -31,11 +32,13 @@ type FakeEngine struct {
 	audioOnly    bool
 	quality      int
 	chapters     []Chapter
+	playlist     []PlaylistItem
 }
 
 // NewFakeEngine creates a new FakeEngine with default initial status.
 func NewFakeEngine() *FakeEngine {
 	return &FakeEngine{
+		status:       Status{Speed: 1.0},
 		subs:         make(map[uint64]chan Status),
 		done:         make(chan struct{}),
 		sponsorBlock: true,
@@ -66,6 +69,16 @@ func (f *FakeEngine) SetChapters(chapters []Chapter) {
 	f.mu.Unlock()
 }
 
+// SetPlaylist configures the playlist returned by Playlist and updates PlaylistCount.
+func (f *FakeEngine) SetPlaylist(items []PlaylistItem) {
+	f.mu.Lock()
+	copied := make([]PlaylistItem, len(items))
+	copy(copied, items)
+	f.playlist = copied
+	f.status.PlaylistCount = len(copied)
+	f.mu.Unlock()
+}
+
 // Calls returns a snapshot of all recorded method calls.
 func (f *FakeEngine) Calls() []FakeCall {
 	f.mu.Lock()
@@ -87,6 +100,28 @@ func (f *FakeEngine) Play(_ context.Context, v model.Video, mode string) error {
 	f.status.Title = v.Title
 	f.status.Paused = false
 	f.status.TimePos = 0
+	if f.status.PlaylistCount == 0 {
+		f.status.PlaylistCount = 1
+	}
+	f.broadcastLocked(f.status)
+	return nil
+}
+
+// PlayFrom records the PlayFrom call, updates Status with startPos, and notifies subscribers.
+func (f *FakeEngine) PlayFrom(_ context.Context, v model.Video, mode string, startPos float64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, FakeCall{Method: "PlayFrom", Video: v, Mode: mode, Delta: startPos})
+	if f.err != nil {
+		return f.err
+	}
+	if startPos < 0 {
+		startPos = 0
+	}
+	f.status.IsRunning = true
+	f.status.Title = v.Title
+	f.status.Paused = false
+	f.status.TimePos = startPos
 	if f.status.PlaylistCount == 0 {
 		f.status.PlaylistCount = 1
 	}
@@ -258,6 +293,121 @@ func (f *FakeEngine) AddVolume(_ context.Context, delta float64) error {
 	if f.status.Volume < 0 {
 		f.status.Volume = 0
 	}
+	f.broadcastLocked(f.status)
+	return nil
+}
+
+// SetSpeed records the SetSpeed call, clamps Speed between 0.5 and 2.0, and notifies subscribers.
+func (f *FakeEngine) SetSpeed(_ context.Context, speed float64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, FakeCall{Method: "SetSpeed", Delta: speed})
+	if f.err != nil {
+		return f.err
+	}
+	f.status.Speed = clampSpeed(speed)
+	f.broadcastLocked(f.status)
+	return nil
+}
+
+// ToggleLoop records the ToggleLoop call, flips LoopFile, and notifies subscribers.
+func (f *FakeEngine) ToggleLoop(_ context.Context) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, FakeCall{Method: "ToggleLoop"})
+	if f.err != nil {
+		return f.status.LoopFile, f.err
+	}
+	f.status.LoopFile = !f.status.LoopFile
+	f.broadcastLocked(f.status)
+	return f.status.LoopFile, nil
+}
+
+// Playlist records the call and returns a copy of the configured fake playlist.
+func (f *FakeEngine) Playlist(_ context.Context) ([]PlaylistItem, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, FakeCall{Method: "Playlist"})
+	if f.err != nil {
+		return nil, f.err
+	}
+	out := make([]PlaylistItem, len(f.playlist))
+	copy(out, f.playlist)
+	return out, nil
+}
+
+// PlayPlaylistIndex records the call, activates the playlist item at index, and notifies subscribers.
+func (f *FakeEngine) PlayPlaylistIndex(_ context.Context, index int) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, FakeCall{Method: "PlayPlaylistIndex", Seconds: index})
+	if f.err != nil {
+		return f.err
+	}
+	if index < 0 {
+		return fmt.Errorf("invalid playlist index: %d", index)
+	}
+	if len(f.playlist) > 0 {
+		if index >= len(f.playlist) {
+			return fmt.Errorf("playlist index out of range: %d", index)
+		}
+		for i := range f.playlist {
+			f.playlist[i].Current = i == index
+		}
+		f.status.Title = f.playlist[index].Title
+	}
+	f.status.IsRunning = true
+	f.status.Paused = false
+	f.status.TimePos = 0
+	f.broadcastLocked(f.status)
+	return nil
+}
+
+// RemovePlaylistIndex records the call, removes index from the fake playlist, and notifies subscribers.
+func (f *FakeEngine) RemovePlaylistIndex(_ context.Context, index int) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, FakeCall{Method: "RemovePlaylistIndex", Seconds: index})
+	if f.err != nil {
+		return f.err
+	}
+	if index < 0 {
+		return fmt.Errorf("invalid playlist index: %d", index)
+	}
+	if len(f.playlist) > 0 {
+		if index >= len(f.playlist) {
+			return fmt.Errorf("playlist index out of range: %d", index)
+		}
+		f.playlist = append(f.playlist[:index], f.playlist[index+1:]...)
+		for i := range f.playlist {
+			f.playlist[i].Index = i
+		}
+		f.status.PlaylistCount = len(f.playlist)
+	} else if f.status.PlaylistCount > 0 {
+		f.status.PlaylistCount--
+	}
+	f.broadcastLocked(f.status)
+	return nil
+}
+
+// ClearPlaylist records the call, retains only the current item if present, and notifies subscribers.
+func (f *FakeEngine) ClearPlaylist(_ context.Context) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, FakeCall{Method: "ClearPlaylist"})
+	if f.err != nil {
+		return f.err
+	}
+	var kept []PlaylistItem
+	for _, item := range f.playlist {
+		if item.Current {
+			item.Index = 0
+			kept = append(kept, item)
+			break
+		}
+	}
+	f.playlist = kept
+	f.status.PlaylistCount = len(kept)
 	f.broadcastLocked(f.status)
 	return nil
 }

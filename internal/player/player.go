@@ -21,8 +21,18 @@ type Status struct {
 	Duration      float64 `json:"duration"`
 	Paused        bool    `json:"paused"`
 	Volume        float64 `json:"volume"`
+	Speed         float64 `json:"speed,omitempty"`
+	LoopFile      bool    `json:"loop_file,omitempty"`
 	PlaylistCount int     `json:"playlist_count"`
 	IsRunning     bool    `json:"is_running"`
+}
+
+// PlaylistItem represents a single entry in mpv's active playlist.
+type PlaylistItem struct {
+	Index    int    `json:"index"`
+	Title    string `json:"title"`
+	Filename string `json:"filename"`
+	Current  bool   `json:"current"`
 }
 
 // PlayVideo triggers playback through the existing yt infrastructure.
@@ -218,6 +228,16 @@ func GetStatus() (Status, error) {
 	if vol, err := getProp("volume"); err == nil && vol != nil {
 		if f, ok := vol.(float64); ok {
 			st.Volume = f
+		}
+	}
+	if speed, err := getProp("speed"); err == nil && speed != nil {
+		if f, ok := toFloat64(speed); ok && f > 0 {
+			st.Speed = f
+		}
+	}
+	if loopFile, err := getProp("loop-file"); err == nil && loopFile != nil {
+		if b, ok := parseLoopFileValue(loopFile); ok {
+			st.LoopFile = b
 		}
 	}
 

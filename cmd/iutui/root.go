@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -244,6 +245,9 @@ func runTUI(paths platform.Paths) error {
 	defer eng.Close()
 	eng.SetSponsorBlock(cfg.SponsorBlock)
 	dl := download.NewManager(paths.StateDir, dlDir, cfg.YtdlpBin)
+	resumeStore := store.NewResumeStore(paths.StateDir)
+	searchHist := store.NewSearchHistory(paths.StateDir)
+	suggestClient := catalog.NewSuggestClient()
 
 	sbEnabled := cfg.SponsorBlock
 	hideShorts := cfg.HideShorts
@@ -254,6 +258,9 @@ func runTUI(paths platform.Paths) error {
 		Store:               st,
 		Downloader:          dl,
 		LyricsClient:        lyrics.NewClient(),
+		SuggestProvider:     suggestClient,
+		SearchHistory:       searchHist,
+		ResumeStore:         resumeStore,
 		InitialQuality:      cfg.Quality,
 		InitialAudioOnly:    cfg.DefaultMode == "audio",
 		InitialDefaultMode:  cfg.DefaultMode,
@@ -314,11 +321,83 @@ func runTUI(paths platform.Paths) error {
 		tea.WithAltScreen(),
 		tea.WithMouseAllMotion(),
 	)
+	var programDone atomic.Bool
+	dl.OnProgress = func(it download.Item) {
+		if !programDone.Load() {
+			p.Send(app.DownloadProgressMsg{Item: it})
+		}
+	}
+	defer func() { dl.OnProgress = nil }()
+
+	mprisCtx, mprisCancel := context.WithCancel(context.Background())
+	mpris := platform.NewMPRISBridge(platform.MPRISCallbacks{
+		OnPlayPause: func() {
+			ctx, cancel := context.WithTimeout(mprisCtx, 2*time.Second)
+			defer cancel()
+			_ = eng.TogglePause(ctx)
+		},
+		OnPlay: func() {
+			if eng.Status().Paused {
+				ctx, cancel := context.WithTimeout(mprisCtx, 2*time.Second)
+				defer cancel()
+				_ = eng.TogglePause(ctx)
+			}
+		},
+		OnPause: func() {
+			ctx, cancel := context.WithTimeout(mprisCtx, 2*time.Second)
+			defer cancel()
+			_ = eng.Pause(ctx)
+		},
+		OnNext: func() {
+			ctx, cancel := context.WithTimeout(mprisCtx, 2*time.Second)
+			defer cancel()
+			_ = eng.Next(ctx)
+		},
+		OnPrevious: func() {
+			ctx, cancel := context.WithTimeout(mprisCtx, 2*time.Second)
+			defer cancel()
+			_ = eng.Prev(ctx)
+		},
+		OnSeek: func(d time.Duration) {
+			ctx, cancel := context.WithTimeout(mprisCtx, 2*time.Second)
+			defer cancel()
+			_ = eng.Seek(ctx, int(d.Seconds()))
+		},
+		OnStop: func() {
+			ctx, cancel := context.WithTimeout(mprisCtx, 2*time.Second)
+			defer cancel()
+			_ = eng.Pause(ctx)
+		},
+	})
+	defer mpris.Close()
+	defer mprisCancel()
+	if mpris.Active() {
+		mprisCh := eng.Subscribe(mprisCtx)
+		go func() {
+			for st := range mprisCh {
+				mpris.UpdateStatus(platform.MPRISStatus{
+					IsRunning: st.IsRunning,
+					Paused:    st.Paused,
+					Title:     st.Title,
+					Duration:  st.Duration,
+					Position:  st.TimePos,
+					Volume:    st.Volume,
+					Rate:      st.Speed,
+					TrackID:   st.Title,
+				})
+			}
+		}()
+	}
+
 	tui.SetOnThumbReady(func(id string) {
-		p.Send(app.ThumbReadyMsg{ID: id})
+		if !programDone.Load() {
+			p.Send(app.ThumbReadyMsg{ID: id})
+		}
 	})
 	defer tui.SetOnThumbReady(nil)
+	defer programDone.Store(true)
 	_, err := p.Run()
+	programDone.Store(true)
 	return err
 }
 

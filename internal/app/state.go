@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/e12jassir/iutui/internal/catalog"
+	"github.com/e12jassir/iutui/internal/download"
 	"github.com/e12jassir/iutui/internal/lyrics"
 	"github.com/e12jassir/iutui/internal/model"
 	"github.com/e12jassir/iutui/internal/player"
@@ -14,6 +15,23 @@ import (
 
 type metadataEnricher interface {
 	EnrichMetadata(ctx context.Context, ids []string) (map[string]catalog.VideoMeta, error)
+}
+
+// SuggestProvider resolves search autocomplete suggestions for a draft query.
+type SuggestProvider interface {
+	Suggest(ctx context.Context, query string) ([]string, error)
+}
+
+// SearchHistoryStore persists and retrieves recent search queries.
+type SearchHistoryStore interface {
+	List() ([]string, error)
+	Record(query string) error
+}
+
+// ResumePositionStore persists playback positions for long-form videos.
+type ResumePositionStore interface {
+	GetPosition(videoID string) (float64, bool)
+	SavePosition(videoID string, position, duration float64) error
 }
 
 // ViewMode represents the active top-level screen.
@@ -69,6 +87,9 @@ type Dependencies struct {
 	Store                store.Store
 	Downloader           Downloader
 	LyricsClient         *lyrics.Client
+	SuggestProvider      SuggestProvider
+	SearchHistory        SearchHistoryStore
+	ResumeStore          ResumePositionStore
 	InitialQuality       int
 	InitialAudioOnly     bool
 	InitialDefaultMode   string
@@ -143,6 +164,12 @@ type State struct {
 	LyricsErr         string
 	LyricsTrack       string
 	LyricsScroll      int
+	ShowQueue         bool
+	QueueIdx          int
+	MPVPlaylist       []player.PlaylistItem
+	SearchSuggestions []string
+	SuggestIdx        int
+	DownloadProgress  map[string]download.Item
 
 	Autoplay     bool
 	SponsorBlock bool
@@ -175,6 +202,8 @@ type State struct {
 
 	searchCancel  context.CancelFunc
 	searchSeq     uint64
+	suggestCancel context.CancelFunc
+	suggestSeq    uint64
 	channelCancel context.CancelFunc
 	channelSeq    uint64
 	lyricsCancel  context.CancelFunc
@@ -246,7 +275,10 @@ func NewState(deps Dependencies) *State {
 		LikedIDs:          make(map[string]bool),
 		HistoryIDs:        make(map[string]bool),
 		LiveLoading:       make(map[model.Tab]bool),
+		DownloadProgress:  make(map[string]download.Item),
+		SuggestIdx:        -1,
 		metaRequested:     make(map[string]bool),
+		PlayerStatus:      player.Status{Speed: 1.0},
 		LastInteractionAt: time.Now(),
 		appCtx:            ctx,
 		appCancel:         cancel,
@@ -269,10 +301,14 @@ func (s *State) RegisterUserActivity() {
 	s.AutoplayTracksSinceInput = 0
 }
 
-// Close releases background contexts and the player engine.
+// Close releases background contexts, persists any long-video resume position, and stops the player engine.
 func (s *State) Close() {
+	s.saveCurrentResumePosition()
 	if s.searchCancel != nil {
 		s.searchCancel()
+	}
+	if s.suggestCancel != nil {
+		s.suggestCancel()
 	}
 	if s.channelCancel != nil {
 		s.channelCancel()
@@ -286,6 +322,13 @@ func (s *State) Close() {
 	if s.Deps.Engine != nil {
 		_ = s.Deps.Engine.Close()
 	}
+}
+
+func (s *State) saveCurrentResumePosition() {
+	if s == nil || s.Deps.ResumeStore == nil || s.CurrentPlaying.ID == "" {
+		return
+	}
+	_ = s.Deps.ResumeStore.SavePosition(s.CurrentPlaying.ID, s.PlayerStatus.TimePos, s.PlayerStatus.Duration)
 }
 
 // VisibleItems returns the current list of videos filtered by the active chip.

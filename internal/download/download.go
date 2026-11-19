@@ -3,15 +3,20 @@
 package download
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/e12jassir/iutui/internal/model"
 )
@@ -26,6 +31,8 @@ const (
 	StatusFailed      Status = "failed"
 )
 
+const defaultMaxConcurrent = 2
+
 // Item represents a queued, active, completed, or failed download.
 type Item struct {
 	Video      model.Video
@@ -33,6 +40,10 @@ type Item struct {
 	Status     Status
 	OutputPath string
 	Err        string
+	Progress   float64
+	Speed      string
+	ETA        string
+	FilePath   string
 }
 
 // Runner executes yt-dlp (or a test double) with the given context, binary, and arguments.
@@ -40,14 +51,18 @@ type Runner func(ctx context.Context, bin string, args ...string) error
 
 // Manager coordinates video and audio downloads and maintains thread-safe queue state.
 type Manager struct {
-	StateDir    string
-	DownloadDir string
-	YtdlpBin    string
-	Runner      Runner
+	StateDir      string
+	DownloadDir   string
+	YtdlpBin      string
+	MaxConcurrent int
+	Runner        Runner
+	OnProgress    func(Item)
 
-	mu    sync.Mutex
-	items map[string]*Item
-	order []string
+	mu      sync.Mutex
+	items   map[string]*Item
+	order   []string
+	sem     chan struct{}
+	cancels map[string]context.CancelFunc
 }
 
 // NewManager creates a Manager configured with the given state directory,
@@ -57,11 +72,12 @@ func NewManager(stateDir, downloadDir, ytdlpBin string) *Manager {
 		ytdlpBin = "yt-dlp"
 	}
 	return &Manager{
-		StateDir:    stateDir,
-		DownloadDir: downloadDir,
-		YtdlpBin:    ytdlpBin,
-		Runner:      defaultRunner,
-		items:       make(map[string]*Item),
+		StateDir:      stateDir,
+		DownloadDir:   downloadDir,
+		YtdlpBin:      ytdlpBin,
+		MaxConcurrent: defaultMaxConcurrent,
+		items:         make(map[string]*Item),
+		cancels:       make(map[string]context.CancelFunc),
 	}
 }
 
@@ -69,11 +85,8 @@ func NewManager(stateDir, downloadDir, ytdlpBin string) *Manager {
 // tracks the download in the queue, and executes yt-dlp to download the video
 // or audio track.
 func (m *Manager) Enqueue(ctx context.Context, v model.Video, audioOnly bool) error {
-	if v.ID == "" {
-		return errors.New("download: video ID is required")
-	}
-	if strings.ContainsAny(v.ID, `/\`) || v.ID == "." || v.ID == ".." {
-		return fmt.Errorf("download: invalid video ID %q", v.ID)
+	if err := validateVideoID(v.ID); err != nil {
+		return err
 	}
 
 	dest := m.DownloadDir
@@ -92,7 +105,11 @@ func (m *Manager) Enqueue(ctx context.Context, v model.Video, audioOnly bool) er
 		}
 	}
 
+	dlCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	m.mu.Lock()
+	m.ensureInitLocked()
 	item := &Item{
 		Video:      v,
 		AudioOnly:  audioOnly,
@@ -103,32 +120,141 @@ func (m *Manager) Enqueue(ctx context.Context, v model.Video, audioOnly bool) er
 		m.order = append(m.order, v.ID)
 	}
 	m.items[v.ID] = item
-	item.Status = StatusDownloading
-	m.mu.Unlock()
-
-	args := buildArgs(v.ID, outputTemplate, audioOnly)
+	if prev, ok := m.cancels[v.ID]; ok && prev != nil {
+		prev()
+	}
+	m.cancels[v.ID] = cancel
+	sem := m.sem
 	bin := m.YtdlpBin
 	if bin == "" {
 		bin = "yt-dlp"
 	}
 	runner := m.Runner
-	if runner == nil {
-		runner = defaultRunner
+	onProg := m.OnProgress
+	pendingSnap := *item
+	m.mu.Unlock()
+
+	if onProg != nil {
+		onProg(pendingSnap)
 	}
 
-	err := runner(ctx, bin, args...)
+	defer func() {
+		m.mu.Lock()
+		if m.items[v.ID] == item {
+			delete(m.cancels, v.ID)
+		}
+		m.mu.Unlock()
+	}()
+
+	if err := dlCtx.Err(); err != nil {
+		m.finishFailed(v.ID, item, err)
+		return err
+	}
+
+	select {
+	case sem <- struct{}{}:
+		defer func() { <-sem }()
+	case <-dlCtx.Done():
+		err := dlCtx.Err()
+		m.finishFailed(v.ID, item, err)
+		return err
+	}
 
 	m.mu.Lock()
+	item.Status = StatusDownloading
+	dlSnap := *item
+	onProg = m.OnProgress
+	m.mu.Unlock()
+	if onProg != nil {
+		onProg(dlSnap)
+	}
+
+	args := buildArgs(v.ID, outputTemplate, audioOnly)
+
+	var err error
+	if runner != nil {
+		err = runner(dlCtx, bin, args...)
+	} else {
+		err = m.runWithProgress(dlCtx, bin, item, args...)
+	}
+
+	if err == nil {
+		m.mu.Lock()
+		filePath := item.FilePath
+		m.mu.Unlock()
+		if filePath != "" && m.StateDir != "" {
+			if metaErr := writeMetaAtomicWithPath(m.downloadsDir(), v, filePath); metaErr != nil {
+				err = metaErr
+			}
+		}
+	}
+
+	m.mu.Lock()
+	if m.items[v.ID] == item {
+		delete(m.cancels, v.ID)
+	}
 	if err != nil {
 		item.Status = StatusFailed
 		item.Err = err.Error()
 	} else {
 		item.Status = StatusDone
+		item.Progress = 100
 		item.Err = ""
+	}
+	finalSnap := *item
+	onProg = m.OnProgress
+	m.mu.Unlock()
+
+	if onProg != nil {
+		onProg(finalSnap)
+	}
+
+	return err
+}
+
+// Cancel cancels an active or pending download for videoID, returning true if
+// a download was active and cancelled.
+func (m *Manager) Cancel(videoID string) bool {
+	m.mu.Lock()
+	cancel, ok := m.cancels[videoID]
+	if ok {
+		delete(m.cancels, videoID)
+	}
+	m.mu.Unlock()
+	if ok && cancel != nil {
+		cancel()
+		return true
+	}
+	return false
+}
+
+// LocalFile returns the verified local file path for a completed download if it
+// exists on disk and is non-empty, or "" otherwise.
+func (m *Manager) LocalFile(videoID string) string {
+	if err := validateVideoID(videoID); err != nil {
+		return ""
+	}
+
+	m.mu.Lock()
+	var memPath string
+	if it, ok := m.items[videoID]; ok && it != nil {
+		memPath = it.FilePath
 	}
 	m.mu.Unlock()
 
-	return err
+	if isValidLocalFile(memPath) {
+		return memPath
+	}
+
+	if dlDir := m.downloadsDir(); dlDir != "" {
+		metaPath := filepath.Join(dlDir, videoID+".meta")
+		if _, diskPath, err := readMeta(metaPath, videoID); err == nil {
+			if isValidLocalFile(diskPath) {
+				return diskPath
+			}
+		}
+	}
+	return ""
 }
 
 // List returns all active/tracked queue items merged with any persisted .meta
@@ -170,13 +296,15 @@ func (m *Manager) List() ([]Item, error) {
 		if _, ok := seen[id]; ok {
 			continue
 		}
-		v, err := readMeta(filepath.Join(dlDir, entry.Name()), id)
+		v, filePath, err := readMeta(filepath.Join(dlDir, entry.Name()), id)
 		if err != nil {
 			return nil, err
 		}
 		diskItems = append(diskItems, Item{
-			Video:  v,
-			Status: StatusDone,
+			Video:    v,
+			Status:   StatusDone,
+			Progress: 100,
+			FilePath: filePath,
 		})
 	}
 
@@ -187,11 +315,207 @@ func (m *Manager) List() ([]Item, error) {
 	return result, nil
 }
 
+func (m *Manager) ensureInitLocked() {
+	if m.items == nil {
+		m.items = make(map[string]*Item)
+	}
+	if m.cancels == nil {
+		m.cancels = make(map[string]context.CancelFunc)
+	}
+	if m.sem == nil {
+		n := m.MaxConcurrent
+		if n <= 0 {
+			n = defaultMaxConcurrent
+		}
+		m.sem = make(chan struct{}, n)
+	}
+}
+
+func (m *Manager) finishFailed(videoID string, item *Item, err error) {
+	m.mu.Lock()
+	if m.items[videoID] == item {
+		delete(m.cancels, videoID)
+	}
+	item.Status = StatusFailed
+	item.Err = err.Error()
+	snap := *item
+	onProg := m.OnProgress
+	m.mu.Unlock()
+
+	if onProg != nil {
+		onProg(snap)
+	}
+}
+
 func (m *Manager) downloadsDir() string {
 	if m.StateDir == "" {
 		return ""
 	}
 	return filepath.Join(m.StateDir, "downloads")
+}
+
+func (m *Manager) runWithProgress(ctx context.Context, bin string, item *Item, args ...string) error {
+	fullArgs := make([]string, 0, 5+len(args))
+	fullArgs = append(fullArgs,
+		"--newline",
+		"--progress-template", "download:IUTUI_PROG|%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s",
+		"--print", "after_move:IUTUI_FILE|%(filepath)s",
+	)
+	fullArgs = append(fullArgs, args...)
+
+	cmd := exec.CommandContext(ctx, bin, fullArgs...)
+	cmd.WaitDelay = 2 * time.Second
+
+	pr, pw := io.Pipe()
+	cmd.Stdout = pw
+	cmd.Stderr = pw
+
+	if err := cmd.Start(); err != nil {
+		_ = pw.Close()
+		_ = pr.Close()
+		if ctx.Err() != nil {
+			return fmt.Errorf("%w: %v", ctx.Err(), err)
+		}
+		return err
+	}
+
+	scanDone := make(chan struct{})
+	var errLines []string
+	go func() {
+		defer close(scanDone)
+		defer pr.Close()
+		scanner := bufio.NewScanner(pr)
+		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+		for scanner.Scan() {
+			line := scanner.Text()
+			if !m.handleOutputLine(item, line) {
+				trimmed := strings.TrimSpace(line)
+				if trimmed != "" {
+					if len(errLines) >= 20 {
+						copy(errLines, errLines[1:])
+						errLines[len(errLines)-1] = trimmed
+					} else {
+						errLines = append(errLines, trimmed)
+					}
+				}
+			}
+		}
+	}()
+
+	waitErr := cmd.Wait()
+	_ = pw.Close()
+	<-scanDone
+
+	if waitErr != nil {
+		if ctx.Err() != nil {
+			return fmt.Errorf("%w: %v", ctx.Err(), waitErr)
+		}
+		if msg := strings.TrimSpace(strings.Join(errLines, "\n")); msg != "" {
+			return fmt.Errorf("%w: %s", waitErr, msg)
+		}
+		return waitErr
+	}
+	return nil
+}
+
+func (m *Manager) handleOutputLine(item *Item, rawLine string) bool {
+	line := rawLine
+	if idx := strings.LastIndex(line, "\r"); idx >= 0 {
+		line = line[idx+1:]
+	}
+	line = strings.TrimSpace(line)
+
+	if strings.HasPrefix(line, "IUTUI_PROG|") {
+		rest := strings.TrimPrefix(line, "IUTUI_PROG|")
+		parts := strings.SplitN(rest, "|", 3)
+
+		var pct float64
+		var hasPct bool
+		if len(parts) >= 1 {
+			pctStr := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(parts[0]), "%"))
+			if parsed, err := strconv.ParseFloat(pctStr, 64); err == nil && !math.IsNaN(parsed) && !math.IsInf(parsed, 0) {
+				if parsed < 0 {
+					parsed = 0
+				} else if parsed > 100 {
+					parsed = 100
+				}
+				pct = parsed
+				hasPct = true
+			}
+		}
+
+		var speed string
+		if len(parts) >= 2 {
+			s := strings.TrimSpace(parts[1])
+			if s != "" && s != "NA" && s != "N/A" {
+				speed = s
+			}
+		}
+
+		var eta string
+		if len(parts) >= 3 {
+			e := strings.TrimSpace(parts[2])
+			if e != "" && e != "NA" && e != "N/A" {
+				eta = e
+			}
+		}
+
+		m.mu.Lock()
+		if hasPct {
+			item.Progress = pct
+		}
+		if speed != "" {
+			item.Speed = speed
+		}
+		if eta != "" {
+			item.ETA = eta
+		}
+		snap := *item
+		onProg := m.OnProgress
+		m.mu.Unlock()
+		if onProg != nil {
+			onProg(snap)
+		}
+		return true
+	}
+
+	if strings.HasPrefix(line, "IUTUI_FILE|") {
+		fp := strings.TrimSpace(strings.TrimPrefix(line, "IUTUI_FILE|"))
+		if fp != "" {
+			m.mu.Lock()
+			item.FilePath = fp
+			snap := *item
+			onProg := m.OnProgress
+			m.mu.Unlock()
+			if onProg != nil {
+				onProg(snap)
+			}
+		}
+		return true
+	}
+
+	return false
+}
+
+func validateVideoID(id string) error {
+	if id == "" {
+		return errors.New("download: video ID is required")
+	}
+	if strings.ContainsAny(id, `/\`) || id == "." || id == ".." {
+		return fmt.Errorf("download: invalid video ID %q", id)
+	}
+	return nil
+}
+
+func isValidLocalFile(path string) bool {
+	if path == "" {
+		return false
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	return !info.IsDir() && info.Size() > 0
 }
 
 func buildArgs(videoID, outputTemplate string, audioOnly bool) []string {
@@ -205,6 +529,10 @@ func buildArgs(videoID, outputTemplate string, audioOnly bool) []string {
 }
 
 func writeMetaAtomic(dir string, v model.Video) error {
+	return writeMetaAtomicWithPath(dir, v, "")
+}
+
+func writeMetaAtomicWithPath(dir string, v model.Video, filePath string) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("download: create state downloads dir: %w", err)
 	}
@@ -220,7 +548,12 @@ func writeMetaAtomic(dir string, v model.Video) error {
 		}
 	}()
 
-	content := fmt.Sprintf("%s\n%s\n", sanitizeLine(v.Title), sanitizeLine(v.Channel))
+	var content string
+	if filePath != "" {
+		content = fmt.Sprintf("%s\n%s\n%s\n", sanitizeLine(v.Title), sanitizeLine(v.Channel), sanitizeLine(filePath))
+	} else {
+		content = fmt.Sprintf("%s\n%s\n", sanitizeLine(v.Title), sanitizeLine(v.Channel))
+	}
 	if _, err := tmp.WriteString(content); err != nil {
 		_ = tmp.Close()
 		return fmt.Errorf("download: write temp meta file: %w", err)
@@ -237,12 +570,13 @@ func writeMetaAtomic(dir string, v model.Video) error {
 	return nil
 }
 
-func readMeta(path, id string) (model.Video, error) {
+func readMeta(path, id string) (model.Video, string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return model.Video{}, fmt.Errorf("download: read meta file %s: %w", path, err)
+		return model.Video{}, "", fmt.Errorf("download: read meta file %s: %w", path, err)
 	}
-	lines := strings.Split(strings.TrimRight(string(data), "\r\n"), "\n")
+	norm := strings.ReplaceAll(string(data), "\r\n", "\n")
+	lines := strings.Split(strings.TrimRight(norm, "\r\n"), "\n")
 	v := model.Video{ID: id}
 	if len(lines) >= 1 {
 		v.Title = lines[0]
@@ -250,24 +584,15 @@ func readMeta(path, id string) (model.Video, error) {
 	if len(lines) >= 2 {
 		v.Channel = lines[1]
 	}
-	return v, nil
+	var filePath string
+	if len(lines) >= 3 {
+		filePath = strings.TrimSpace(lines[2])
+	}
+	return v, filePath, nil
 }
 
 func sanitizeLine(s string) string {
 	s = strings.ReplaceAll(s, "\r", " ")
 	s = strings.ReplaceAll(s, "\n", " ")
 	return s
-}
-
-func defaultRunner(ctx context.Context, bin string, args ...string) error {
-	cmd := exec.CommandContext(ctx, bin, args...)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		msg := strings.TrimSpace(string(out))
-		if msg != "" {
-			return fmt.Errorf("%w: %s", err, msg)
-		}
-		return err
-	}
-	return nil
 }

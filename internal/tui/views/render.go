@@ -4,12 +4,15 @@ package views
 
 import (
 	"fmt"
+	"math"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/e12jassir/iutui/internal/app"
+	"github.com/e12jassir/iutui/internal/download"
 	"github.com/e12jassir/iutui/internal/lyrics"
 	"github.com/e12jassir/iutui/internal/model"
 	"github.com/e12jassir/iutui/internal/tui/theme"
@@ -183,9 +186,28 @@ func Render(s *app.State, th theme.Theme, tr thumbs.Renderer) string {
 	topBar := renderTopPanels(s, th, tr, s.Width, pal)
 
 	hasPlayer := s.HasPlayerBar()
-	middleH := s.Height - 3 // top(3)
+	sugH := 0
+	var sugBar string
+	if s.Focus == app.FocusSearch && len(s.SearchSuggestions) > 0 {
+		sugCount := min(6, len(s.SearchSuggestions))
+		sugH = sugCount + 2
+		maxBody := s.Height - 3
+		if hasPlayer {
+			maxBody -= 5
+		}
+		if maxBody-sugH < 4 {
+			sugH = max(0, maxBody-4)
+		}
+		if sugH >= 3 {
+			sugBar = renderSearchSuggestionsStrip(s, s.Width, sugH, pal)
+		} else {
+			sugH = 0
+		}
+	}
+
+	middleH := s.Height - 3 - sugH // top(3) + optional suggestions
 	if hasPlayer {
-		middleH = s.Height - 8 // top(3) + player(5)
+		middleH = s.Height - 8 - sugH // top(3) + player(5) + optional suggestions
 	}
 	if middleH < 4 {
 		middleH = 4
@@ -218,17 +240,23 @@ func Render(s *app.State, th theme.Theme, tr thumbs.Renderer) string {
 		middle = lipgloss.JoinHorizontal(lipgloss.Top, panes...)
 	}
 
-	var frame string
+	var parts []string
+	parts = append(parts, topBar)
+	if sugBar != "" {
+		parts = append(parts, sugBar)
+	}
+	parts = append(parts, middle)
 	if hasPlayer {
 		playerBar := renderPlayerPanel(s, th, s.Width, pal)
-		frame = lipgloss.JoinVertical(lipgloss.Left, topBar, middle, playerBar)
-	} else {
-		frame = lipgloss.JoinVertical(lipgloss.Left, topBar, middle)
+		parts = append(parts, playerBar)
 	}
+	frame := lipgloss.JoinVertical(lipgloss.Left, parts...)
 	if s.ShowStillWatching {
 		frame = renderStillWatchingOverlay(s, s.Width, s.Height, th, pal)
 	} else if s.ShowQualityModal {
 		frame = renderQualityOverlay(s, s.Width, s.Height, th, pal)
+	} else if s.ShowQueue {
+		frame = renderQueueOverlay(s, s.Width, s.Height, th, pal)
 	} else if s.ShowChapters {
 		frame = renderChaptersOverlay(s, s.Width, s.Height, th, pal)
 	} else if s.ShowSettings {
@@ -239,6 +267,43 @@ func Render(s *app.State, th theme.Theme, tr thumbs.Renderer) string {
 		frame = renderLyricsOverlay(s, s.Width, s.Height, th, pal)
 	}
 	return fitBlock(frame, s.Width, s.Height)
+}
+
+func renderSearchSuggestionsStrip(s *app.State, width, sugH int, pal renderPalette) string {
+	sideW := sidebarWidthFor(width)
+	remW := width - sideW
+	actionsW := 15
+	panelW := max(24, remW-actionsW)
+	innerW := max(4, panelW-2)
+
+	maxItems := max(1, min(len(s.SearchSuggestions), sugH-2))
+	title := "Sugerencias"
+	if strings.TrimSpace(s.SearchDraft) == "" {
+		title = "Búsquedas recientes"
+	}
+
+	rows := make([]string, 0, maxItems)
+	for i := 0; i < maxItems; i++ {
+		sug := s.SearchSuggestions[i]
+		if i == s.SuggestIdx {
+			row := "▸ " + sug
+			rows = append(rows, lipgloss.NewStyle().Foreground(pal.spotAccent).Bold(true).Render(truncatePlain(row, innerW)))
+		} else {
+			row := "  " + sug
+			rows = append(rows, lipgloss.NewStyle().Foreground(pal.text).Render(truncatePlain(row, innerW)))
+		}
+	}
+
+	panel := renderSpotatuiPanel(title, rows, panelW, sugH, true, pal)
+	if sideW <= 0 {
+		return panel
+	}
+	pad := strings.Repeat(" ", sideW)
+	lines := strings.Split(panel, "\n")
+	for i, l := range lines {
+		lines[i] = pad + l
+	}
+	return strings.Join(lines, "\n")
 }
 
 func renderTooSmall(w, h int, th theme.Theme, pal renderPalette) string {
@@ -535,7 +600,7 @@ func renderHomeGrid(s *app.State, th theme.Theme, tr thumbs.Renderer, width, hei
 	}
 
 	// Render a sample card to know exact row height.
-	sampleCard := renderCard(items[0], false, false, false, th, tr, actualCardW, pal)
+	sampleCard := renderCard(items[0], false, false, false, "", th, tr, actualCardW, pal)
 	cardH := lipgloss.Height(sampleCard)
 	if cardH < 1 {
 		cardH = 1
@@ -571,7 +636,8 @@ func renderHomeGrid(s *app.State, th theme.Theme, tr thumbs.Renderer, width, hei
 			selected := idx == s.SelectedIdx
 			saved := s.SavedIDs[v.ID]
 			playing := isVideoPlaying(s, v)
-			card := renderCard(v, selected, saved, playing, th, tr, actualCardW, pal)
+			dlBadge := downloadProgressBadge(s, v.ID)
+			card := renderCard(v, selected, saved, playing, dlBadge, th, tr, actualCardW, pal)
 			if c > 0 {
 				rowCards = append(rowCards, gapStr)
 			}
@@ -585,7 +651,7 @@ func renderHomeGrid(s *app.State, th theme.Theme, tr thumbs.Renderer, width, hei
 	return fitBlock(strings.Join(gridRows, "\n"), width, height)
 }
 
-func renderCard(v model.Video, selected, saved, playing bool, th theme.Theme, tr thumbs.Renderer, cardW int, pal renderPalette) string {
+func renderCard(v model.Video, selected, saved, playing bool, dlBadge string, th theme.Theme, tr thumbs.Renderer, cardW int, pal renderPalette) string {
 	innerW := max(4, cardW-4) // border(2) + padding(2)
 	thumbH := max(homeThumbH, min(11, innerW*9/32))
 
@@ -608,6 +674,9 @@ func renderCard(v model.Video, selected, saved, playing bool, th theme.Theme, tr
 	}
 	if playing {
 		badgeParts = append(badgeParts, lipgloss.NewStyle().Foreground(pal.red).Bold(true).Render("▶ sonando"))
+	}
+	if dlBadge != "" {
+		badgeParts = append(badgeParts, lipgloss.NewStyle().Foreground(pal.spotAccent).Bold(true).Render(dlBadge))
 	}
 	metaRow := truncateStyledLine(strings.Join(badgeParts, " "), innerW)
 
@@ -695,7 +764,7 @@ func renderSearchList(s *app.State, th theme.Theme, tr thumbs.Renderer, width, h
 		return fitBlock(empty, width, height)
 	}
 
-	sampleRow := renderSearchRow(items[0], false, false, false, th, tr, width, pal)
+	sampleRow := renderSearchRow(items[0], false, false, false, "", th, tr, width, pal)
 	rowH := lipgloss.Height(sampleRow)
 	if rowH < 1 {
 		rowH = 1
@@ -722,14 +791,15 @@ func renderSearchList(s *app.State, th theme.Theme, tr thumbs.Renderer, width, h
 	for i := startIdx; i < len(items) && usedH < height; i++ {
 		v := items[i]
 		tr.Prefetch(v.ID)
-		row := renderSearchRow(v, i == curIdx, s.SavedIDs[v.ID], isVideoPlaying(s, v), th, tr, width, pal)
+		dlBadge := downloadProgressBadge(s, v.ID)
+		row := renderSearchRow(v, i == curIdx, s.SavedIDs[v.ID], isVideoPlaying(s, v), dlBadge, th, tr, width, pal)
 		rows = append(rows, row)
 		usedH += lipgloss.Height(row)
 	}
 	return fitBlock(strings.Join(rows, "\n"), width, height)
 }
 
-func renderSearchRow(v model.Video, selected, saved, playing bool, th theme.Theme, tr thumbs.Renderer, rowW int, pal renderPalette) string {
+func renderSearchRow(v model.Video, selected, saved, playing bool, dlBadge string, th theme.Theme, tr thumbs.Renderer, rowW int, pal renderPalette) string {
 	innerW := max(10, rowW-4)
 	tw := min(searchThumbW, max(12, innerW/3))
 	thumbStr := tr.Render(v.ID, tw, searchThumbH)
@@ -765,6 +835,9 @@ func renderSearchRow(v model.Video, selected, saved, playing bool, th theme.Them
 	if playing {
 		badges = append(badges, lipgloss.NewStyle().Foreground(pal.red).Bold(true).Render("▶ sonando"))
 	}
+	if dlBadge != "" {
+		badges = append(badges, lipgloss.NewStyle().Foreground(pal.spotAccent).Bold(true).Render(dlBadge))
+	}
 	badgeLine := truncateStyledLine(strings.Join(badges, " "), infoW)
 
 	rightCol := strings.Join([]string{t1, t2, views, chLine, badgeLine}, "\n")
@@ -795,7 +868,14 @@ func renderPlayerPanel(s *app.State, th theme.Theme, width int, pal renderPalett
 	if s.PlayerStatus.Volume <= 0 {
 		volStr = "75%"
 	}
-	panelTitle := fmt.Sprintf("Reproductor (mpv IPC · %s %s · Vol: %s)", icon, stateLabel, volStr)
+	extra := ""
+	if s.PlayerStatus.Speed > 0 && math.Abs(s.PlayerStatus.Speed-1.0) > 0.01 {
+		extra += " · " + strconv.FormatFloat(math.Round(s.PlayerStatus.Speed*100)/100, 'f', -1, 64) + "x"
+	}
+	if s.PlayerStatus.LoopFile {
+		extra += " · ↻"
+	}
+	panelTitle := fmt.Sprintf("Reproductor (mpv IPC · %s %s · Vol: %s%s)", icon, stateLabel, volStr, extra)
 	if !s.PlayerStatus.IsRunning && s.PlayLoading {
 		panelTitle = "Reproductor (mpv IPC · " + loadingSpinner(s.AnimFrame) + " Abriendo...)"
 	}
@@ -1032,20 +1112,66 @@ func renderHelpOverlay(_ string, width, height int, th theme.Theme, pal renderPa
 		"  x / V · m       Alternar Solo Audio en vivo · Mix Radio",
 		"  Space / n / p   Pausar · Siguiente · Anterior",
 		"  , / . · - / +   Retroceder/Avanzar 10s · Volumen ±5%",
-		"  w / s / g / q   Guardar (★) · Suscribir · Canal · Cola",
-		"  d / o / l       Descargar · Capítulos · Letras",
-		"  f / c · b / t   Selector Calidad/Audio · SponsorBlock · Tema",
-		"  A               Activar/desactivar Autoplay",
+		"  { / } / 0 · R   Velocidad (0.5x..2x) · Repetir pista",
+		"  w / W · s / g   Guardar · Me gusta · Suscribir · Canal",
+		"  q / u · d       Añadir a cola · Ver Cola · Descargar",
+		"  o / l · f / c   Capítulos · Letras · Calidad/Audio",
+		"  A · b / t       Activar/desactivar Autoplay · Sponsor · Tema",
 		"  [ / ] · Tab     Cambiar chip · Foco sidebar",
 		"  1..5 / / / r    Pestañas · Buscar · Recargar",
 		"  Esc · ? / Q     Volver/Cerrar · Ayuda · Salir",
 	}
-	boxW := min(68, max(30, width-8))
+	boxW := min(70, max(30, width-8))
 	trimmed := make([]string, 0, len(rows))
 	for _, r := range rows {
 		trimmed = append(trimmed, truncateStyledLine(r, boxW-4))
 	}
 	modal := th.Toast.Width(boxW - 2).Render(strings.Join(trimmed, "\n"))
+	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, modal)
+}
+
+func renderQueueOverlay(s *app.State, width, height int, th theme.Theme, pal renderPalette) string {
+	start, end, boxW, _, _, _, _ := s.QueueModalWindow()
+	innerW := boxW - 4
+	title := lipgloss.NewStyle().Foreground(pal.spotAccent).Bold(true).Render(
+		fmt.Sprintf("♫ Cola de reproducción (%d)", len(s.MPVPlaylist)),
+	)
+	rows := []string{title, ""}
+
+	if len(s.MPVPlaylist) == 0 {
+		rows = append(rows, lipgloss.NewStyle().Foreground(pal.muted).Render("  Cola vacía — añade pistas con 'q'"))
+	} else {
+		for i := start; i < end; i++ {
+			it := s.MPVPlaylist[i]
+			name := strings.TrimSpace(it.Title)
+			if name == "" {
+				name = strings.TrimSpace(it.Filename)
+			}
+			if name == "" {
+				name = fmt.Sprintf("Pista %d", it.Index+1)
+			}
+			marker := "  "
+			if it.Current {
+				marker = "▶ "
+			}
+			cursor := "  "
+			if i == s.QueueIdx {
+				cursor = "▸ "
+			}
+			line := fmt.Sprintf("%s%s%d. %s", cursor, marker, i+1, name)
+			st := lipgloss.NewStyle().Foreground(pal.text)
+			if i == s.QueueIdx {
+				st = lipgloss.NewStyle().Foreground(pal.white).Bold(true)
+			} else if it.Current {
+				st = lipgloss.NewStyle().Foreground(pal.spotAccent).Bold(true)
+			}
+			rows = append(rows, st.Render(truncatePlain(line, innerW)))
+		}
+	}
+
+	footer := "  [j/k] Navegar · [Enter] Saltar · [x/d] Quitar · [c] Vaciar · [u/Esc] Cerrar"
+	rows = append(rows, "", lipgloss.NewStyle().Foreground(pal.dim).Render(truncatePlain(footer, innerW)))
+	modal := th.Toast.BorderForeground(pal.spotAccent).Width(boxW - 2).Render(strings.Join(rows, "\n"))
 	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, modal)
 }
 
@@ -1408,6 +1534,27 @@ func shortTabLabel(t model.Tab) string {
 
 func isVideoPlaying(s *app.State, v model.Video) bool {
 	return s.PlayerStatus.IsRunning && s.PlayerStatus.Title != "" && s.PlayerStatus.Title == v.Title
+}
+
+func downloadProgressBadge(s *app.State, id string) string {
+	if s == nil || len(s.DownloadProgress) == 0 || id == "" {
+		return ""
+	}
+	it, ok := s.DownloadProgress[id]
+	if !ok {
+		return ""
+	}
+	switch it.Status {
+	case download.StatusPending:
+		return "⬇ En cola..."
+	case download.StatusDownloading:
+		if spd := strings.TrimSpace(it.Speed); spd != "" {
+			return fmt.Sprintf("⬇ %.0f%% · %s", it.Progress, spd)
+		}
+		return fmt.Sprintf("⬇ %.0f%%", it.Progress)
+	default:
+		return ""
+	}
 }
 
 func findChannelForTitle(s *app.State, title string) string {

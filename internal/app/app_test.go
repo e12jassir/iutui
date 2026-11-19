@@ -2,20 +2,22 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"encoding/json"
-	"net/http"
-	"net/http/httptest"
-	"slices"
-
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/e12jassir/iutui/internal/catalog"
+	"github.com/e12jassir/iutui/internal/download"
 	"github.com/e12jassir/iutui/internal/lyrics"
 	"github.com/e12jassir/iutui/internal/model"
 	"github.com/e12jassir/iutui/internal/player"
@@ -24,6 +26,7 @@ import (
 
 func init() {
 	toastTTL = 15 * time.Millisecond
+	suggestDebounce = 15 * time.Millisecond
 }
 
 func newTestState() (*State, *catalog.FakeCatalog, *player.FakeEngine, *store.FakeStore) {
@@ -1990,5 +1993,303 @@ func TestPhase1LikedSeparateThumbReadyAndChannelIDSubscribe(t *testing.T) {
 	nextState, readyCmd := s.Update(ThumbReadyMsg{ID: "vidOne11111"})
 	if nextState != s || readyCmd != nil {
 		t.Fatalf("expected ThumbReadyMsg to return (s, nil), got (%v, %v)", nextState, readyCmd)
+	}
+}
+
+type fakeSuggestProvider struct {
+	mu      sync.Mutex
+	queries []string
+	items   []string
+}
+
+func (f *fakeSuggestProvider) Suggest(_ context.Context, query string) ([]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.queries = append(f.queries, query)
+	return append([]string(nil), f.items...), nil
+}
+
+type fakeOfflineDownloader struct {
+	local map[string]string
+}
+
+func (d *fakeOfflineDownloader) Enqueue(context.Context, model.Video, bool) error { return nil }
+func (d *fakeOfflineDownloader) LocalFile(id string) string                       { return d.local[id] }
+
+func TestPhase2_LiveQueueOverlay(t *testing.T) {
+	s, _, eng, _ := newTestState()
+	defer s.Close()
+
+	eng.SetPlaylist([]player.PlaylistItem{
+		{Index: 0, Title: "Track Zero", Filename: "id0", Current: true},
+		{Index: 1, Title: "Track One", Filename: "id1"},
+		{Index: 2, Title: "Track Two", Filename: "id2"},
+	})
+	s.PlayerStatus = player.Status{IsRunning: true, Speed: 1.0}
+
+	s, cmd := s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'u'}})
+	if !s.ShowQueue {
+		t.Fatal("expected 'u' to open queue overlay")
+	}
+	for _, m := range collectNonTickMsgs(cmd, 150*time.Millisecond) {
+		s, _ = s.Update(m)
+	}
+	if len(s.MPVPlaylist) != 3 {
+		t.Fatalf("expected 3 playlist items loaded, got %d", len(s.MPVPlaylist))
+	}
+
+	// Move down and press Enter -> plays index 1 and closes overlay.
+	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	if s.QueueIdx != 1 {
+		t.Fatalf("expected QueueIdx=1, got %d", s.QueueIdx)
+	}
+	s, cmd = s.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if s.ShowQueue {
+		t.Fatal("expected Enter on queue item to close overlay")
+	}
+	for _, m := range collectNonTickMsgs(cmd, 150*time.Millisecond) {
+		s, _ = s.Update(m)
+	}
+	foundPlayIdx := false
+	for _, c := range eng.Calls() {
+		if c.Method == "PlayPlaylistIndex" && c.Seconds == 1 {
+			foundPlayIdx = true
+		}
+	}
+	if !foundPlayIdx {
+		t.Fatalf("expected PlayPlaylistIndex(1) call, got %+v", eng.Calls())
+	}
+
+	// Re-open, remove current item ('x'), then clear ('c'), then close ('esc').
+	s, cmd = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'u'}})
+	for _, m := range collectNonTickMsgs(cmd, 150*time.Millisecond) {
+		s, _ = s.Update(m)
+	}
+	s, cmd = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	for _, m := range collectNonTickMsgs(cmd, 150*time.Millisecond) {
+		s, _ = s.Update(m)
+	}
+	foundRemove := false
+	for _, c := range eng.Calls() {
+		if c.Method == "RemovePlaylistIndex" {
+			foundRemove = true
+		}
+	}
+	if !foundRemove {
+		t.Fatalf("expected RemovePlaylistIndex call, got %+v", eng.Calls())
+	}
+
+	s, cmd = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	for _, m := range collectNonTickMsgs(cmd, 150*time.Millisecond) {
+		s, _ = s.Update(m)
+	}
+	if len(s.MPVPlaylist) != 0 {
+		t.Fatalf("expected empty playlist after clear, got %d", len(s.MPVPlaylist))
+	}
+	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if s.ShowQueue {
+		t.Fatal("expected Esc to close queue overlay")
+	}
+}
+
+func TestPhase2_SearchAutocompleteAndHistory(t *testing.T) {
+	sh := store.NewSearchHistory(t.TempDir())
+	if err := sh.Record("soda stereo"); err != nil {
+		t.Fatal(err)
+	}
+	sp := &fakeSuggestProvider{items: []string{"pink floyd live", "pink floyd pulse"}}
+	s := NewState(Dependencies{
+		Catalog: &catalog.FakeCatalog{
+			Results: map[string][]model.Video{
+				"pink floyd live": {{ID: "pf1", Title: "Pink Floyd Live"}},
+			},
+		},
+		Engine:          player.NewFakeEngine(),
+		SuggestProvider: sp,
+		SearchHistory:   sh,
+	})
+	defer s.Close()
+
+	// '/' opens search and populates recent history suggestions.
+	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	if s.Focus != FocusSearch || len(s.SearchSuggestions) != 1 || s.SearchSuggestions[0] != "soda stereo" {
+		t.Fatalf("expected FocusSearch with history suggestions, got focus=%v sug=%v", s.Focus, s.SearchSuggestions)
+	}
+
+	// Typing 'p', 'i' triggers debounced autocomplete SuggestTickMsg -> SuggestionsLoadedMsg.
+	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}})
+	s, cmd := s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
+	for _, m := range collectNonTickMsgs(cmd, 150*time.Millisecond) {
+		var nextCmd tea.Cmd
+		s, nextCmd = s.Update(m)
+		for _, m2 := range collectNonTickMsgs(nextCmd, 150*time.Millisecond) {
+			s, _ = s.Update(m2)
+		}
+	}
+	if len(s.SearchSuggestions) != 2 || s.SearchSuggestions[0] != "pink floyd live" {
+		t.Fatalf("expected autocomplete suggestions loaded, got %v", s.SearchSuggestions)
+	}
+
+	// Down highlights item 0; Tab fills draft; Enter submits and records query.
+	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyDown})
+	if s.SuggestIdx != 0 {
+		t.Fatalf("expected SuggestIdx=0 after KeyDown, got %d", s.SuggestIdx)
+	}
+	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyTab})
+	if s.SearchDraft != "pink floyd live" {
+		t.Fatalf("expected Tab to populate draft, got %q", s.SearchDraft)
+	}
+	s, cmd = s.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	for _, m := range collectNonTickMsgs(cmd, 150*time.Millisecond) {
+		s, _ = s.Update(m)
+	}
+	if s.SearchQuery != "pink floyd live" || len(s.SearchSuggestions) != 0 {
+		t.Fatalf("expected submitted search query and cleared suggestions, got query=%q sug=%v", s.SearchQuery, s.SearchSuggestions)
+	}
+	hist, err := sh.List()
+	if err != nil || len(hist) == 0 || hist[0] != "pink floyd live" {
+		t.Fatalf("expected 'pink floyd live' recorded at top of search history, got %v (err=%v)", hist, err)
+	}
+}
+
+func TestPhase2_SpeedAndLoopControls(t *testing.T) {
+	s, _, eng, _ := newTestState()
+	defer s.Close()
+
+	s, cmd := s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'{'}})
+	for _, m := range collectNonTickMsgs(cmd, 150*time.Millisecond) {
+		s, _ = s.Update(m)
+	}
+	if s.PlayerStatus.Speed != 0.75 {
+		t.Fatalf("expected Speed=0.75 after '{', got %v", s.PlayerStatus.Speed)
+	}
+
+	s, cmd = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'}'}})
+	for _, m := range collectNonTickMsgs(cmd, 150*time.Millisecond) {
+		s, _ = s.Update(m)
+	}
+	s, cmd = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'}'}})
+	for _, m := range collectNonTickMsgs(cmd, 150*time.Millisecond) {
+		s, _ = s.Update(m)
+	}
+	if s.PlayerStatus.Speed != 1.25 {
+		t.Fatalf("expected Speed=1.25 after twice '}', got %v", s.PlayerStatus.Speed)
+	}
+
+	s, cmd = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'0'}})
+	for _, m := range collectNonTickMsgs(cmd, 150*time.Millisecond) {
+		s, _ = s.Update(m)
+	}
+	if s.PlayerStatus.Speed != 1.0 {
+		t.Fatalf("expected Speed=1.0 after '0', got %v", s.PlayerStatus.Speed)
+	}
+
+	s, cmd = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'R'}})
+	for _, m := range collectNonTickMsgs(cmd, 150*time.Millisecond) {
+		s, _ = s.Update(m)
+	}
+	if !s.PlayerStatus.LoopFile {
+		t.Fatal("expected LoopFile=true after 'R'")
+	}
+	if !eng.Status().LoopFile {
+		t.Fatal("expected FakeEngine LoopFile=true after 'R'")
+	}
+}
+
+func TestPhase2_SmartResumeLongVsShort(t *testing.T) {
+	res := store.NewResumeStore(t.TempDir())
+	eng1 := player.NewFakeEngine()
+	longVid := model.Video{ID: "long0001", Title: "Podcast Largo", Channel: "Pod", Duration: "25:00"}
+	shortVid := model.Video{ID: "short001", Title: "Clip Corto", Channel: "Clip", Duration: "05:00"}
+	s1 := NewState(Dependencies{
+		Catalog: &catalog.FakeCatalog{
+			Feeds: map[model.Tab][]model.Video{model.TabHome: {longVid, shortVid}},
+		},
+		Engine:      eng1,
+		ResumeStore: res,
+	})
+	s1, _ = s1.Update(FeedLoadedMsg{Tab: model.TabHome, Videos: []model.Video{longVid, shortVid}})
+
+	// Play long video, advance status to 420s/1500s, then switch to short video.
+	s1, _ = s1.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	s1.PlayerStatus = player.Status{IsRunning: true, Title: longVid.Title, TimePos: 420, Duration: 1500, Speed: 1.0}
+	s1.SetSelection(1)
+	s1, _ = s1.Update(tea.KeyMsg{Type: tea.KeyEnter})
+
+	// Simulate playing short video (300s < 900s) then Close() -> short must NOT be saved.
+	s1.PlayerStatus = player.Status{IsRunning: true, Title: shortVid.Title, TimePos: 150, Duration: 300, Speed: 1.0}
+	s1.Close()
+
+	if pos, ok := res.GetPosition("long0001"); !ok || pos != 420 {
+		t.Fatalf("expected saved resume 420s for long0001, got ok=%v pos=%v", ok, pos)
+	}
+	if _, ok := res.GetPosition("short001"); ok {
+		t.Fatal("did not expect short video (< 900s) to save resume position")
+	}
+
+	// Fresh session opening long0001 should invoke PlayFrom at 420s with toast.
+	eng2 := player.NewFakeEngine()
+	s2 := NewState(Dependencies{
+		Catalog: &catalog.FakeCatalog{
+			Feeds: map[model.Tab][]model.Video{model.TabHome: {longVid}},
+		},
+		Engine:      eng2,
+		ResumeStore: res,
+	})
+	defer s2.Close()
+	s2, _ = s2.Update(FeedLoadedMsg{Tab: model.TabHome, Videos: []model.Video{longVid}})
+	s2, cmd := s2.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if !strings.Contains(s2.Toast, "Reanudando en 07:00") {
+		t.Fatalf("expected resume toast 'Reanudando en 07:00', got %q", s2.Toast)
+	}
+	for _, m := range collectNonTickMsgs(cmd, 150*time.Millisecond) {
+		s2, _ = s2.Update(m)
+	}
+	calls := eng2.Calls()
+	if len(calls) == 0 || calls[len(calls)-1].Method != "PlayFrom" || calls[len(calls)-1].Delta != 420 {
+		t.Fatalf("expected PlayFrom(..., 420) call on resume, got %+v", calls)
+	}
+}
+
+func TestPhase2_DownloadProgressAndOfflinePlayback(t *testing.T) {
+	eng := player.NewFakeEngine()
+	tmpDir := t.TempDir()
+	localFile := filepath.Join(tmpDir, "vidDL01.mp4")
+	if err := os.WriteFile(localFile, []byte("mp4data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	vid := model.Video{ID: "vidDL01", Title: "Offline Mix"}
+	s := NewState(Dependencies{
+		Catalog: &catalog.FakeCatalog{
+			Feeds: map[model.Tab][]model.Video{model.TabHome: {vid}},
+		},
+		Engine:     eng,
+		Downloader: &fakeOfflineDownloader{local: map[string]string{"vidDL01": localFile}},
+	})
+	defer s.Close()
+	s, _ = s.Update(FeedLoadedMsg{Tab: model.TabHome, Videos: []model.Video{vid}})
+
+	s, _ = s.Update(DownloadProgressMsg{
+		Item: download.Item{
+			Video:    vid,
+			Status:   download.StatusDownloading,
+			Progress: 62,
+			Speed:    "3.1MiB/s",
+		},
+	})
+	if got := s.DownloadProgress["vidDL01"]; got.Progress != 62 || got.Speed != "3.1MiB/s" {
+		t.Fatalf("expected tracked DownloadProgress, got %+v", got)
+	}
+
+	s, cmd := s.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if !strings.Contains(s.Toast, "Sin conexión") {
+		t.Fatalf("expected offline playback toast, got %q", s.Toast)
+	}
+	for _, m := range collectNonTickMsgs(cmd, 150*time.Millisecond) {
+		s, _ = s.Update(m)
+	}
+	calls := eng.Calls()
+	if len(calls) == 0 || calls[len(calls)-1].Video.LocalPath != localFile {
+		t.Fatalf("expected FakeEngine Play with LocalPath=%q, got %+v", localFile, calls)
 	}
 }

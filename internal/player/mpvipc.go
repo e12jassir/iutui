@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"os"
 	"os/exec"
@@ -35,6 +36,8 @@ var observedProperties = []string{
 	"volume",
 	"media-title",
 	"playlist-count",
+	"speed",
+	"loop-file",
 }
 
 // IPCOption configures an IPCClient.
@@ -202,6 +205,7 @@ func NewIPCClient(opts ...IPCOption) *IPCClient {
 		done:           make(chan struct{}),
 		wakeCh:         make(chan struct{}, 1),
 		pending:        make(map[int64]chan ipcResponse),
+		status:         Status{Speed: 1.0},
 		subs:           make(map[uint64]chan Status),
 	}
 	c.autoplay.Store(true)
@@ -439,6 +443,19 @@ func (c *IPCClient) applyPropertyChange(name string, data any) {
 			c.status.PlaylistCount = int(f)
 			changed = true
 		}
+	case "speed":
+		if f, ok := toFloat64(data); ok {
+			if f <= 0 || math.IsNaN(f) || math.IsInf(f, 0) {
+				f = 1.0
+			}
+			c.status.Speed = f
+			changed = true
+		}
+	case "loop-file":
+		if b, ok := parseLoopFileValue(data); ok {
+			c.status.LoopFile = b
+			changed = true
+		}
 	}
 	st := c.status
 	c.statusMu.Unlock()
@@ -466,7 +483,7 @@ func (c *IPCClient) handleDisconnect(conn net.Conn) {
 	c.clearSponsorBlockState(0)
 
 	c.statusMu.Lock()
-	c.status = Status{IsRunning: false}
+	c.status = Status{IsRunning: false, Speed: 1.0}
 	st := c.status
 	c.statusMu.Unlock()
 
@@ -1047,6 +1064,14 @@ func (c *IPCClient) Play(ctx context.Context, v model.Video, mode string) error 
 	return c.playWithResume(ctx, v, mode, 0, false)
 }
 
+// PlayFrom starts playback of v from startPos seconds using the active socket or launches mpv directly.
+func (c *IPCClient) PlayFrom(ctx context.Context, v model.Video, mode string, startPos float64) error {
+	if startPos < 0 {
+		startPos = 0
+	}
+	return c.playWithResume(ctx, v, mode, startPos, false)
+}
+
 func (c *IPCClient) playWithResume(ctx context.Context, v model.Video, mode string, startPos float64, startPaused bool) error {
 	if c.ctx.Err() != nil {
 		return ErrClientClosed
@@ -1154,6 +1179,17 @@ func (c *IPCClient) resolvePlayTarget(waitCtx context.Context, v model.Video, mo
 	}
 	if audioOnly && (effectiveMode == "" || effectiveMode == "auto") {
 		effectiveMode = "audio"
+	}
+	if mode != "mix" {
+		if p := strings.TrimSpace(v.LocalPath); p != "" {
+			if info, err := os.Stat(p); err == nil && !info.IsDir() {
+				return resolvedPlayTarget{
+					targetURL:     p,
+					url:           p,
+					effectiveMode: effectiveMode,
+				}
+			}
+		}
 	}
 	targetURL, allowPlaylist, seedID := model.BuildTargetURL(v.ID, mode == "mix")
 
@@ -1786,6 +1822,103 @@ func (c *IPCClient) AddVolume(ctx context.Context, delta float64) error {
 	return err
 }
 
+// SetSpeed sets mpv playback speed clamped between 0.5 and 2.0.
+func (c *IPCClient) SetSpeed(ctx context.Context, speed float64) error {
+	clamped := clampSpeed(speed)
+	if _, err := c.sendCommand(ctx, "set_property", "speed", clamped); err != nil {
+		return err
+	}
+	c.statusMu.Lock()
+	c.status.Speed = clamped
+	st := c.status
+	c.statusMu.Unlock()
+	c.broadcast(st)
+	return nil
+}
+
+// ToggleLoop toggles single-file looping between "inf" and "no" on mpv.
+func (c *IPCClient) ToggleLoop(ctx context.Context) (bool, error) {
+	cur := c.Status().LoopFile
+	next := !cur
+	val := "no"
+	if next {
+		val = "inf"
+	}
+	if _, err := c.sendCommand(ctx, "set_property", "loop-file", val); err != nil {
+		return cur, err
+	}
+	c.statusMu.Lock()
+	c.status.LoopFile = next
+	st := c.status
+	c.statusMu.Unlock()
+	c.broadcast(st)
+	return next, nil
+}
+
+// Playlist queries mpv's "playlist" property and returns the active playlist entries.
+func (c *IPCClient) Playlist(ctx context.Context) ([]PlaylistItem, error) {
+	resp, err := c.sendCommand(ctx, "get_property", "playlist")
+	if err != nil {
+		return nil, err
+	}
+	if resp.Data == nil {
+		return []PlaylistItem{}, nil
+	}
+	rawList, ok := resp.Data.([]any)
+	if !ok {
+		return nil, fmt.Errorf("unexpected playlist payload type %T", resp.Data)
+	}
+	items := make([]PlaylistItem, 0, len(rawList))
+	for i, raw := range rawList {
+		m, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		item := PlaylistItem{Index: i}
+		if fn, ok := m["filename"].(string); ok {
+			item.Filename = fn
+		}
+		if title, ok := m["title"].(string); ok {
+			item.Title = title
+		}
+		if strings.TrimSpace(item.Title) == "" {
+			item.Title = item.Filename
+		}
+		if cur, ok := m["current"].(bool); ok {
+			item.Current = cur
+		}
+		items = append(items, item)
+	}
+	return items, nil
+}
+
+// PlayPlaylistIndex switches playback to the playlist entry at index.
+func (c *IPCClient) PlayPlaylistIndex(ctx context.Context, index int) error {
+	if index < 0 {
+		return fmt.Errorf("invalid playlist index: %d", index)
+	}
+	if _, err := c.sendCommand(ctx, "set_property", "playlist-pos", index); err != nil {
+		return err
+	}
+	_, _ = c.sendCommand(ctx, "set_property", "force-media-title", "")
+	return nil
+}
+
+// RemovePlaylistIndex removes the playlist entry at index.
+func (c *IPCClient) RemovePlaylistIndex(ctx context.Context, index int) error {
+	if index < 0 {
+		return fmt.Errorf("invalid playlist index: %d", index)
+	}
+	_, err := c.sendCommand(ctx, "playlist-remove", index)
+	return err
+}
+
+// ClearPlaylist removes all playlist entries except the currently playing item.
+func (c *IPCClient) ClearPlaylist(ctx context.Context) error {
+	_, err := c.sendCommand(ctx, "playlist-clear")
+	return err
+}
+
 // Status returns the latest cached playback Status.
 func (c *IPCClient) Status() Status {
 	c.statusMu.RLock()
@@ -1892,5 +2025,41 @@ func toFloat64(v any) (float64, bool) {
 		return float64(n), true
 	default:
 		return 0, false
+	}
+}
+
+const (
+	minPlaybackSpeed = 0.5
+	maxPlaybackSpeed = 2.0
+)
+
+func clampSpeed(speed float64) float64 {
+	if math.IsNaN(speed) {
+		return 1.0
+	}
+	if speed < minPlaybackSpeed {
+		return minPlaybackSpeed
+	}
+	if speed > maxPlaybackSpeed {
+		return maxPlaybackSpeed
+	}
+	return speed
+}
+
+func parseLoopFileValue(v any) (bool, bool) {
+	switch val := v.(type) {
+	case bool:
+		return val, true
+	case string:
+		switch strings.ToLower(strings.TrimSpace(val)) {
+		case "inf", "yes", "true":
+			return true, true
+		case "no", "false", "":
+			return false, true
+		default:
+			return false, false
+		}
+	default:
+		return false, false
 	}
 }

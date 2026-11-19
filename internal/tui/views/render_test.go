@@ -10,6 +10,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/e12jassir/iutui/internal/app"
+	"github.com/e12jassir/iutui/internal/download"
 	"github.com/e12jassir/iutui/internal/lyrics"
 	"github.com/e12jassir/iutui/internal/model"
 	"github.com/e12jassir/iutui/internal/player"
@@ -570,4 +571,107 @@ func TestRenderBrandVersionAndNoItemCounter(t *testing.T) {
 	if strings.Contains(outSearch, "(1/4)") {
 		t.Fatalf("expected Search panel title without item counter, got:\n%s", outSearch)
 	}
+}
+
+func TestRenderPhase2Features(t *testing.T) {
+	th := theme.DefaultTheme()
+	tr := thumbs.NewTextRenderer()
+
+	t.Run("search_suggestions_strip_only_when_focused", func(t *testing.T) {
+		s := newTestState(app.ViewHome, 140, 42)
+		defer s.Close()
+		s.SearchSuggestions = []string{"pink floyd live", "pink floyd pulse"}
+		s.SearchDraft = "pink"
+		s.SuggestIdx = 0
+
+		s.Focus = app.FocusMain
+		outUnfocused := Render(s, th, tr)
+		assertBounds(t, outUnfocused, 140, 42)
+		if strings.Contains(outUnfocused, "pink floyd live") {
+			t.Fatalf("did not expect suggestions strip when FocusMain, got:\n%s", outUnfocused)
+		}
+
+		s.Focus = app.FocusSearch
+		outFocused := Render(s, th, tr)
+		assertBounds(t, outFocused, 140, 42)
+		if !strings.Contains(outFocused, "Sugerencias") || !strings.Contains(outFocused, "pink floyd live") {
+			t.Fatalf("expected suggestions strip when FocusSearch, got:\n%s", outFocused)
+		}
+
+		s.SearchDraft = ""
+		outHist := Render(s, th, tr)
+		assertBounds(t, outHist, 140, 42)
+		if !strings.Contains(outHist, "Búsquedas recientes") {
+			t.Fatalf("expected 'Búsquedas recientes' when SearchDraft empty, got:\n%s", outHist)
+		}
+	})
+
+	t.Run("queue_overlay_empty_and_populated", func(t *testing.T) {
+		s := newTestState(app.ViewHome, 120, 36)
+		defer s.Close()
+		s.ShowQueue = true
+
+		outEmpty := Render(s, th, tr)
+		assertBounds(t, outEmpty, 120, 36)
+		if !strings.Contains(outEmpty, "Cola de reproducción (0)") || !strings.Contains(outEmpty, "Cola vacía") {
+			t.Fatalf("expected empty queue overlay message, got:\n%s", outEmpty)
+		}
+
+		s.MPVPlaylist = []player.PlaylistItem{
+			{Index: 0, Title: "First Track", Current: true},
+			{Index: 1, Title: "Second Track"},
+		}
+		s.QueueIdx = 1
+		outPop := Render(s, th, tr)
+		assertBounds(t, outPop, 120, 36)
+		if !strings.Contains(outPop, "Cola de reproducción (2)") || !strings.Contains(outPop, "First Track") || !strings.Contains(outPop, "Second Track") {
+			t.Fatalf("expected populated queue overlay items, got:\n%s", outPop)
+		}
+	})
+
+	t.Run("player_speed_and_loop_badges", func(t *testing.T) {
+		s := newTestState(app.ViewHome, 120, 36)
+		defer s.Close()
+		s.PlayerStatus = player.Status{
+			IsRunning: true,
+			Title:     "Soda Stereo - De Música Ligera",
+			Volume:    75,
+			Speed:     1.25,
+			LoopFile:  true,
+		}
+		out := Render(s, th, tr)
+		assertBounds(t, out, 120, 36)
+		if !strings.Contains(out, "1.25x") || !strings.Contains(out, "↻") {
+			t.Fatalf("expected speed '1.25x' and loop '↻' in player bar title, got:\n%s", out)
+		}
+	})
+
+	t.Run("download_progress_badge_on_card", func(t *testing.T) {
+		s := newTestState(app.ViewHome, 140, 42)
+		defer s.Close()
+		s.DownloadProgress["vid003"] = download.Item{
+			Video:    model.Video{ID: "vid003"},
+			Status:   download.StatusDownloading,
+			Progress: 62,
+			Speed:    "3.1MiB/s",
+		}
+		out := Render(s, th, tr)
+		assertBounds(t, out, 140, 42)
+		if !strings.Contains(out, "62%") || !strings.Contains(out, "3.1MiB/s") {
+			t.Fatalf("expected live download progress badge '62%% · 3.1MiB/s' on card, got:\n%s", out)
+		}
+	})
+
+	t.Run("help_overlay_phase2_shortcuts", func(t *testing.T) {
+		s := newTestState(app.ViewHome, 120, 36)
+		defer s.Close()
+		s.ShowHelp = true
+		out := Render(s, th, tr)
+		assertBounds(t, out, 120, 36)
+		for _, want := range []string{"Ver Cola", "Velocidad", "Repetir pista", "Me gusta"} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("expected %q in help overlay, got:\n%s", want, out)
+			}
+		}
+	})
 }
