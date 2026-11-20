@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -668,6 +669,53 @@ fi
 			t.Fatalf("Feed(TabHome) fallback error = %v, want ErrRateLimit", err)
 		}
 	})
+
+	t.Run("Feed TabHome falls back to home search when both homepage and music discovery return empty output", func(t *testing.T) {
+		tmp := t.TempDir()
+		targetsFile := filepath.Join(tmp, "targets.txt")
+		script := fmt.Sprintf(`
+target=""
+for a in "$@"; do
+	target="$a"
+done
+printf '%%s\n' "$target" >> %s
+case "$target" in
+	"https://www.youtube.com"|%s)
+		;;
+	%s)
+		printf '{"id":"trend1111","title":"Trending Fallback Video","channel":"Trending Channel","duration":210,"view_count":500000}\n'
+		;;
+esac
+`, shellQuote(targetsFile), shellQuote(musicChannelURL), shellQuote(youtubeHomeSearchFallback))
+
+		bin := writeFakeYTDLP(t, tmp, script)
+		cacheDir := filepath.Join(tmp, "cache")
+		cat := NewYTDLPCatalog(cacheDir, 5*time.Minute, bin)
+		defer cat.Wait()
+
+		videos, err := cat.Feed(context.Background(), model.TabHome)
+		if err != nil {
+			t.Fatalf("Feed(TabHome) error = %v", err)
+		}
+		if len(videos) != 1 || videos[0].ID != "trend1111" {
+			t.Fatalf("Feed(TabHome) = %+v, want trend1111", videos)
+		}
+
+		rawTargets, err := os.ReadFile(targetsFile)
+		if err != nil {
+			t.Fatalf("read targets: %v", err)
+		}
+		gotTargets := strings.Split(strings.TrimSpace(string(rawTargets)), "\n")
+		wantTargets := []string{"https://www.youtube.com", musicChannelURL, youtubeHomeSearchFallback}
+		if !slices.Equal(gotTargets, wantTargets) {
+			t.Fatalf("targets invoked = %v, want %v", gotTargets, wantTargets)
+		}
+
+		cached, _, err := readCacheFile(filepath.Join(cacheDir, "feed_home.json"))
+		if err != nil || len(cached) != 1 || cached[0].ID != "trend1111" {
+			t.Fatalf("feed_home.json = %+v (err=%v), want cached trend1111", cached, err)
+		}
+	})
 }
 
 func TestYTDLPCatalog_HonorsCustomFeedAndSearchSizes(t *testing.T) {
@@ -698,4 +746,117 @@ printf '{"id":"vid12345678","title":"Item","channel":"Chan","duration":60}\n'
 	if !slices.Contains(args, "ytsearch40:jazz") {
 		t.Fatalf("expected ytsearch40:jazz for custom SearchSize, got %v", args)
 	}
+}
+
+func TestYTDLPCatalog_OnCookiesStale(t *testing.T) {
+	writeNonEmptyCookieJar := func(t *testing.T, dir string) string {
+		t.Helper()
+		jar := filepath.Join(dir, "cookies.txt")
+		if err := os.WriteFile(jar, []byte("# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t0\tSID\tabc\n"), 0o600); err != nil {
+			t.Fatalf("write cookie jar: %v", err)
+		}
+		return jar
+	}
+
+	t.Run("TabHome empty with non-empty cookie jar calls OnCookiesStale once", func(t *testing.T) {
+		tmp := t.TempDir()
+		jar := writeNonEmptyCookieJar(t, tmp)
+		bin := writeFakeYTDLP(t, tmp, `exit 0`)
+
+		var calls atomic.Int32
+		cat := NewYTDLPCatalog(filepath.Join(tmp, "cache"), 5*time.Minute, bin)
+		cat.CookieJarPath = jar
+		cat.OnCookiesStale = func() {
+			calls.Add(1)
+		}
+		defer cat.Wait()
+
+		if _, err := cat.Feed(context.Background(), model.TabHome); err != nil {
+			t.Fatalf("Feed(TabHome) error = %v", err)
+		}
+		if got := calls.Load(); got != 1 {
+			t.Fatalf("OnCookiesStale calls = %d, want 1", got)
+		}
+	})
+
+	t.Run("TabSubscriptions empty with non-empty cookie jar calls OnCookiesStale once", func(t *testing.T) {
+		tmp := t.TempDir()
+		jar := writeNonEmptyCookieJar(t, tmp)
+		bin := writeFakeYTDLP(t, tmp, `exit 0`)
+
+		var calls atomic.Int32
+		cat := NewYTDLPCatalog(filepath.Join(tmp, "cache"), 5*time.Minute, bin)
+		cat.CookieJarPath = jar
+		cat.OnCookiesStale = func() {
+			calls.Add(1)
+		}
+		defer cat.Wait()
+
+		if _, err := cat.Feed(context.Background(), model.TabSubscriptions); err != nil {
+			t.Fatalf("Feed(TabSubscriptions) error = %v", err)
+		}
+		if got := calls.Load(); got != 1 {
+			t.Fatalf("OnCookiesStale calls = %d, want 1", got)
+		}
+	})
+
+	t.Run("TabHome empty with empty or missing cookie jar does not call OnCookiesStale", func(t *testing.T) {
+		for _, tc := range []struct {
+			name string
+			jar  string
+		}{
+			{name: "empty path", jar: ""},
+			{name: "missing file", jar: "missing-cookies.txt"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				tmp := t.TempDir()
+				bin := writeFakeYTDLP(t, tmp, `exit 0`)
+
+				jarPath := tc.jar
+				if jarPath != "" {
+					jarPath = filepath.Join(tmp, jarPath)
+				}
+
+				var calls atomic.Int32
+				cat := NewYTDLPCatalog(filepath.Join(tmp, "cache"), 5*time.Minute, bin)
+				cat.CookieJarPath = jarPath
+				cat.OnCookiesStale = func() {
+					calls.Add(1)
+				}
+				defer cat.Wait()
+
+				if _, err := cat.Feed(context.Background(), model.TabHome); err != nil {
+					t.Fatalf("Feed(TabHome) error = %v", err)
+				}
+				if got := calls.Load(); got != 0 {
+					t.Fatalf("OnCookiesStale calls = %d, want 0", got)
+				}
+			})
+		}
+	})
+
+	t.Run("TabHome non-empty does not call OnCookiesStale", func(t *testing.T) {
+		tmp := t.TempDir()
+		jar := writeNonEmptyCookieJar(t, tmp)
+		bin := writeFakeYTDLP(t, tmp, `printf '{"id":"vid12345678","title":"Home Video","channel":"Chan","duration":60}\n'`)
+
+		var calls atomic.Int32
+		cat := NewYTDLPCatalog(filepath.Join(tmp, "cache"), 5*time.Minute, bin)
+		cat.CookieJarPath = jar
+		cat.OnCookiesStale = func() {
+			calls.Add(1)
+		}
+		defer cat.Wait()
+
+		videos, err := cat.Feed(context.Background(), model.TabHome)
+		if err != nil {
+			t.Fatalf("Feed(TabHome) error = %v", err)
+		}
+		if len(videos) != 1 {
+			t.Fatalf("Feed(TabHome) len = %d, want 1", len(videos))
+		}
+		if got := calls.Load(); got != 0 {
+			t.Fatalf("OnCookiesStale calls = %d, want 0", got)
+		}
+	})
 }

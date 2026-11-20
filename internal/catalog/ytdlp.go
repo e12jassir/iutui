@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -112,21 +113,24 @@ type searchCacheEntry struct {
 // YTDLPCatalog implements Catalog by invoking yt-dlp with exec.CommandContext
 // and maintaining a stale-while-revalidate file cache in CacheDir.
 type YTDLPCatalog struct {
-	BinPath       string
-	CacheDir      string
-	CacheTTL      time.Duration
-	Quality       int
-	FeedSize      int
-	SearchSize    int
-	CookieJarPath string
-	Meta          *MetadataEnricher
+	BinPath        string
+	CacheDir       string
+	CacheTTL       time.Duration
+	Quality        int
+	FeedSize       int
+	SearchSize     int
+	CookieJarPath  string
+	OnCookiesStale func()
+	Meta           *MetadataEnricher
 
-	searchMu       sync.RWMutex
-	searchCache    map[string]searchCacheEntry
-	feedMu         sync.Mutex
-	feedGeneration map[model.Tab]uint64
-	cfgMu          sync.RWMutex
-	cacheDisabled  bool
+	searchMu        sync.RWMutex
+	searchCache     map[string]searchCacheEntry
+	feedMu          sync.Mutex
+	feedGeneration  map[model.Tab]uint64
+	cfgMu           sync.RWMutex
+	cacheDisabled   bool
+	musicEndpoint   string
+	musicHTTPClient *http.Client
 
 	wg sync.WaitGroup
 }
@@ -232,6 +236,25 @@ func (c *YTDLPCatalog) cookieJarPath() string {
 	p := c.CookieJarPath
 	c.cfgMu.RUnlock()
 	return p
+}
+
+func (c *YTDLPCatalog) notifyCookiesStale() {
+	if c == nil {
+		return
+	}
+	c.cfgMu.RLock()
+	cb := c.OnCookiesStale
+	c.cfgMu.RUnlock()
+	if cb == nil {
+		return
+	}
+	jar := c.cookieJarPath()
+	if jar == "" {
+		return
+	}
+	if info, statErr := os.Stat(jar); statErr == nil && !info.IsDir() && info.Size() > 0 {
+		cb()
+	}
 }
 
 // SetQuality updates the preferred max video height for yt-dlp format selection.
@@ -528,16 +551,37 @@ func (c *YTDLPCatalog) cacheFilePath(name string) string {
 const (
 	youtubeMusicDiscoveryURL   = "https://www.youtube.com/channel/UC-9-kyTW8ZkZNDHQJ6FgpwQ"
 	youtubeMusicSearchFallback = "ytsearch30:music official video"
+	youtubeHomeSearchFallback  = "ytsearch30:youtube trending"
 )
 
 // fetchTabVideos fetches target for tab and falls back to public discovery
 // when logged-out TabHome or TabMusic returns zero videos without error.
 func (c *YTDLPCatalog) fetchTabVideos(ctx context.Context, tab model.Tab, target string) ([]model.Video, error) {
+	if tab == model.TabMusic && c.cookieJarPath() != "" {
+		videos, loggedOut, musicErr := c.fetchYTMusicHome(ctx)
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if musicErr == nil && len(videos) > 0 {
+			return videos, nil
+		}
+		if loggedOut {
+			c.notifyCookiesStale()
+		}
+	}
+
 	videos, err := c.fetchTarget(ctx, target)
 	if err == nil && len(videos) == 0 && ctx.Err() == nil {
+		if tab == model.TabHome || tab == model.TabSubscriptions {
+			c.notifyCookiesStale()
+		}
 		switch tab {
 		case model.TabHome:
-			return c.fetchTarget(ctx, youtubeMusicDiscoveryURL)
+			videos, err = c.fetchTarget(ctx, youtubeMusicDiscoveryURL)
+			if err == nil && len(videos) == 0 && ctx.Err() == nil {
+				return c.fetchTarget(ctx, youtubeHomeSearchFallback)
+			}
+			return videos, err
 		case model.TabMusic:
 			return c.fetchTarget(ctx, youtubeMusicSearchFallback)
 		}

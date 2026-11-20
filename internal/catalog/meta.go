@@ -24,17 +24,21 @@ const (
 	metaCacheFileName         = "video_meta.json"
 )
 
-// VideoMeta holds enriched view count, publish date, and channel ID metadata for a single video.
+// VideoMeta holds enriched view count, publish date, channel ID, duration, and live status metadata for a single video.
 type VideoMeta struct {
 	Views     string `json:"views,omitempty"`
 	Published string `json:"published,omitempty"`
 	ChannelID string `json:"channel_id,omitempty"`
+	Duration  string `json:"duration,omitempty"`
+	IsLive    bool   `json:"is_live,omitempty"`
 }
 
 type cachedVideoMeta struct {
 	Views     string    `json:"views,omitempty"`
 	Published string    `json:"published,omitempty"`
 	ChannelID string    `json:"channel_id,omitempty"`
+	Duration  string    `json:"duration,omitempty"`
+	IsLive    bool      `json:"is_live,omitempty"`
 	FetchedAt time.Time `json:"fetched_at"`
 }
 
@@ -106,7 +110,7 @@ func (m *MetadataEnricher) ensureLoadedLocked() {
 	now := m.now()
 	ttl := m.ttl()
 	for id, entry := range disk {
-		if entry.Views == "" && entry.Published == "" && entry.ChannelID == "" {
+		if entry.Views == "" && entry.Published == "" && entry.ChannelID == "" && entry.Duration == "" && !entry.IsLive {
 			continue
 		}
 		if now.Sub(entry.FetchedAt) <= ttl {
@@ -134,13 +138,19 @@ func (m *MetadataEnricher) Cached(id string) (VideoMeta, bool) {
 	if !ok || now.Sub(entry.FetchedAt) > ttl {
 		return VideoMeta{}, false
 	}
-	if entry.Views == "" && entry.Published == "" && entry.ChannelID == "" {
+	if entry.Views == "" && entry.Published == "" && entry.ChannelID == "" && entry.Duration == "" && !entry.IsLive {
 		return VideoMeta{}, false
 	}
-	return VideoMeta{Views: entry.Views, Published: entry.Published, ChannelID: entry.ChannelID}, true
+	return VideoMeta{
+		Views:     entry.Views,
+		Published: entry.Published,
+		ChannelID: entry.ChannelID,
+		Duration:  entry.Duration,
+		IsLive:    entry.IsLive,
+	}, true
 }
 
-// ApplyCached fills missing Views, Published, and ChannelID fields in videos from the local cache.
+// ApplyCached fills missing Views, Published, ChannelID, Duration, and IsLive fields in videos from the local cache.
 func (m *MetadataEnricher) ApplyCached(videos []model.Video) {
 	if m == nil || len(videos) == 0 {
 		return
@@ -154,7 +164,7 @@ func (m *MetadataEnricher) ApplyCached(videos []model.Video) {
 
 	for i := range videos {
 		v := &videos[i]
-		if v.Views != "" && v.Published != "" && v.ChannelID != "" {
+		if v.Views != "" && v.Published != "" && v.ChannelID != "" && (v.Duration != "" || v.IsLive) {
 			continue
 		}
 		if !isSingleYouTubeID(v.ID) {
@@ -172,6 +182,12 @@ func (m *MetadataEnricher) ApplyCached(videos []model.Video) {
 		}
 		if v.ChannelID == "" && entry.ChannelID != "" {
 			v.ChannelID = entry.ChannelID
+		}
+		if v.Duration == "" && entry.Duration != "" {
+			v.Duration = entry.Duration
+		}
+		if !v.IsLive && entry.IsLive {
+			v.IsLive = true
 		}
 	}
 }
@@ -217,8 +233,14 @@ func (m *MetadataEnricher) Enrich(ctx context.Context, ids []string) (map[string
 		}
 		seen[id] = struct{}{}
 
-		if entry, ok := m.cache[id]; ok && now.Sub(entry.FetchedAt) <= ttl && (entry.Views != "" || entry.Published != "" || entry.ChannelID != "") {
-			result[id] = VideoMeta{Views: entry.Views, Published: entry.Published, ChannelID: entry.ChannelID}
+		if entry, ok := m.cache[id]; ok && now.Sub(entry.FetchedAt) <= ttl && (entry.Views != "" || entry.Published != "" || entry.ChannelID != "" || entry.Duration != "" || entry.IsLive) {
+			result[id] = VideoMeta{
+				Views:     entry.Views,
+				Published: entry.Published,
+				ChannelID: entry.ChannelID,
+				Duration:  entry.Duration,
+				IsLive:    entry.IsLive,
+			}
 			continue
 		}
 		if len(toFetch) < maxBatch {
@@ -273,6 +295,8 @@ func (m *MetadataEnricher) Enrich(ctx context.Context, ids []string) (map[string
 				Views:     meta.Views,
 				Published: meta.Published,
 				ChannelID: meta.ChannelID,
+				Duration:  meta.Duration,
+				IsLive:    meta.IsLive,
 				FetchedAt: fetchedAt,
 			}
 			result[id] = meta
@@ -352,13 +376,18 @@ func (m *MetadataEnricher) fetchSingle(ctx context.Context, videoID string) (Vid
 
 	var payload struct {
 		VideoDetails struct {
-			ViewCount string `json:"viewCount"`
-			ChannelID string `json:"channelId"`
+			ViewCount     string `json:"viewCount"`
+			ChannelID     string `json:"channelId"`
+			LengthSeconds string `json:"lengthSeconds"`
+			IsLive        bool   `json:"isLive"`
 		} `json:"videoDetails"`
 		Microformat struct {
 			PlayerMicroformatRenderer struct {
-				PublishDate string `json:"publishDate"`
-				UploadDate  string `json:"uploadDate"`
+				PublishDate          string `json:"publishDate"`
+				UploadDate           string `json:"uploadDate"`
+				LiveBroadcastDetails struct {
+					IsLiveNow bool `json:"isLiveNow"`
+				} `json:"liveBroadcastDetails"`
 			} `json:"playerMicroformatRenderer"`
 		} `json:"microformat"`
 	}
@@ -372,14 +401,20 @@ func (m *MetadataEnricher) fetchSingle(ctx context.Context, videoID string) (Vid
 			meta.Views = formatHumanViews(rawViews)
 		}
 	}
+	if rawLen := strings.TrimSpace(payload.VideoDetails.LengthSeconds); rawLen != "" {
+		if secs, perr := strconv.Atoi(rawLen); perr == nil && secs > 0 {
+			meta.Duration = formatDurationSeconds(secs)
+		}
+	}
 	pub := strings.TrimSpace(payload.Microformat.PlayerMicroformatRenderer.PublishDate)
 	if pub == "" {
 		pub = strings.TrimSpace(payload.Microformat.PlayerMicroformatRenderer.UploadDate)
 	}
 	meta.Published = pub
 	meta.ChannelID = strings.TrimSpace(payload.VideoDetails.ChannelID)
+	meta.IsLive = payload.VideoDetails.IsLive || payload.Microformat.PlayerMicroformatRenderer.LiveBroadcastDetails.IsLiveNow
 
-	if meta.Views == "" && meta.Published == "" && meta.ChannelID == "" {
+	if meta.Views == "" && meta.Published == "" && meta.ChannelID == "" && meta.Duration == "" && !meta.IsLive {
 		return VideoMeta{}, false
 	}
 	return meta, true
@@ -402,7 +437,7 @@ func (m *MetadataEnricher) persistToDisk() {
 			delete(m.cache, id)
 			continue
 		}
-		if entry.Views == "" && entry.Published == "" && entry.ChannelID == "" {
+		if entry.Views == "" && entry.Published == "" && entry.ChannelID == "" && entry.Duration == "" && !entry.IsLive {
 			continue
 		}
 		snapshot[id] = entry
