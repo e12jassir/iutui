@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -33,7 +34,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var version = "0.5.1"
+var version = "0.5.2"
 
 type nativeThumbs struct {
 	mu      sync.RWMutex
@@ -41,21 +42,25 @@ type nativeThumbs struct {
 }
 
 func newNativeThumbs() *nativeThumbs {
-	b := thumbs.DetectBackend(
+	b := thumbs.DetectBackendEnv(
 		os.Getenv("YT_PREVIEW"),
 		os.Getenv("KITTY_WINDOW_ID"),
 		os.Getenv("TERM"),
 		os.Getenv("TERM_PROGRAM"),
+		os.Getenv("COLORTERM"),
+		os.Getenv("NO_COLOR"),
 	)
 	return &nativeThumbs{backend: b}
 }
 
 func (n *nativeThumbs) SetPreviewMode(mode string) {
-	next := thumbs.DetectBackend(
+	next := thumbs.DetectBackendEnv(
 		mode,
 		os.Getenv("KITTY_WINDOW_ID"),
 		os.Getenv("TERM"),
 		os.Getenv("TERM_PROGRAM"),
+		os.Getenv("COLORTERM"),
+		os.Getenv("NO_COLOR"),
 	)
 	n.mu.Lock()
 	n.backend = next
@@ -219,7 +224,8 @@ func shouldRefreshCookies(cfg config.Config, cacheDir, currentJar string) bool {
 	if info, err := os.Stat(filepath.Join(cacheDir, "cookies.none")); err == nil && time.Since(info.ModTime()) < 15*time.Minute {
 		return false
 	}
-	if currentJar == "" {
+	ownJar := filepath.Join(cacheDir, "cookies.txt")
+	if currentJar == "" || filepath.Clean(currentJar) != filepath.Clean(ownJar) {
 		return true
 	}
 	ttl := time.Duration(cfg.CookieTTL) * time.Second
@@ -230,11 +236,22 @@ func shouldRefreshCookies(cfg config.Config, cacheDir, currentJar string) bool {
 	if err != nil || info.IsDir() || info.Size() <= 0 {
 		return true
 	}
-	return time.Since(info.ModTime()) >= ttl
+	refTime := info.ModTime()
+	if stampInfo, stampErr := os.Stat(filepath.Join(cacheDir, cookies.StampFileName)); stampErr == nil && !stampInfo.IsDir() {
+		refTime = stampInfo.ModTime()
+	}
+	return time.Since(refTime) >= ttl
 }
 
-func startCookieBootstrap(ctx context.Context, cfg config.Config, paths platform.Paths, currentJar string) {
-	if !shouldRefreshCookies(cfg, paths.CacheDir, currentJar) {
+func startCookieBootstrap(ctx context.Context, cfg config.Config, paths platform.Paths, currentJar string, force bool, onReady func(jarPath string)) {
+	if paths.CacheDir == "" || isCookiesDisabled(cfg.Cookies) || strings.TrimSpace(cfg.CookiesFile) != "" {
+		return
+	}
+	if force {
+		if err := os.Remove(filepath.Join(paths.CacheDir, "cookies.none")); err != nil && !os.IsNotExist(err) {
+			slog.Debug("remove stale cookies.none marker", "err", err)
+		}
+	} else if !shouldRefreshCookies(cfg, paths.CacheDir, currentJar) {
 		return
 	}
 	homeDir, err := os.UserHomeDir()
@@ -248,7 +265,19 @@ func startCookieBootstrap(ctx context.Context, cfg config.Config, paths platform
 	go func() {
 		bootCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 		defer cancel()
-		_, _ = cookies.RefreshJarFromBrowsers(bootCtx, paths.CacheDir, cfg.YtdlpBin, specs)
+		jar, err := cookies.RefreshJarFromBrowsers(bootCtx, paths.CacheDir, cfg.YtdlpBin, specs)
+		if err != nil {
+			slog.Warn("cookie bootstrap failed", "err", err)
+			return
+		}
+		if jar == "" {
+			slog.Debug("cookie bootstrap found no logged-in browser cookies", "specs", specs)
+			return
+		}
+		slog.Info("cookie bootstrap ready", "jar", jar)
+		if onReady != nil {
+			onReady(jar)
+		}
 	}()
 }
 
@@ -261,14 +290,87 @@ func resolvePlayTarget(target string, mixFlag bool) (url string, allowPlaylist b
 	return targetURL, allowPlaylist
 }
 
+func missingRequiredBins(lookPath func(string) (string, error), bins ...string) []string {
+	if lookPath == nil {
+		lookPath = exec.LookPath
+	}
+	var missing []string
+	for _, bin := range bins {
+		if _, err := lookPath(bin); err != nil {
+			missing = append(missing, bin)
+		}
+	}
+	return missing
+}
+
+func installDepsHint(goos, osRelease string, deps []string) string {
+	if len(deps) == 0 {
+		return ""
+	}
+	pkgList := strings.Join(deps, " ")
+	switch goos {
+	case "darwin":
+		return "brew install " + pkgList
+	case "linux":
+		var idTokens, idLikeTokens []string
+		for _, line := range strings.Split(osRelease, "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			key, val, ok := strings.Cut(line, "=")
+			if !ok {
+				continue
+			}
+			key = strings.TrimSpace(key)
+			val = strings.Trim(strings.TrimSpace(val), `"'`)
+			fields := strings.Fields(strings.ToLower(val))
+			if strings.EqualFold(key, "ID") {
+				idTokens = append(idTokens, fields...)
+			} else if strings.EqualFold(key, "ID_LIKE") {
+				idLikeTokens = append(idLikeTokens, fields...)
+			}
+		}
+		for _, tok := range append(idTokens, idLikeTokens...) {
+			switch {
+			case tok == "arch" || tok == "manjaro" || tok == "endeavouros" || tok == "cachyos" || tok == "artix":
+				return "sudo pacman -S --needed " + pkgList
+			case tok == "ubuntu" || tok == "debian" || tok == "pop" || tok == "linuxmint" || tok == "zorin" || tok == "elementary":
+				return "sudo apt install " + pkgList
+			case tok == "fedora" || tok == "rhel" || tok == "centos" || tok == "rocky" || tok == "almalinux":
+				return "sudo dnf install " + pkgList
+			case tok == "opensuse" || strings.HasPrefix(tok, "opensuse-") || tok == "suse" || tok == "sles":
+				return "sudo zypper install " + pkgList
+			case tok == "alpine":
+				return "sudo apk add " + pkgList
+			}
+		}
+		return "install " + pkgList + " using your package manager"
+	default:
+		return "install " + pkgList + " (see https://mpv.io and https://github.com/yt-dlp/yt-dlp)"
+	}
+}
+
+func checkRequiredDeps(bins ...string) error {
+	missing := missingRequiredBins(exec.LookPath, bins...)
+	if len(missing) == 0 {
+		return nil
+	}
+	raw, _ := os.ReadFile("/etc/os-release")
+	hint := installDepsHint(runtime.GOOS, string(raw), missing)
+	return fmt.Errorf("missing required dependencies (%s)\nInstall with: %s\nOr run: curl -fsSL https://raw.githubusercontent.com/e12jassir/iutui/main/install.sh | bash", strings.Join(missing, ", "), hint)
+}
+
 func runTUI(paths platform.Paths) error {
+	if err := checkRequiredDeps("mpv", "yt-dlp"); err != nil {
+		return err
+	}
 	cfgPath := filepath.Join(paths.ConfigDir, "config")
 	cfg, _ := config.Load(cfgPath)
 	tui.SetThumbQuality(cfg.ThumbQuality)
 	cookieJar := resolveCookieJar(cfg, paths)
 	bootCtx, bootCancel := context.WithCancel(context.Background())
 	defer bootCancel()
-	startCookieBootstrap(bootCtx, cfg, paths, cookieJar)
 
 	dlDir := cfg.DownloadDir
 	if dlDir == "" {
@@ -319,12 +421,51 @@ func runTUI(paths platform.Paths) error {
 	autoplay := cfg.Autoplay
 	cacheTTL := cfg.CacheTTL
 	dlAudio := cfg.DownloadAudio
+	var p *tea.Program
+	var programDone atomic.Bool
+	var cookiesDisabled atomic.Bool
+	cookiesDisabled.Store(isCookiesDisabled(cfg.Cookies))
+	notifyCookiesReady := func(jar string, reloadFeed bool) {
+		if jar == "" {
+			return
+		}
+		ytdlpCat.SetCookieJar(jar)
+		eng.SetCookieJar(jar)
+		if reloadFeed && paths.CacheDir != "" {
+			for _, name := range []string{"feed_home.json", "feed_music.json", "feed_subs.json"} {
+				_ = os.Remove(filepath.Join(paths.CacheDir, name))
+			}
+		}
+		if p != nil && !programDone.Load() {
+			p.Send(app.CookiesReadyMsg{JarPath: jar, ReloadFeed: reloadFeed})
+		}
+	}
+	var lastStaleRefresh atomic.Int64
+	ytdlpCat.OnCookiesStale = func() {
+		if cookiesDisabled.Load() || strings.TrimSpace(cfg.CookiesFile) != "" {
+			return
+		}
+		now := time.Now().Unix()
+		prev := lastStaleRefresh.Load()
+		if prev != 0 && now-prev < 120 {
+			return
+		}
+		if !lastStaleRefresh.CompareAndSwap(prev, now) {
+			return
+		}
+		slog.Info("authenticated feed returned empty; refreshing browser cookies")
+		startCookieBootstrap(bootCtx, cfg, paths, "", true, func(jar string) {
+			notifyCookiesReady(jar, true)
+		})
+	}
+	lyricsClient := lyrics.NewClient()
+	lyricsClient.EnableYouTubeCaptions(paths.CacheDir)
 	state := app.NewState(app.Dependencies{
 		Catalog:              cat,
 		Engine:               eng,
 		Store:                st,
 		Downloader:           dl,
-		LyricsClient:         lyrics.NewClient(),
+		LyricsClient:         lyricsClient,
 		SuggestProvider:      suggestClient,
 		SearchHistory:        searchHist,
 		ResumeStore:          resumeStore,
@@ -398,10 +539,12 @@ func runTUI(paths platform.Paths) error {
 				cfgNext := cfg
 				cfgNext.Cookies = val
 				if isCookiesDisabled(val) {
+					cookiesDisabled.Store(true)
 					ytdlpCat.SetCookieJar("")
 					cat.SetDisableCookieAuthSubs(true)
 					eng.SetCookieJar("")
 				} else {
+					cookiesDisabled.Store(false)
 					nextJar := resolveCookieJar(cfgNext, paths)
 					catJar := nextJar
 					if catJar == "" && paths.CacheDir != "" {
@@ -410,7 +553,18 @@ func runTUI(paths platform.Paths) error {
 					ytdlpCat.SetCookieJar(catJar)
 					cat.SetDisableCookieAuthSubs(false)
 					eng.SetCookieJar(nextJar)
-					startCookieBootstrap(bootCtx, cfgNext, paths, nextJar)
+					if nextJar != "" {
+						go func() {
+							notifyCookiesReady(nextJar, true)
+						}()
+						startCookieBootstrap(bootCtx, cfgNext, paths, nextJar, false, func(jar string) {
+							notifyCookiesReady(jar, true)
+						})
+					} else {
+						startCookieBootstrap(bootCtx, cfgNext, paths, "", true, func(jar string) {
+							notifyCookiesReady(jar, true)
+						})
+					}
 				}
 			}
 			return nil
@@ -422,7 +576,7 @@ func runTUI(paths platform.Paths) error {
 		initTheme = theme.ThemeFromPalette(theme.ByName(cfg.Theme))
 	}
 
-	p := tea.NewProgram(
+	p = tea.NewProgram(
 		teaModel{
 			state:  state,
 			theme:  initTheme,
@@ -432,7 +586,9 @@ func runTUI(paths platform.Paths) error {
 		tea.WithMouseAllMotion(),
 		tea.WithFilter(app.NewBubbleTeaEscapeFilter()),
 	)
-	var programDone atomic.Bool
+	startCookieBootstrap(bootCtx, cfg, paths, cookieJar, false, func(jar string) {
+		notifyCookiesReady(jar, true)
+	})
 	dl.OnProgress = func(it download.Item) {
 		if !programDone.Load() {
 			p.Send(app.DownloadProgressMsg{Item: it})
@@ -525,6 +681,9 @@ func runTUI(paths platform.Paths) error {
 }
 
 func runQuickSelector(paths platform.Paths) error {
+	if err := checkRequiredDeps("mpv", "yt-dlp"); err != nil {
+		return err
+	}
 	cfgPath := filepath.Join(paths.ConfigDir, "config")
 	cfg, _ := config.Load(cfgPath)
 	cookieJar := resolveCookieJar(cfg, paths)
@@ -568,6 +727,9 @@ func newPlayCmd() *cobra.Command {
 		Short: "Launch playback in mpv",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := checkRequiredDeps("mpv"); err != nil {
+				return err
+			}
 			paths := platform.ResolvePaths()
 			cfgPath := filepath.Join(paths.ConfigDir, "config")
 			cfg, _ := config.Load(cfgPath)
@@ -755,18 +917,55 @@ func newDoctorCmd() *cobra.Command {
 		Run: func(cmd *cobra.Command, args []string) {
 			paths := platform.ResolvePaths()
 			out := cmd.OutOrStdout()
-			for _, bin := range []string{"mpv", "yt-dlp", "chafa"} {
+			missingReq := []string{}
+			for _, bin := range []string{"mpv", "yt-dlp"} {
 				p, err := exec.LookPath(bin)
 				if err != nil {
 					fmt.Fprintf(out, "missing  %s\n", bin)
+					missingReq = append(missingReq, bin)
 				} else {
 					fmt.Fprintf(out, "ok       %s (%s)\n", bin, p)
 				}
+			}
+			if len(missingReq) > 0 {
+				osRel, _ := os.ReadFile("/etc/os-release")
+				fmt.Fprintf(out, "hint     %s\n", installDepsHint(runtime.GOOS, string(osRel), missingReq))
+			}
+			cfgPath := filepath.Join(paths.ConfigDir, "config")
+			cfg, _ := config.Load(cfgPath)
+			previewMode := os.Getenv("YT_PREVIEW")
+			if previewMode == "" {
+				previewMode = cfg.Preview
+			}
+			switch thumbs.DetectBackendEnv(
+				previewMode,
+				os.Getenv("KITTY_WINDOW_ID"),
+				os.Getenv("TERM"),
+				os.Getenv("TERM_PROGRAM"),
+				os.Getenv("COLORTERM"),
+				os.Getenv("NO_COLOR"),
+			) {
+			case thumbs.BackendKitty:
+				fmt.Fprintf(out, "thumbs   ok (native kitty HD)\n")
+			case thumbs.BackendChafa:
+				fmt.Fprintf(out, "thumbs   ok (native ansi blocks)\n")
+			default:
+				fmt.Fprintf(out, "thumbs   text (plain terminal)\n")
 			}
 			fmt.Fprintf(out, "config   %s\n", paths.ConfigDir)
 			fmt.Fprintf(out, "cache    %s\n", paths.CacheDir)
 			fmt.Fprintf(out, "state    %s\n", paths.StateDir)
 			fmt.Fprintf(out, "socket   %s\n", paths.SocketPath)
+
+			if isCookiesDisabled(cfg.Cookies) {
+				fmt.Fprintf(out, "cookies  off\n")
+			} else if jar := resolveCookieJar(cfg, paths); jar != "" {
+				fmt.Fprintf(out, "cookies  ok (%s)\n", jar)
+			} else {
+				homeDir, _ := os.UserHomeDir()
+				specs := cookies.BrowserSpecs(homeDir, os.Getenv("XDG_CONFIG_HOME"), cfg.Browser, cfg.Browsers, exec.LookPath)
+				fmt.Fprintf(out, "cookies  none (browsers: %s)\n", strings.Join(specs, ", "))
+			}
 		},
 	}
 }

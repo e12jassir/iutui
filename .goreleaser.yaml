@@ -27,6 +27,21 @@ archives:
       - tar.gz
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
 
+nfpms:
+  - id: packages
+    package_name: iutui
+    homepage: https://github.com/e12jassir/iutui
+    maintainer: Esteban Marrugo
+    description: Fast, keyboard-first YouTube TUI and CLI powered by mpv IPC and yt-dlp
+    license: MIT
+    formats:
+      - deb
+      - rpm
+    dependencies:
+      - mpv
+      - yt-dlp
+    bindir: /usr/bin
+
 checksum:
   name_template: "checksums.txt"
 

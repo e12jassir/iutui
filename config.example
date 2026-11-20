@@ -33,7 +33,7 @@ YT_BROWSERS="zen firefox librewolf brave chromium chrome"   # detection order
 # ── interface & downloads ────────────────────────────────
 YT_THEME=youtube-dark       # youtube-dark | catppuccin | tokyonight | gruvbox | kanagawa | terminal
 YT_LANG=auto                # auto | es | en
-YT_PREVIEW=auto             # auto | kitty | chafa | none
+YT_PREVIEW=auto             # auto (Kitty HD in Ghostty/Kitty, pure-Go 24-bit ANSI blocks elsewhere) | kitty | chafa | none
 YT_HEIGHT=95%
 YT_NOTIFY=1
 # YT_BROWSER_CMD=firefox    # open-in-browser command (default: $BROWSER, xdg-open or open)

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 	"github.com/e12jassir/iutui/internal/app"
 	"github.com/e12jassir/iutui/internal/catalog"
 	"github.com/e12jassir/iutui/internal/config"
+	"github.com/e12jassir/iutui/internal/cookies"
 	"github.com/e12jassir/iutui/internal/model"
 	"github.com/e12jassir/iutui/internal/platform"
 	"github.com/e12jassir/iutui/internal/player"
@@ -35,18 +37,67 @@ func TestCobraSubcommandsRegistered(t *testing.T) {
 }
 
 func TestDoctorCommand(t *testing.T) {
-	root := newRootCmd()
-	var out bytes.Buffer
-	root.SetOut(&out)
-	root.SetArgs([]string{"doctor"})
-	if err := root.Execute(); err != nil {
-		t.Fatalf("doctor command failed: %v", err)
+	tmp := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tmp, "config"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(tmp, "cache"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(tmp, "state"))
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(tmp, "runtime"))
+
+	cases := []struct {
+		name       string
+		ytPreview  string
+		kittyWinID string
+		term       string
+		termProg   string
+		colorTerm  string
+		noColor    string
+		wantThumb  string
+	}{
+		{
+			name:       "kitty HD",
+			kittyWinID: "1",
+			term:       "xterm-kitty",
+			wantThumb:  "thumbs   ok (native kitty HD)",
+		},
+		{
+			name:      "native ansi blocks",
+			term:      "alacritty",
+			colorTerm: "truecolor",
+			wantThumb: "thumbs   ok (native ansi blocks)",
+		},
+		{
+			name:      "plain text",
+			term:      "dumb",
+			wantThumb: "thumbs   text (plain terminal)",
+		},
 	}
-	got := out.String()
-	for _, want := range []string{"config", "cache", "state", "socket"} {
-		if !strings.Contains(got, want) {
-			t.Errorf("doctor output missing %q:\n%s", want, got)
-		}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("YT_PREVIEW", tc.ytPreview)
+			t.Setenv("KITTY_WINDOW_ID", tc.kittyWinID)
+			t.Setenv("TERM", tc.term)
+			t.Setenv("TERM_PROGRAM", tc.termProg)
+			t.Setenv("COLORTERM", tc.colorTerm)
+			t.Setenv("NO_COLOR", tc.noColor)
+
+			root := newRootCmd()
+			var out bytes.Buffer
+			root.SetOut(&out)
+			root.SetArgs([]string{"doctor"})
+			if err := root.Execute(); err != nil {
+				t.Fatalf("doctor command failed: %v", err)
+			}
+			got := out.String()
+			for _, want := range []string{"config", "cache", "state", "socket", "cookies", tc.wantThumb} {
+				if !strings.Contains(got, want) {
+					t.Errorf("doctor output missing %q:\n%s", want, got)
+				}
+			}
+			if strings.Contains(got, "missing  chafa") {
+				t.Errorf("doctor output should not check for chafa binary:\n%s", got)
+			}
+		})
 	}
 }
 
@@ -304,6 +355,47 @@ func TestShouldRefreshCookies(t *testing.T) {
 			t.Fatal("expected true when jar is older than CookieTTL")
 		}
 	})
+
+	t.Run("refreshes immediately when currentJar is a legacy sibling outside cacheDir", func(t *testing.T) {
+		cacheDir := t.TempDir()
+		siblingDir := t.TempDir()
+		siblingJar := filepath.Join(siblingDir, "cookies.txt")
+		if err := os.WriteFile(siblingJar, []byte(".youtube.com\tTRUE\t/\tTRUE\t0\tSAPISID\tok\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cfg := config.Config{Cookies: "auto", CookieTTL: 3600}
+		if !shouldRefreshCookies(cfg, cacheDir, siblingJar) {
+			t.Fatal("expected true when currentJar is a legacy sibling outside cacheDir")
+		}
+	})
+
+	t.Run("uses cookies.stamp mtime over yt-dlp-mutated cookies.txt mtime", func(t *testing.T) {
+		dir := t.TempDir()
+		jar := filepath.Join(dir, "cookies.txt")
+		if err := os.WriteFile(jar, []byte(".youtube.com\tTRUE\t/\tTRUE\t0\tSAPISID\tok\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		stampPath := filepath.Join(dir, cookies.StampFileName)
+		if err := os.WriteFile(stampPath, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		old := time.Now().Add(-2 * time.Hour)
+		if err := os.Chtimes(stampPath, old, old); err != nil {
+			t.Fatal(err)
+		}
+		cfg := config.Config{Cookies: "auto", CookieTTL: 3600}
+		if !shouldRefreshCookies(cfg, dir, jar) {
+			t.Fatal("expected true when cookies.stamp is older than CookieTTL even though cookies.txt is fresh")
+		}
+
+		now := time.Now()
+		if err := os.Chtimes(stampPath, now, now); err != nil {
+			t.Fatal(err)
+		}
+		if shouldRefreshCookies(cfg, dir, jar) {
+			t.Fatal("expected false when cookies.stamp is fresh")
+		}
+	})
 }
 
 func TestResolvePlayTargetAndMixFlag(t *testing.T) {
@@ -388,7 +480,7 @@ func TestVersionFlag(t *testing.T) {
 		t.Fatalf("--version failed: %v", err)
 	}
 	got := strings.TrimSpace(out.String())
-	want := "iutui version 0.5.1"
+	want := "iutui version 0.5.2"
 	if got != want {
 		t.Fatalf("--version = %q, want %q", got, want)
 	}
@@ -440,8 +532,8 @@ func TestDebugLogFlag(t *testing.T) {
 		if entry["msg"] != "iutui starting" {
 			t.Errorf("log msg = %v, want %q", entry["msg"], "iutui starting")
 		}
-		if entry["version"] != "0.5.1" {
-			t.Errorf("log version = %v, want %q", entry["version"], "0.5.1")
+		if entry["version"] != "0.5.2" {
+			t.Errorf("log version = %v, want %q", entry["version"], "0.5.2")
 		}
 		wantStateDir := filepath.Join(stateHome, "iutui")
 		if entry["state_dir"] != wantStateDir {
@@ -488,6 +580,8 @@ func TestNativeThumbsSetPreviewMode(t *testing.T) {
 	t.Setenv("KITTY_WINDOW_ID", "1")
 	t.Setenv("TERM", "xterm-kitty")
 	t.Setenv("TERM_PROGRAM", "")
+	t.Setenv("COLORTERM", "")
+	t.Setenv("NO_COLOR", "")
 
 	tr := newNativeThumbs()
 	if got := tr.Backend(); got != thumbs.BackendKitty {
@@ -513,6 +607,55 @@ func TestNativeThumbsSetPreviewMode(t *testing.T) {
 	tr.SetPreviewMode("auto")
 	if got := tr.Backend(); got != thumbs.BackendKitty {
 		t.Fatalf("after SetPreviewMode(\"auto\") backend = %v, want %v", got, thumbs.BackendKitty)
+	}
+}
+
+func TestNativeThumbsEnvAutoDetection(t *testing.T) {
+	tests := []struct {
+		name      string
+		term      string
+		colorTerm string
+		noColor   string
+		want      thumbs.Backend
+	}{
+		{
+			name:      "COLORTERM=truecolor selects ANSI blocks",
+			colorTerm: "truecolor",
+			want:      thumbs.BackendChafa,
+		},
+		{
+			name: "TERM=alacritty selects ANSI blocks",
+			term: "alacritty",
+			want: thumbs.BackendChafa,
+		},
+		{
+			name:      "NO_COLOR=1 overrides COLORTERM=truecolor",
+			term:      "alacritty",
+			colorTerm: "truecolor",
+			noColor:   "1",
+			want:      thumbs.BackendText,
+		},
+		{
+			name: "TERM=dumb selects text",
+			term: "dumb",
+			want: thumbs.BackendText,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("YT_PREVIEW", "")
+			t.Setenv("KITTY_WINDOW_ID", "")
+			t.Setenv("TERM_PROGRAM", "")
+			t.Setenv("TERM", tc.term)
+			t.Setenv("COLORTERM", tc.colorTerm)
+			t.Setenv("NO_COLOR", tc.noColor)
+
+			tr := newNativeThumbs()
+			if got := tr.Backend(); got != tc.want {
+				t.Fatalf("newNativeThumbs().Backend() = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -546,6 +689,115 @@ func TestBubbleTeaEscapeFilter(t *testing.T) {
 		mouse := tea.MouseMsg{X: 10, Y: 5, Action: tea.MouseActionMotion}
 		if got := filter(nil, mouse); got != mouse {
 			t.Fatalf("expected MouseMsg untouched, got %#v want %#v", got, mouse)
+		}
+	})
+}
+
+func TestInstallDepsHintAndMissingBins(t *testing.T) {
+	t.Run("missingRequiredBins preserves order and returns missing bins", func(t *testing.T) {
+		lookPath := func(bin string) (string, error) {
+			if bin == "curl" {
+				return "/usr/bin/curl", nil
+			}
+			return "", errors.New("not found")
+		}
+		got := missingRequiredBins(lookPath, "mpv", "curl", "yt-dlp")
+		want := []string{"mpv", "yt-dlp"}
+		if len(got) != len(want) {
+			t.Fatalf("missingRequiredBins = %v, want %v", got, want)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("missingRequiredBins[%d] = %q, want %q", i, got[i], want[i])
+			}
+		}
+
+		allFound := missingRequiredBins(func(bin string) (string, error) {
+			return "/usr/bin/" + bin, nil
+		}, "mpv", "yt-dlp")
+		if len(allFound) != 0 {
+			t.Fatalf("expected no missing bins, got %v", allFound)
+		}
+	})
+
+	t.Run("installDepsHint covers supported platforms and distros", func(t *testing.T) {
+		deps := []string{"mpv", "yt-dlp"}
+		tests := []struct {
+			name      string
+			goos      string
+			osRelease string
+			deps      []string
+			want      string
+		}{
+			{
+				name: "empty deps",
+				goos: "linux",
+				deps: nil,
+				want: "",
+			},
+			{
+				name: "darwin",
+				goos: "darwin",
+				deps: deps,
+				want: "brew install mpv yt-dlp",
+			},
+			{
+				name:      "arch cachyos",
+				goos:      "linux",
+				osRelease: "NAME=\"CachyOS Linux\"\nID=cachyos\nID_LIKE=arch\n",
+				deps:      deps,
+				want:      "sudo pacman -S --needed mpv yt-dlp",
+			},
+			{
+				name:      "ubuntu debian",
+				goos:      "linux",
+				osRelease: "ID=ubuntu\nID_LIKE=debian\n",
+				deps:      deps,
+				want:      "sudo apt install mpv yt-dlp",
+			},
+			{
+				name:      "fedora",
+				goos:      "linux",
+				osRelease: "ID=fedora\n",
+				deps:      deps,
+				want:      "sudo dnf install mpv yt-dlp",
+			},
+			{
+				name:      "opensuse",
+				goos:      "linux",
+				osRelease: "ID=\"opensuse-tumbleweed\"\nID_LIKE=\"opensuse suse\"\n",
+				deps:      deps,
+				want:      "sudo zypper install mpv yt-dlp",
+			},
+			{
+				name:      "alpine",
+				goos:      "linux",
+				osRelease: "ID=alpine\n",
+				deps:      deps,
+				want:      "sudo apk add mpv yt-dlp",
+			},
+			{
+				name:      "unknown linux",
+				goos:      "linux",
+				osRelease: "ID=nixos\n",
+				deps:      deps,
+				want:      "install mpv yt-dlp using your package manager",
+			},
+			{
+				name: "other os fallback",
+				goos: "windows",
+				deps: deps,
+				want: "install mpv yt-dlp (see https://mpv.io and https://github.com/yt-dlp/yt-dlp)",
+			},
+		}
+
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				got := installDepsHint(tc.goos, tc.osRelease, tc.deps)
+				if got != tc.want {
+					t.Fatalf("installDepsHint(%q, ..., %v) = %q, want %q", tc.goos, tc.deps, got, tc.want)
+				}
+			})
 		}
 	})
 }

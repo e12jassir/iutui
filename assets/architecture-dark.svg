@@ -68,6 +68,6 @@
     <line x1="654" y1="118" x2="668" y2="118" stroke="#3e4554" stroke-width="1.1"/>
     <rect x="668" y="107" width="152" height="22" rx="5" fill="#11141c" stroke="#1b2029" stroke-width="1"/>
     <circle cx="680" cy="118" r="2.3" fill="#7dd3fc" opacity="0.85"/>
-    <text x="690" y="121.2" font-family="ui-monospace, 'SFMono-Regular', 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="9.5" fill="#9ca3af">LRCLIB Lyrics</text>
+    <text x="690" y="121.2" font-family="ui-monospace, 'SFMono-Regular', 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="9.5" fill="#9ca3af">YT CC + LRCLIB</text>
   </g>
 </svg>

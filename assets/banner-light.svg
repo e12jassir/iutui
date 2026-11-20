@@ -222,7 +222,7 @@
     <text x="36" y="142" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" fill="#475569">Fast, keyboard-first YouTube TUI &amp; CLI powered by</text>
     <text x="36" y="162" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" fill="#475569">mpv JSON IPC and yt-dlp. Zero browser bloat.</text>
 
-    <text x="36" y="214" font-family="ui-monospace, 'SFMono-Regular', 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="10" font-weight="500" letter-spacing="1.2" fill="#64748b">v0.5.0&#160;&#160;&#x00b7;&#160;&#160;LINUX / MACOS&#160;&#160;&#x00b7;&#160;&#160;MIT</text>
+    <text x="36" y="214" font-family="ui-monospace, 'SFMono-Regular', 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="10" font-weight="500" letter-spacing="1.2" fill="#64748b">v0.5.2&#160;&#160;&#x00b7;&#160;&#160;LINUX / MACOS&#160;&#160;&#x00b7;&#160;&#160;MIT</text>
 
     <!-- Right miniature TUI -->
     <rect x="462" y="26" width="354" height="196" rx="10" fill="#f1f4f8" stroke="#dce2ea" stroke-width="1"/>
