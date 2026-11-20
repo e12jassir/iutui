@@ -108,6 +108,13 @@ func WithSponsorBlockClient(sb *SponsorBlockClient) IPCOption {
 	}
 }
 
+// WithFadeDuration configures the smooth audio fade duration (<= 0 disables fades).
+func WithFadeDuration(d time.Duration) IPCOption {
+	return func(c *IPCClient) {
+		c.fadeDuration = d
+	}
+}
+
 // Chapter represents a single playback chapter marker reported by mpv.
 type Chapter struct {
 	Title string  `json:"title"`
@@ -188,6 +195,15 @@ type IPCClient struct {
 	nextSubID uint64
 	closed    bool
 
+	fadeDuration  time.Duration
+	fadeMu        sync.Mutex
+	fadeSeq       atomic.Uint64
+	fadeCancel    context.CancelFunc
+	fadeGain      float64
+	fadingIn      bool
+	endFadeTrack  string
+	pendingFadeIn atomic.Bool
+
 	closeOnce sync.Once
 }
 
@@ -199,6 +215,7 @@ func NewIPCClient(opts ...IPCOption) *IPCClient {
 		initialBackoff: 100 * time.Millisecond,
 		maxBackoff:     5 * time.Second,
 		cmdTimeout:     2 * time.Second,
+		fadeDuration:   180 * time.Millisecond,
 		sbClient:       NewSponsorBlockClient(),
 		nowFn:          time.Now,
 		ctx:            ctx,
@@ -365,7 +382,17 @@ func (c *IPCClient) handleLine(line []byte) {
 	switch msg.Event {
 	case "property-change":
 		c.applyPropertyChange(msg.Name, msg.Data)
+	case "playback-restart", "file-loaded":
+		if c.fadeDuration > 0 && c.pendingFadeIn.Swap(false) {
+			fseq, fctx := c.beginFade()
+			c.spawnFadeIn(fctx, fseq, c.fadeInDuration())
+		}
 	case "end-file":
+		c.fadeMu.Lock()
+		c.endFadeTrack = ""
+		gain := c.fadeGain
+		c.fadeMu.Unlock()
+
 		c.statusMu.Lock()
 		c.status.TimePos = 0
 		st := c.status
@@ -373,6 +400,9 @@ func (c *IPCClient) handleLine(line []byte) {
 		if msg.Reason == "eof" {
 			c.clearSponsorBlockState(0)
 			c.spawnClearForcedTitle()
+		} else if c.fadeDuration > 0 && !c.pendingFadeIn.Load() && !st.Paused && gain < -1.0 {
+			fseq, fctx := c.beginFade()
+			c.spawnFadeIn(fctx, fseq, c.fadeInDuration())
 		}
 		c.broadcast(st)
 	}
@@ -398,6 +428,7 @@ func (c *IPCClient) spawnClearForcedTitle() {
 
 func (c *IPCClient) applyPropertyChange(name string, data any) {
 	c.statusMu.Lock()
+	prevPaused := c.status.Paused
 	changed := false
 	timePosUpdated := false
 	switch name {
@@ -464,10 +495,57 @@ func (c *IPCClient) applyPropertyChange(name string, data any) {
 	if changed {
 		c.broadcast(st)
 	}
+	if name == "pause" && prevPaused && !st.Paused && c.fadeDuration > 0 {
+		c.fadeMu.Lock()
+		needFadeIn := c.fadeGain < -1.0 && !c.fadingIn
+		c.fadeMu.Unlock()
+		if needFadeIn {
+			fseq, fctx := c.beginFade()
+			c.spawnFadeIn(fctx, fseq, c.fadeInDuration())
+		}
+	}
 	if timePosUpdated {
 		c.markSponsorTimeObserved()
 		if !st.Paused && c.SponsorBlockEnabled() {
 			c.checkAndSkipSponsorSegment(st.TimePos)
+		}
+		if st.TimePos > 0 && !st.Paused && c.fadeDuration > 0 {
+			if c.pendingFadeIn.Swap(false) {
+				fseq, fctx := c.beginFade()
+				c.spawnFadeIn(fctx, fseq, c.fadeInDuration())
+			}
+			if !st.LoopFile && st.Duration > 15 && st.PlaylistCount > 1 {
+				rem := st.Duration - st.TimePos
+				if rem > 0.15 && rem <= 2.0 {
+					trackKey := st.Title
+					if trackKey == "" {
+						trackKey = "__untitled__"
+					}
+					c.fadeMu.Lock()
+					if c.endFadeTrack != trackKey {
+						c.endFadeTrack = trackKey
+						startDB := c.fadeGain
+						c.fadeMu.Unlock()
+						c.pendingFadeIn.Store(true)
+						dur := min(1600*time.Millisecond, time.Duration((rem-0.1)*float64(time.Second)))
+						fseq, fctx := c.beginFade()
+						c.spawnEndOfTrackFade(fctx, fseq, startDB, dur)
+					} else {
+						c.fadeMu.Unlock()
+					}
+				} else if rem > 3.0 {
+					c.fadeMu.Lock()
+					if c.endFadeTrack != "" {
+						c.endFadeTrack = ""
+						c.fadeMu.Unlock()
+						c.pendingFadeIn.Store(false)
+						fseq, fctx := c.beginFade()
+						c.spawnFadeIn(fctx, fseq, c.fadeInDuration())
+					} else {
+						c.fadeMu.Unlock()
+					}
+				}
+			}
 		}
 	}
 }
@@ -482,6 +560,7 @@ func (c *IPCClient) handleDisconnect(conn net.Conn) {
 	_ = conn.Close()
 	c.failPending(ErrNotConnected)
 	c.clearSponsorBlockState(0)
+	c.resetFadeState()
 
 	c.statusMu.Lock()
 	c.status = Status{IsRunning: false, Speed: 1.0}
@@ -769,32 +848,84 @@ func (c *IPCClient) SetPlaybackProfile(ctx context.Context, quality int, audioOn
 
 // TogglePause toggles playback pause state in mpv.
 func (c *IPCClient) TogglePause(ctx context.Context) error {
-	_, err := c.sendCommand(ctx, "cycle", "pause")
-	return err
+	st := c.Status()
+	if !st.IsRunning || c.fadeDuration <= 0 {
+		_, err := c.sendCommand(ctx, "cycle", "pause")
+		return err
+	}
+	if !st.Paused {
+		if c.isAudioActivelyPlaying() {
+			seq, fctx := c.beginFade()
+			mergedCtx, cancelMerged := c.mergeFadeCtx(fctx, ctx)
+			c.fadeOutSync(mergedCtx, seq)
+			cancelMerged()
+		}
+		if _, err := c.sendCommand(ctx, "set_property", "pause", true); err != nil {
+			c.setGainBestEffort(c.ctx, 0.0)
+			return err
+		}
+		return nil
+	}
+
+	seq, fctx := c.beginFade()
+	c.setGainBestEffort(ctx, fadeFloorDB)
+	if _, err := c.sendCommand(ctx, "set_property", "pause", false); err != nil {
+		c.setGainBestEffort(c.ctx, 0.0)
+		return err
+	}
+	c.spawnFadeIn(fctx, seq, c.fadeInDuration())
+	return nil
 }
 
 // Pause pauses playback in mpv.
 func (c *IPCClient) Pause(ctx context.Context) error {
-	_, err := c.sendCommand(ctx, "set_property", "pause", true)
+	if c.fadeDuration > 0 && c.isAudioActivelyPlaying() {
+		seq, fctx := c.beginFade()
+		mergedCtx, cancelMerged := c.mergeFadeCtx(fctx, ctx)
+		c.fadeOutSync(mergedCtx, seq)
+		cancelMerged()
+	}
+	if _, err := c.sendCommand(ctx, "set_property", "pause", true); err != nil {
+		if c.fadeDuration > 0 {
+			c.setGainBestEffort(c.ctx, 0.0)
+		}
+		return err
+	}
+	return nil
+}
+
+func (c *IPCClient) switchPlaylistTrack(ctx context.Context, cmd string) error {
+	if c.fadeDuration > 0 && c.isAudioActivelyPlaying() {
+		seq, fctx := c.beginFade()
+		mergedCtx, cancelMerged := c.mergeFadeCtx(fctx, ctx)
+		c.fadeOutSync(mergedCtx, seq)
+		cancelMerged()
+
+		c.pendingFadeIn.Store(true)
+		if _, err := c.sendCommand(ctx, cmd); err != nil {
+			c.pendingFadeIn.Store(false)
+			c.setGainBestEffort(c.ctx, 0.0)
+			return err
+		}
+		_, _ = c.sendCommand(ctx, "set_property", "force-media-title", "")
+		c.scheduleFadeInSafety(seq, max(200*time.Millisecond, 6*c.fadeDuration))
+		return nil
+	}
+	_, err := c.sendCommand(ctx, cmd)
+	if err == nil {
+		_, _ = c.sendCommand(ctx, "set_property", "force-media-title", "")
+	}
 	return err
 }
 
 // Next skips to the next track in the playlist.
 func (c *IPCClient) Next(ctx context.Context) error {
-	_, err := c.sendCommand(ctx, "playlist-next")
-	if err == nil {
-		_, _ = c.sendCommand(ctx, "set_property", "force-media-title", "")
-	}
-	return err
+	return c.switchPlaylistTrack(ctx, "playlist-next")
 }
 
 // Prev skips to the previous track in the playlist.
 func (c *IPCClient) Prev(ctx context.Context) error {
-	_, err := c.sendCommand(ctx, "playlist-prev")
-	if err == nil {
-		_, _ = c.sendCommand(ctx, "set_property", "force-media-title", "")
-	}
-	return err
+	return c.switchPlaylistTrack(ctx, "playlist-prev")
 }
 
 // Seek seeks relative seconds in mpv and optimistically updates cached position.
@@ -1220,6 +1351,7 @@ func (c *IPCClient) broadcast(st Status) {
 func (c *IPCClient) Close() error {
 	c.closeOnce.Do(func() {
 		c.cancel()
+		c.resetFadeState()
 		close(c.done)
 		c.killManagedMPV()
 

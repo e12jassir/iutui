@@ -148,6 +148,15 @@ func (c *IPCClient) cutActivePlayback(waitCtx context.Context, seq uint64) (skip
 		if !c.isCurrentPlay(seq) || c.ctx.Err() != nil {
 			return false, false
 		}
+		if c.fadeDuration > 0 && c.isAudioActivelyPlaying() {
+			fseq, fctx := c.beginFade()
+			mergedCtx, cancelMerged := c.mergeFadeCtx(fctx, waitCtx)
+			c.fadeOutSync(mergedCtx, fseq)
+			cancelMerged()
+			if !c.isCurrentPlay(seq) || c.ctx.Err() != nil {
+				return false, false
+			}
+		}
 		conn := c.getConn()
 		stopCtx, stopCancel := context.WithTimeout(waitCtx, 500*time.Millisecond)
 		_, stopErr := c.sendCommand(stopCtx, "stop")
@@ -399,6 +408,13 @@ func (c *IPCClient) tryPlayViaIPC(waitCtx context.Context, seq uint64, v model.V
 		return true
 	}
 
+	var fseq uint64
+	if c.fadeDuration > 0 {
+		fseq, _ = c.beginFade()
+		c.setGainBestEffort(waitCtx, fadeFloorDB)
+		c.pendingFadeIn.Store(true)
+	}
+
 	var err error
 	perFileOpts := map[string]any{
 		"start": "none",
@@ -429,6 +445,10 @@ func (c *IPCClient) tryPlayViaIPC(waitCtx context.Context, seq uint64, v model.V
 		return true
 	}
 	if err != nil {
+		if c.fadeDuration > 0 {
+			c.pendingFadeIn.Store(false)
+			c.setGainBestEffort(c.ctx, 0.0)
+		}
 		return false
 	}
 
@@ -443,6 +463,9 @@ func (c *IPCClient) tryPlayViaIPC(waitCtx context.Context, seq uint64, v model.V
 	c.broadcast(st)
 	if c.isCurrentPlay(seq) {
 		_, _ = c.sendCommand(waitCtx, "set_property", "pause", false)
+		if c.fadeDuration > 0 {
+			c.scheduleFadeInSafety(fseq, max(200*time.Millisecond, 6*c.fadeDuration))
+		}
 	}
 	return true
 }

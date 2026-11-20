@@ -3508,3 +3508,396 @@ func TestPlayerLiveSettingsMethods(t *testing.T) {
 		}
 	})
 }
+
+func TestIPCClient_AudioFade(t *testing.T) {
+	type fadeRecorder struct {
+		mu           sync.Mutex
+		cmds         [][]any
+		failPause    atomic.Bool
+		failNext     atomic.Bool
+		onVolumeGain func(db float64)
+	}
+
+	newRecordedServer := func(t *testing.T, rec *fadeRecorder) *testMPVServer {
+		t.Helper()
+		return startTestMPVServer(t, func(conn net.Conn, cmd []any, reqID int64) {
+			if len(cmd) > 0 && fmt.Sprint(cmd[0]) != "observe_property" {
+				cp := make([]any, len(cmd))
+				copy(cp, cmd)
+				rec.mu.Lock()
+				rec.cmds = append(rec.cmds, cp)
+				cb := rec.onVolumeGain
+				rec.mu.Unlock()
+
+				if cb != nil && len(cmd) >= 3 && fmt.Sprint(cmd[0]) == "set_property" && fmt.Sprint(cmd[1]) == "volume-gain" {
+					if db, ok := toFloat64(cmd[2]); ok {
+						cb(db)
+					}
+				}
+			}
+
+			if len(cmd) >= 2 && fmt.Sprint(cmd[0]) == "set_property" && fmt.Sprint(cmd[1]) == "pause" {
+				if rec.failPause.Load() {
+					_ = json.NewEncoder(conn).Encode(map[string]any{
+						"error":      "property unavailable",
+						"request_id": reqID,
+					})
+					return
+				}
+				if len(cmd) >= 3 {
+					_ = json.NewEncoder(conn).Encode(map[string]any{
+						"event": "property-change",
+						"name":  "pause",
+						"data":  cmd[2],
+					})
+				}
+			}
+			if len(cmd) >= 1 && fmt.Sprint(cmd[0]) == "playlist-next" && rec.failNext.Load() {
+				_ = json.NewEncoder(conn).Encode(map[string]any{
+					"error":      "property unavailable",
+					"request_id": reqID,
+				})
+				return
+			}
+			_ = json.NewEncoder(conn).Encode(map[string]any{
+				"error":      "success",
+				"request_id": reqID,
+			})
+		})
+	}
+
+	snapshotCmds := func(rec *fadeRecorder) [][]any {
+		rec.mu.Lock()
+		defer rec.mu.Unlock()
+		out := make([][]any, len(rec.cmds))
+		copy(out, rec.cmds)
+		return out
+	}
+
+	extractGain := func(c []any) (float64, bool) {
+		if len(c) == 3 && fmt.Sprint(c[0]) == "set_property" && fmt.Sprint(c[1]) == "volume-gain" {
+			return toFloat64(c[2])
+		}
+		return 0, false
+	}
+
+	waitActivePlayback := func(t *testing.T, srv *testMPVServer, client *IPCClient, title string, dur, pos float64) net.Conn {
+		t.Helper()
+		var serverConn net.Conn
+		select {
+		case serverConn = <-srv.accepts:
+		case <-time.After(time.Second):
+			t.Fatalf("server did not accept client connection")
+		}
+		for _, ev := range []map[string]any{
+			{"event": "property-change", "name": "media-title", "data": title},
+			{"event": "property-change", "name": "duration", "data": dur},
+			{"event": "property-change", "name": "time-pos", "data": pos},
+			{"event": "property-change", "name": "pause", "data": false},
+		} {
+			if err := srv.SendJSON(serverConn, ev); err != nil {
+				t.Fatalf("send property-change %v: %v", ev, err)
+			}
+		}
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			st := client.Status()
+			if st.IsRunning && !st.Paused && st.Duration == dur && st.TimePos == pos {
+				return serverConn
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		t.Fatalf("timed out waiting for active playback status; got %+v", client.Status())
+		return nil
+	}
+
+	waitForLastGain := func(t *testing.T, rec *fadeRecorder, minIndex int, target float64) {
+		t.Helper()
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			cmds := snapshotCmds(rec)
+			for i := len(cmds) - 1; i >= minIndex; i-- {
+				if db, ok := extractGain(cmds[i]); ok {
+					if math.Abs(db-target) < 0.01 {
+						return
+					}
+					break
+				}
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		t.Fatalf("timed out waiting for volume-gain=%v after index %d; cmds=%v", target, minIndex, snapshotCmds(rec))
+	}
+
+	t.Run("pause fades down to -42 before pause=true and resume arms -42 then ramps up to 0", func(t *testing.T) {
+		rec := &fadeRecorder{}
+		srv := newRecordedServer(t, rec)
+		client := NewIPCClient(
+			WithSocketPath(srv.sockPath),
+			WithFadeDuration(20*time.Millisecond),
+		)
+		defer client.Close()
+
+		waitActivePlayback(t, srv, client, "Fade Track", 180.0, 25.0)
+
+		ctx := context.Background()
+		if err := client.Pause(ctx); err != nil {
+			t.Fatalf("Pause() failed: %v", err)
+		}
+
+		cmds := snapshotCmds(rec)
+		pauseIdx := -1
+		var pauseGains []float64
+		for i, c := range cmds {
+			if db, ok := extractGain(c); ok && pauseIdx == -1 {
+				pauseGains = append(pauseGains, db)
+			}
+			if len(c) == 3 && fmt.Sprint(c[0]) == "set_property" && fmt.Sprint(c[1]) == "pause" && c[2] == true {
+				pauseIdx = i
+				break
+			}
+		}
+		if pauseIdx < 0 {
+			t.Fatalf("expected set_property pause true, got cmds=%v", cmds)
+		}
+		if len(pauseGains) != fadeSteps {
+			t.Fatalf("expected %d fade-out gain steps before pause, got %d (%v)", fadeSteps, len(pauseGains), pauseGains)
+		}
+		for i := 1; i < len(pauseGains); i++ {
+			if pauseGains[i] >= pauseGains[i-1] {
+				t.Fatalf("expected strictly decreasing gain during pause fade-out, got %v", pauseGains)
+			}
+		}
+		if math.Abs(pauseGains[len(pauseGains)-1]-fadeFloorDB) > 0.01 {
+			t.Fatalf("expected final fade-out gain %v before pause, got %v", fadeFloorDB, pauseGains[len(pauseGains)-1])
+		}
+
+		// Resume via TogglePause (status.Paused is now true).
+		resumeStartIdx := len(cmds)
+		if err := client.TogglePause(ctx); err != nil {
+			t.Fatalf("TogglePause() resume failed: %v", err)
+		}
+		waitForLastGain(t, rec, resumeStartIdx, 0.0)
+
+		cmds = snapshotCmds(rec)
+		unpauseIdx := -1
+		var preUnpauseGains, postUnpauseGains []float64
+		for i := resumeStartIdx; i < len(cmds); i++ {
+			c := cmds[i]
+			if len(c) == 3 && fmt.Sprint(c[0]) == "set_property" && fmt.Sprint(c[1]) == "pause" && c[2] == false {
+				unpauseIdx = i
+				continue
+			}
+			if db, ok := extractGain(c); ok {
+				if unpauseIdx == -1 {
+					preUnpauseGains = append(preUnpauseGains, db)
+				} else {
+					postUnpauseGains = append(postUnpauseGains, db)
+				}
+			}
+		}
+		if unpauseIdx < 0 {
+			t.Fatalf("expected set_property pause false, got %v", cmds[resumeStartIdx:])
+		}
+		if len(preUnpauseGains) == 0 || math.Abs(preUnpauseGains[len(preUnpauseGains)-1]-fadeFloorDB) > 0.01 {
+			t.Fatalf("expected armed gain %v before pause=false, got %v", fadeFloorDB, preUnpauseGains)
+		}
+		if len(postUnpauseGains) != fadeSteps {
+			t.Fatalf("expected %d fade-in gain steps after pause=false, got %d (%v)", fadeSteps, len(postUnpauseGains), postUnpauseGains)
+		}
+		for i := 1; i < len(postUnpauseGains); i++ {
+			if postUnpauseGains[i] <= postUnpauseGains[i-1] {
+				t.Fatalf("expected strictly increasing gain during resume fade-in, got %v", postUnpauseGains)
+			}
+		}
+		if math.Abs(postUnpauseGains[len(postUnpauseGains)-1]-0.0) > 0.01 {
+			t.Fatalf("expected final fade-in gain 0.0, got %v", postUnpauseGains[len(postUnpauseGains)-1])
+		}
+	})
+
+	t.Run("rapid TogglePause mid-fade cancels prior fade cleanly and ends at 0 when resumed", func(t *testing.T) {
+		midFadeHit := make(chan struct{}, 1)
+		var watchMid atomic.Bool
+		rec := &fadeRecorder{
+			onVolumeGain: func(db float64) {
+				if watchMid.Load() && db > fadeFloorDB+1.0 && db < -5.0 {
+					select {
+					case midFadeHit <- struct{}{}:
+					default:
+					}
+				}
+			},
+		}
+		srv := newRecordedServer(t, rec)
+		client := NewIPCClient(
+			WithSocketPath(srv.sockPath),
+			WithFadeDuration(20*time.Millisecond),
+		)
+		defer client.Close()
+
+		waitActivePlayback(t, srv, client, "Rapid Toggle", 180.0, 30.0)
+		ctx := context.Background()
+
+		// Pause cleanly first.
+		if err := client.TogglePause(ctx); err != nil {
+			t.Fatalf("initial TogglePause pause failed: %v", err)
+		}
+
+		// Resume (starts async fade-in) and interrupt mid-fade with another TogglePause.
+		watchMid.Store(true)
+		if err := client.TogglePause(ctx); err != nil {
+			t.Fatalf("TogglePause resume failed: %v", err)
+		}
+		select {
+		case <-midFadeHit:
+		case <-time.After(time.Second):
+			t.Fatal("did not observe mid-fade gain step before timeout")
+		}
+		watchMid.Store(false)
+
+		// Interrupt mid-fade-in by pausing again.
+		if err := client.TogglePause(ctx); err != nil {
+			t.Fatalf("mid-fade TogglePause pause failed: %v", err)
+		}
+
+		// Resume once more and verify gain settles cleanly at 0.0 with no trailing drops.
+		finalStartIdx := len(snapshotCmds(rec))
+		if err := client.TogglePause(ctx); err != nil {
+			t.Fatalf("final TogglePause resume failed: %v", err)
+		}
+		waitForLastGain(t, rec, finalStartIdx, 0.0)
+
+		// Wait past a full fade duration to confirm no canceled goroutine overwrites gain.
+		time.Sleep(60 * time.Millisecond)
+
+		cmds := snapshotCmds(rec)
+		var lastGain float64
+		found := false
+		for i := len(cmds) - 1; i >= 0; i-- {
+			if db, ok := extractGain(cmds[i]); ok {
+				lastGain = db
+				found = true
+				break
+			}
+		}
+		if !found || math.Abs(lastGain-0.0) > 0.01 {
+			t.Fatalf("expected final settled volume-gain=0.0, got found=%v val=%v", found, lastGain)
+		}
+		if client.Status().Paused {
+			t.Fatalf("expected final Paused=false")
+		}
+	})
+
+	t.Run("Play track switch fades out before stop, arms -42 before loadfile, and fades to 0 on playback-restart", func(t *testing.T) {
+		rec := &fadeRecorder{}
+		srv := newRecordedServer(t, rec)
+		client := NewIPCClient(
+			WithSocketPath(srv.sockPath),
+			WithFadeDuration(20*time.Millisecond),
+			WithLaunchDefaults(LaunchOpts{
+				SocketPath: srv.sockPath,
+				Mode:       "audio",
+			}),
+		)
+		client.SetAutoplay(false)
+		defer client.Close()
+
+		serverConn := waitActivePlayback(t, srv, client, "Track 1", 200.0, 40.0)
+
+		if err := client.Play(context.Background(), model.Video{ID: "track2_12345", Title: "Track 2"}, "audio"); err != nil {
+			t.Fatalf("Play() failed: %v", err)
+		}
+
+		cmds := snapshotCmds(rec)
+		stopIdx := -1
+		loadIdx := -1
+		for i, c := range cmds {
+			if len(c) >= 1 && fmt.Sprint(c[0]) == "stop" && stopIdx == -1 {
+				stopIdx = i
+			}
+			if len(c) >= 1 && fmt.Sprint(c[0]) == "loadfile" && loadIdx == -1 {
+				loadIdx = i
+			}
+		}
+		if stopIdx < 0 || loadIdx < 0 || loadIdx <= stopIdx {
+			t.Fatalf("expected stop before loadfile (stopIdx=%d, loadIdx=%d), cmds=%v", stopIdx, loadIdx, cmds)
+		}
+
+		var preStopGains []float64
+		for i := 0; i < stopIdx; i++ {
+			if db, ok := extractGain(cmds[i]); ok {
+				preStopGains = append(preStopGains, db)
+			}
+		}
+		if len(preStopGains) != fadeSteps || math.Abs(preStopGains[len(preStopGains)-1]-fadeFloorDB) > 0.01 {
+			t.Fatalf("expected fade-out to %v before stop, got %v", fadeFloorDB, preStopGains)
+		}
+
+		armedBeforeLoad := false
+		for i := stopIdx + 1; i < loadIdx; i++ {
+			if db, ok := extractGain(cmds[i]); ok && math.Abs(db-fadeFloorDB) < 0.01 {
+				armedBeforeLoad = true
+			}
+		}
+		if !armedBeforeLoad {
+			t.Fatalf("expected volume-gain %v armed between stop and loadfile, cmds=%v", fadeFloorDB, cmds[stopIdx:loadIdx+1])
+		}
+
+		restartIdx := len(cmds)
+		if err := srv.SendJSON(serverConn, map[string]any{"event": "playback-restart"}); err != nil {
+			t.Fatalf("send playback-restart: %v", err)
+		}
+		waitForLastGain(t, rec, restartIdx, 0.0)
+
+		cmds = snapshotCmds(rec)
+		var restartGains []float64
+		for i := restartIdx; i < len(cmds); i++ {
+			if db, ok := extractGain(cmds[i]); ok {
+				restartGains = append(restartGains, db)
+			}
+		}
+		if len(restartGains) != fadeSteps {
+			t.Fatalf("expected %d fade-in steps after playback-restart, got %d (%v)", fadeSteps, len(restartGains), restartGains)
+		}
+		if math.Abs(restartGains[len(restartGains)-1]-0.0) > 0.01 {
+			t.Fatalf("expected final gain 0.0 after playback-restart, got %v", restartGains)
+		}
+	})
+
+	t.Run("failed Pause and Next immediately restore volume-gain to 0", func(t *testing.T) {
+		rec := &fadeRecorder{}
+		rec.failPause.Store(true)
+		rec.failNext.Store(true)
+		srv := newRecordedServer(t, rec)
+		client := NewIPCClient(
+			WithSocketPath(srv.sockPath),
+			WithFadeDuration(20*time.Millisecond),
+		)
+		defer client.Close()
+
+		waitActivePlayback(t, srv, client, "Fail Track", 150.0, 20.0)
+		ctx := context.Background()
+
+		if err := client.Pause(ctx); err == nil {
+			t.Fatal("expected Pause() error")
+		}
+		cmds := snapshotCmds(rec)
+		lastGain, ok := extractGain(cmds[len(cmds)-1])
+		if !ok || math.Abs(lastGain-0.0) > 0.01 {
+			t.Fatalf("expected immediate volume-gain 0.0 restore after failed Pause, cmds=%v", cmds)
+		}
+
+		nextStart := len(cmds)
+		if err := client.Next(ctx); err == nil {
+			t.Fatal("expected Next() error")
+		}
+		cmds = snapshotCmds(rec)
+		if len(cmds) <= nextStart {
+			t.Fatalf("expected commands from Next(), got none")
+		}
+		lastGain, ok = extractGain(cmds[len(cmds)-1])
+		if !ok || math.Abs(lastGain-0.0) > 0.01 {
+			t.Fatalf("expected immediate volume-gain 0.0 restore after failed Next, cmds=%v", cmds[nextStart:])
+		}
+	})
+}
