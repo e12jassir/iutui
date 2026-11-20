@@ -18,6 +18,12 @@ import (
 	"github.com/e12jassir/iutui/internal/platform"
 )
 
+// StampFileName is the sentinel filename written alongside cookies.txt to
+// track the last successful browser cookie jar refresh.
+const StampFileName = "cookies.stamp"
+
+const netscapeCookieHeader = "# Netscape HTTP Cookie File\n"
+
 var (
 	youtubeDomainRe = regexp.MustCompile(`(^|\.)(youtube|youtube-nocookie|googlevideo|ytimg|ggpht)\.com$`)
 	googleDomainRe  = regexp.MustCompile(`(^|\.)google\.[a-z.]+$`)
@@ -95,15 +101,15 @@ func WritePrivateTemp(dir string, data []byte) (string, error) {
 	return name, nil
 }
 
-// Forget removes persisted cookie jars (cookies.txt, cookies.none) and
-// temporary cookie jars (ck.*) from cacheDir.
+// Forget removes persisted cookie jars (cookies.txt, cookies.none, cookies.stamp)
+// and temporary cookie jars (ck.*) from cacheDir.
 func Forget(cacheDir string) error {
 	if cacheDir == "" {
 		return errors.New("cookies: empty cache directory")
 	}
 
 	var errs []error
-	for _, name := range []string{"cookies.txt", "cookies.none"} {
+	for _, name := range []string{"cookies.txt", "cookies.none", StampFileName} {
 		if err := removeIfExists(filepath.Join(cacheDir, name)); err != nil {
 			errs = append(errs, err)
 		}
@@ -130,8 +136,10 @@ func removeIfExists(path string) error {
 	return err
 }
 
-// DetectFirefoxProfile searches bases in order and returns the first profile
-// directory matching *default-release* or *[Dd]efault* that contains cookies.sqlite.
+// DetectFirefoxProfile searches bases in order and returns the first valid
+// profile directory containing cookies.sqlite, checking profiles.ini
+// ([Install*] Default, then [Profile*] Default=1) before falling back to
+// *default-release* and *[Dd]efault* directory globs.
 func DetectFirefoxProfile(bases ...string) string {
 	patterns := []string{"*default-release*", "*[Dd]efault*"}
 	for _, base := range bases {
@@ -139,19 +147,111 @@ func DetectFirefoxProfile(bases ...string) string {
 		if err != nil || !info.IsDir() {
 			continue
 		}
+		if profileDir := detectProfileFromINI(base); profileDir != "" {
+			return profileDir
+		}
 		for _, pat := range patterns {
 			matches, err := filepath.Glob(filepath.Join(base, pat))
 			if err != nil {
 				continue
 			}
 			for _, profileDir := range matches {
-				sqlitePath := filepath.Join(profileDir, "cookies.sqlite")
-				if fi, err := os.Stat(sqlitePath); err == nil && !fi.IsDir() {
+				if hasCookiesSQLite(profileDir) {
 					return profileDir
 				}
 			}
 		}
 	}
+	return ""
+}
+
+func hasCookiesSQLite(profileDir string) bool {
+	if profileDir == "" {
+		return false
+	}
+	sqlitePath := filepath.Join(profileDir, "cookies.sqlite")
+	fi, err := os.Stat(sqlitePath)
+	return err == nil && !fi.IsDir()
+}
+
+func detectProfileFromINI(base string) string {
+	data, err := os.ReadFile(filepath.Join(base, "profiles.ini"))
+	if err != nil {
+		return ""
+	}
+
+	type iniSection struct {
+		name       string
+		defaultVal string
+		path       string
+		isRelative string
+	}
+
+	var sections []iniSection
+	curIdx := -1
+
+	scanner := bufio.NewScanner(bytes.NewReader(data))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, ";") || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+			name := strings.TrimSpace(line[1 : len(line)-1])
+			sections = append(sections, iniSection{name: name})
+			curIdx = len(sections) - 1
+			continue
+		}
+		if curIdx < 0 {
+			continue
+		}
+		k, v, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		key := strings.TrimSpace(k)
+		val := strings.TrimSpace(v)
+		switch key {
+		case "Default":
+			sections[curIdx].defaultVal = val
+		case "Path":
+			sections[curIdx].path = val
+		case "IsRelative":
+			sections[curIdx].isRelative = val
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return ""
+	}
+
+	// Priority 1: [Install*] Default=<path>
+	for _, sec := range sections {
+		if !strings.HasPrefix(sec.name, "Install") || sec.defaultVal == "" {
+			continue
+		}
+		profileDir := sec.defaultVal
+		if !filepath.IsAbs(profileDir) {
+			profileDir = filepath.Join(base, profileDir)
+		}
+		if hasCookiesSQLite(profileDir) {
+			return profileDir
+		}
+	}
+
+	// Priority 2: [Profile*] Default=1 with Path=<path>
+	for _, sec := range sections {
+		if !strings.HasPrefix(sec.name, "Profile") || sec.defaultVal != "1" || sec.path == "" {
+			continue
+		}
+		profileDir := sec.path
+		if sec.isRelative != "0" && !filepath.IsAbs(profileDir) {
+			profileDir = filepath.Join(base, profileDir)
+		}
+		if hasCookiesSQLite(profileDir) {
+			return profileDir
+		}
+	}
+
 	return ""
 }
 
@@ -323,6 +423,7 @@ func RefreshJarFromBrowsers(ctx context.Context, cacheDir, ytdlpBin string, spec
 			return "", err
 		}
 		_ = removeIfExists(nonePath)
+		_ = touchPrivateFile(filepath.Join(cacheDir, StampFileName))
 		return jarPath, nil
 	}
 
@@ -344,6 +445,10 @@ func extractBrowserLoginCookies(ctx context.Context, cacheDir, ytdlpBin, spec st
 	defer os.Remove(rawPath)
 
 	if err := rawFile.Chmod(0o600); err != nil {
+		_ = rawFile.Close()
+		return nil, err
+	}
+	if _, err := rawFile.WriteString(netscapeCookieHeader); err != nil {
 		_ = rawFile.Close()
 		return nil, err
 	}

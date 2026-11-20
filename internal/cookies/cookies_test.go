@@ -186,11 +186,12 @@ func TestWritePrivateTempAndForget(t *testing.T) {
 			t.Fatalf("temp file content = %q, want %q", string(gotBytes), string(payload))
 		}
 
-		// Create cookies.txt, cookies.none, and an unrelated file.
+		// Create cookies.txt, cookies.none, cookies.stamp, and an unrelated file.
 		cookiesTxt := filepath.Join(dir, "cookies.txt")
 		cookiesNone := filepath.Join(dir, "cookies.none")
+		cookiesStamp := filepath.Join(dir, StampFileName)
 		unrelated := filepath.Join(dir, "keep.txt")
-		for _, p := range []string{cookiesTxt, cookiesNone, unrelated} {
+		for _, p := range []string{cookiesTxt, cookiesNone, cookiesStamp, unrelated} {
 			if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
 				t.Fatalf("os.WriteFile(%q) error = %v", p, err)
 			}
@@ -200,7 +201,7 @@ func TestWritePrivateTempAndForget(t *testing.T) {
 			t.Fatalf("Forget() error = %v", err)
 		}
 
-		for _, removed := range []string{tmpPath, cookiesTxt, cookiesNone} {
+		for _, removed := range []string{tmpPath, cookiesTxt, cookiesNone, cookiesStamp} {
 			if _, err := os.Stat(removed); !os.IsNotExist(err) {
 				t.Fatalf("expected %q to be removed, stat err = %v", removed, err)
 			}
@@ -288,6 +289,97 @@ func TestDetectFirefoxProfile(t *testing.T) {
 		if got := DetectFirefoxProfile(base); got != "" {
 			t.Fatalf("DetectFirefoxProfile() = %q, want empty", got)
 		}
+	})
+
+	t.Run("profiles.ini Install section Default overrides earlier default-release and Profile0", func(t *testing.T) {
+		t.Parallel()
+		base := t.TempDir()
+		mkProfile(t, base, "aaa.default-release", true)
+		mkProfile(t, base, "bbb.Default", true)
+		want := mkProfile(t, base, "custom-zen-profile", true)
+
+		ini := strings.Join([]string{
+			"# Zen browser profiles.ini",
+			"; comment line",
+			"[Profile0]",
+			"Name=Default",
+			"IsRelative=1",
+			"Path=bbb.Default",
+			"Default=1",
+			"",
+			"[Install1234ABCD]",
+			"Default=custom-zen-profile",
+			"Locked=1",
+		}, "\n") + "\n"
+		if err := os.WriteFile(filepath.Join(base, "profiles.ini"), []byte(ini), 0o600); err != nil {
+			t.Fatalf("WriteFile(profiles.ini) error = %v", err)
+		}
+
+		if got := DetectFirefoxProfile(base); got != want {
+			t.Fatalf("DetectFirefoxProfile() = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("profiles.ini Profile0 Default=1 resolves IsRelative=1, IsRelative=0, and falls back to glob", func(t *testing.T) {
+		t.Parallel()
+
+		t.Run("IsRelative=1", func(t *testing.T) {
+			t.Parallel()
+			base := t.TempDir()
+			mkProfile(t, base, "aaa.default-release", true)
+			want := mkProfile(t, base, "rel-profile", true)
+
+			ini := "[Profile0]\nName=Work\nIsRelative=1\nPath=rel-profile\nDefault=1\n"
+			if err := os.WriteFile(filepath.Join(base, "profiles.ini"), []byte(ini), 0o600); err != nil {
+				t.Fatalf("WriteFile(profiles.ini) error = %v", err)
+			}
+
+			if got := DetectFirefoxProfile(base); got != want {
+				t.Fatalf("DetectFirefoxProfile() = %q, want %q", got, want)
+			}
+		})
+
+		t.Run("IsRelative=0", func(t *testing.T) {
+			t.Parallel()
+			base := t.TempDir()
+			mkProfile(t, base, "aaa.default-release", true)
+			extBase := t.TempDir()
+			want := mkProfile(t, extBase, "abs-profile", true)
+
+			ini := fmt.Sprintf("[Profile0]\nName=Abs\nIsRelative=0\nPath=%s\nDefault=1\n", want)
+			if err := os.WriteFile(filepath.Join(base, "profiles.ini"), []byte(ini), 0o600); err != nil {
+				t.Fatalf("WriteFile(profiles.ini) error = %v", err)
+			}
+
+			if got := DetectFirefoxProfile(base); got != want {
+				t.Fatalf("DetectFirefoxProfile() = %q, want %q", got, want)
+			}
+		})
+
+		t.Run("falls back to glob when profiles.ini target lacks cookies.sqlite", func(t *testing.T) {
+			t.Parallel()
+			base := t.TempDir()
+			mkProfile(t, base, "empty-install-prof", false)
+			mkProfile(t, base, "empty-default-prof", false)
+			want := mkProfile(t, base, "fallback.default-release", true)
+
+			ini := strings.Join([]string{
+				"[InstallABCD]",
+				"Default=empty-install-prof",
+				"",
+				"[Profile0]",
+				"IsRelative=1",
+				"Path=empty-default-prof",
+				"Default=1",
+			}, "\n") + "\n"
+			if err := os.WriteFile(filepath.Join(base, "profiles.ini"), []byte(ini), 0o600); err != nil {
+				t.Fatalf("WriteFile(profiles.ini) error = %v", err)
+			}
+
+			if got := DetectFirefoxProfile(base); got != want {
+				t.Fatalf("DetectFirefoxProfile() = %q, want %q", got, want)
+			}
+		})
 	})
 }
 
@@ -609,8 +701,19 @@ COOKIES
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(entries) != 1 || entries[0].Name() != "cookies.txt" {
-			t.Fatalf("unexpected files left in cacheDir: %+v", entries)
+		var names []string
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		if !slices.Equal(names, []string{StampFileName, "cookies.txt"}) {
+			t.Fatalf("unexpected files left in cacheDir: %v, want [%s cookies.txt]", names, StampFileName)
+		}
+		stampInfo, err := os.Stat(filepath.Join(cacheDir, StampFileName))
+		if err != nil {
+			t.Fatalf("Stat(%q) error = %v", StampFileName, err)
+		}
+		if perm := stampInfo.Mode().Perm(); perm != 0o600 {
+			t.Fatalf("%s perm = %o, want 0600", StampFileName, perm)
 		}
 
 		loggedBytes, err := os.ReadFile(argsLog)
@@ -745,6 +848,54 @@ printf '.youtube.com\tTRUE\t/\tTRUE\t0\tPREF\tguest\n' > "$raw"
 		}
 		if !refreshedInfo.ModTime().After(old) {
 			t.Fatalf("cookies.none mtime = %v, want after %v", refreshedInfo.ModTime(), old)
+		}
+	})
+
+	t.Run("pre-populates raw cookie file with Netscape header for real yt-dlp validation", func(t *testing.T) {
+		t.Parallel()
+		tmp := t.TempDir()
+		cacheDir := filepath.Join(tmp, "cache")
+		script := `
+raw=""
+while [ $# -gt 0 ]; do
+	case "$1" in
+		--cookies) raw="$2"; shift 2 ;;
+		*) shift ;;
+	esac
+done
+if ! test -f "$raw" || ! head -n1 "$raw" | grep -q '^# Netscape HTTP Cookie File'; then
+	printf "ERROR: '%s' does not look like a Netscape format cookies file\n" "$raw" >&2
+	exit 1
+fi
+cat >> "$raw" <<'COOKIES'
+.youtube.com	TRUE	/	TRUE	1893456000	LOGIN_INFO	netscape-validated
+COOKIES
+`
+		bin := writeFakeYTDLP(t, tmp, script)
+
+		jarPath, err := RefreshJarFromBrowsers(context.Background(), cacheDir, bin, []string{"firefox:/prof"})
+		if err != nil {
+			t.Fatalf("RefreshJarFromBrowsers() error = %v", err)
+		}
+		wantJar := filepath.Join(cacheDir, "cookies.txt")
+		if jarPath != wantJar {
+			t.Fatalf("jarPath = %q, want %q", jarPath, wantJar)
+		}
+
+		info, err := os.Stat(jarPath)
+		if err != nil {
+			t.Fatalf("Stat(%q) error = %v", jarPath, err)
+		}
+		if perm := info.Mode().Perm(); perm != 0o600 {
+			t.Fatalf("cookies.txt perm = %o, want 0600", perm)
+		}
+
+		data, err := os.ReadFile(jarPath)
+		if err != nil {
+			t.Fatalf("ReadFile(%q) error = %v", jarPath, err)
+		}
+		if !strings.Contains(string(data), "LOGIN_INFO\tnetscape-validated") {
+			t.Fatalf("cookies.txt missing expected LOGIN_INFO cookie: %s", string(data))
 		}
 	})
 
