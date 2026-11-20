@@ -333,6 +333,7 @@ run_elevated() {
     "$@"
   elif command -v sudo >/dev/null 2>&1; then
     if [ -c /dev/tty ] && { true </dev/tty; } 2>/dev/null; then
+      # shellcheck disable=SC2024
       sudo "$@" </dev/tty
     else
       sudo "$@"
