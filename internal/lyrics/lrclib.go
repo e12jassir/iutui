@@ -22,6 +22,12 @@ const (
 	defaultUserAgent = "iutui/0.4"
 	defaultTimeout   = 4 * time.Second
 	maxResponseBytes = 4 << 20
+
+	SourceAuto       = ""
+	SourceLRCLib     = "lrclib"
+	SourceYouTube    = "youtube"
+	SourceYouTubeCC  = "youtube-cc"
+	SourceYouTubeASR = "youtube-asr"
 )
 
 // ErrNotFound is returned when LRCLib has no synced or plain lyrics for a track.
@@ -37,11 +43,22 @@ type Line struct {
 
 // TrackLyrics contains parsed synced and/or plain lyrics for a track.
 type TrackLyrics struct {
-	Synced     []Line
-	Plain      []string
-	TrackName  string
-	ArtistName string
-	Source     string
+	Synced       []Line
+	Plain        []string
+	TrackName    string
+	ArtistName   string
+	Source       string
+	Duration     float64
+	HasAlternate bool
+	AltSource    string
+	Language     string
+}
+
+// FetchOptions configures source preference, target duration matching, and caption language.
+type FetchOptions struct {
+	Duration     float64
+	PreferSource string
+	Lang         string
 }
 
 type cacheEntry struct {
@@ -49,39 +66,185 @@ type cacheEntry struct {
 	err    error
 }
 
-// Client fetches and caches synced and plain lyrics from LRCLib.
+// Client fetches and caches synced and plain lyrics from LRCLib and YouTube captions.
 type Client struct {
-	BaseURL   string
-	HTTP      *http.Client
-	UserAgent string
+	BaseURL            string
+	HTTP               *http.Client
+	UserAgent          string
+	YouTubeEndpointURL string
+	CacheDir           string
 
-	mu    sync.RWMutex
-	cache map[string]cacheEntry
+	mu      sync.RWMutex
+	cache   map[string]cacheEntry
+	ytCache map[string]cacheEntry
+
+	offsetsMu     sync.Mutex
+	offsetsLoaded bool
+	offsets       map[string]float64
 }
 
 // NewClient constructs a Client configured for lrclib.net with a 4s timeout and
-// an initialized in-memory cache.
+// initialized in-memory caches. YouTube captions remain disabled until EnableYouTubeCaptions is called.
 func NewClient() *Client {
 	return &Client{
 		BaseURL:   defaultBaseURL,
 		HTTP:      &http.Client{Timeout: defaultTimeout},
 		UserAgent: defaultUserAgent,
 		cache:     make(map[string]cacheEntry),
+		ytCache:   make(map[string]cacheEntry),
+		offsets:   make(map[string]float64),
 	}
 }
 
+// EnableYouTubeCaptions enables pure-Go YouTube InnerTube caption fetching and
+// configures cacheDir for persisting per-video sync offsets.
+func (c *Client) EnableYouTubeCaptions(cacheDir string) {
+	if c == nil {
+		return
+	}
+	c.YouTubeEndpointURL = defaultYouTubePlayerURL
+	c.CacheDir = strings.TrimSpace(cacheDir)
+}
+
 type lrclibSearchItem struct {
-	TrackName    string `json:"trackName"`
-	Name         string `json:"name"`
-	ArtistName   string `json:"artistName"`
-	SyncedLyrics string `json:"syncedLyrics"`
-	PlainLyrics  string `json:"plainLyrics"`
+	TrackName    string  `json:"trackName"`
+	Name         string  `json:"name"`
+	ArtistName   string  `json:"artistName"`
+	Duration     float64 `json:"duration"`
+	SyncedLyrics string  `json:"syncedLyrics"`
+	PlainLyrics  string  `json:"plainLyrics"`
 }
 
 // Fetch retrieves lyrics for a track from cache or LRCLib's /api/search endpoint.
 // Synced lyrics are preferred over plain lyrics. Empty/404 misses are cached to
 // avoid redundant network calls.
 func (c *Client) Fetch(ctx context.Context, videoID, title, channel string) (TrackLyrics, error) {
+	return c.fetchLRCLib(ctx, videoID, title, channel, 0)
+}
+
+// FetchWithOptions retrieves lyrics concurrently from LRCLib and YouTube captions
+// (when enabled and videoID is valid), ranking candidates by duration and source preference.
+func (c *Client) FetchWithOptions(ctx context.Context, videoID, title, channel string, opts FetchOptions) (TrackLyrics, error) {
+	if c == nil {
+		return TrackLyrics{}, errors.New("lyrics: nil client")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return TrackLyrics{}, err
+	}
+
+	ytEndpoint := strings.TrimSpace(c.YouTubeEndpointURL)
+	if ytEndpoint == "" || !isValidYouTubeVideoID(videoID) {
+		return c.fetchLRCLib(ctx, videoID, title, channel, opts.Duration)
+	}
+
+	switch opts.PreferSource {
+	case SourceLRCLib:
+		lrc, err := c.fetchLRCLib(ctx, videoID, title, channel, opts.Duration)
+		if err != nil {
+			return TrackLyrics{}, err
+		}
+		if c.hasValidYTCache(videoID) {
+			lrc.HasAlternate = true
+			lrc.AltSource = SourceYouTube
+		}
+		return cloneTrackLyrics(lrc), nil
+
+	case SourceYouTube:
+		yt, err := c.fetchYouTubeCached(ctx, ytEndpoint, videoID, opts.Lang)
+		if err != nil {
+			return TrackLyrics{}, err
+		}
+		if c.hasValidLRCCache(videoID, title, channel, opts.Duration) {
+			yt.HasAlternate = true
+			yt.AltSource = SourceLRCLib
+		}
+		return cloneTrackLyrics(yt), nil
+	}
+
+	var (
+		wg     sync.WaitGroup
+		lrc    TrackLyrics
+		lrcErr error
+		yt     TrackLyrics
+		ytErr  error
+	)
+
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		lrc, lrcErr = c.fetchLRCLib(ctx, videoID, title, channel, opts.Duration)
+	}()
+	go func() {
+		defer wg.Done()
+		yt, ytErr = c.fetchYouTubeCached(ctx, ytEndpoint, videoID, opts.Lang)
+	}()
+	wg.Wait()
+
+	hasLRC := lrcErr == nil && (len(lrc.Synced) > 0 || len(lrc.Plain) > 0)
+	hasLRCSynced := lrcErr == nil && len(lrc.Synced) > 0
+	hasYT := ytErr == nil && len(yt.Synced) > 0
+	ytManual := hasYT && yt.Source == SourceYouTubeCC
+
+	lrcDurDiff := -1.0
+	if opts.Duration > 0 && lrc.Duration > 0 {
+		lrcDurDiff = math.Abs(lrc.Duration - opts.Duration)
+	}
+
+	var winner TrackLyrics
+	switch {
+	case hasYT && opts.Duration > 600:
+		winner = yt
+		if hasLRC {
+			winner.HasAlternate = true
+			winner.AltSource = SourceLRCLib
+		}
+	case hasLRCSynced && (lrcDurDiff < 0 || lrcDurDiff <= 6.0):
+		winner = lrc
+		if hasYT {
+			winner.HasAlternate = true
+			winner.AltSource = SourceYouTube
+		}
+	case ytManual:
+		winner = yt
+		if hasLRC {
+			winner.HasAlternate = true
+			winner.AltSource = SourceLRCLib
+		}
+	case hasLRCSynced && lrcDurDiff <= 25.0:
+		winner = lrc
+		if hasYT {
+			winner.HasAlternate = true
+			winner.AltSource = SourceYouTube
+		}
+	case hasYT:
+		winner = yt
+		if hasLRC {
+			winner.HasAlternate = true
+			winner.AltSource = SourceLRCLib
+		}
+	case hasLRC:
+		winner = lrc
+		if hasYT {
+			winner.HasAlternate = true
+			winner.AltSource = SourceYouTube
+		}
+	default:
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return TrackLyrics{}, ctxErr
+		}
+		if lrcErr != nil && !errors.Is(lrcErr, ErrNotFound) {
+			return TrackLyrics{}, lrcErr
+		}
+		return TrackLyrics{}, ErrNotFound
+	}
+
+	return cloneTrackLyrics(winner), nil
+}
+
+func (c *Client) fetchLRCLib(ctx context.Context, videoID, title, channel string, targetDuration float64) (TrackLyrics, error) {
 	if c == nil {
 		return TrackLyrics{}, errors.New("lyrics: nil client")
 	}
@@ -93,10 +256,11 @@ func (c *Client) Fetch(ctx context.Context, videoID, title, channel string) (Tra
 	}
 
 	query := CleanQuery(title, channel)
-	cacheKey, ok := buildCacheKey(videoID, query)
+	baseKey, ok := buildCacheKey(videoID, query)
 	if !ok {
 		return TrackLyrics{}, ErrNotFound
 	}
+	cacheKey := buildDurationCacheKey(baseKey, targetDuration)
 
 	if entry, hit := c.getCached(cacheKey); hit {
 		return cloneTrackLyrics(entry.lyrics), entry.err
@@ -119,13 +283,13 @@ func (c *Client) Fetch(ctx context.Context, videoID, title, channel string) (Tra
 		httpClient = defaultHTTPClient
 	}
 
-	lyrics, found, statusNotFound, err := c.searchOnce(ctx, baseURL, ua, httpClient, query)
+	lyrics, found, statusNotFound, err := c.searchOnce(ctx, baseURL, ua, httpClient, query, targetDuration)
 	if err != nil {
 		return TrackLyrics{}, err
 	}
 	fb := FallbackQuery(title, channel)
 	if (!found || len(lyrics.Synced) == 0) && fb != "" && !strings.EqualFold(fb, query) {
-		fbLyrics, fbFound, _, fbErr := c.searchOnce(ctx, baseURL, ua, httpClient, fb)
+		fbLyrics, fbFound, _, fbErr := c.searchOnce(ctx, baseURL, ua, httpClient, fb, targetDuration)
 		if fbErr != nil && !found {
 			return TrackLyrics{}, fbErr
 		}
@@ -136,7 +300,7 @@ func (c *Client) Fetch(ctx context.Context, videoID, title, channel string) (Tra
 	}
 	if !found {
 		if core := CoreQuery(title, channel); core != "" && !strings.EqualFold(core, query) && !strings.EqualFold(core, fb) {
-			coreLyrics, coreFound, _, coreErr := c.searchOnce(ctx, baseURL, ua, httpClient, core)
+			coreLyrics, coreFound, _, coreErr := c.searchOnce(ctx, baseURL, ua, httpClient, core, targetDuration)
 			if coreErr != nil {
 				return TrackLyrics{}, coreErr
 			}
@@ -156,7 +320,30 @@ func (c *Client) Fetch(ctx context.Context, videoID, title, channel string) (Tra
 	return cloneTrackLyrics(lyrics), nil
 }
 
-func (c *Client) searchOnce(ctx context.Context, baseURL, ua string, httpClient *http.Client, query string) (TrackLyrics, bool, bool, error) {
+func (c *Client) fetchYouTubeCached(ctx context.Context, endpoint, videoID, prefLang string) (TrackLyrics, error) {
+	ytKey := "yt:" + strings.TrimSpace(videoID)
+	if entry, hit := c.getYTCached(ytKey); hit {
+		return cloneTrackLyrics(entry.lyrics), entry.err
+	}
+
+	httpClient := c.HTTP
+	if httpClient == nil {
+		httpClient = defaultHTTPClient
+	}
+
+	lyrics, err := FetchYouTubeCaptions(ctx, httpClient, endpoint, strings.TrimSpace(videoID), prefLang)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			c.setYTCached(ytKey, cacheEntry{err: ErrNotFound})
+		}
+		return TrackLyrics{}, err
+	}
+
+	c.setYTCached(ytKey, cacheEntry{lyrics: cloneTrackLyrics(lyrics)})
+	return cloneTrackLyrics(lyrics), nil
+}
+
+func (c *Client) searchOnce(ctx context.Context, baseURL, ua string, httpClient *http.Client, query string, targetDuration float64) (TrackLyrics, bool, bool, error) {
 	searchURL := baseURL + "/api/search?q=" + url.QueryEscape(query)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, searchURL, nil)
 	if err != nil {
@@ -194,7 +381,7 @@ func (c *Client) searchOnce(ctx context.Context, baseURL, ua string, httpClient 
 		return TrackLyrics{}, false, false, fmt.Errorf("lyrics: decode response: %w", err)
 	}
 
-	lyrics, found := selectBestLyrics(items)
+	lyrics, found := selectBestLyricsForDuration(items, targetDuration)
 	return lyrics, found, false, nil
 }
 
@@ -217,6 +404,60 @@ func (c *Client) setCached(key string, entry cacheEntry) {
 	c.cache[key] = entry
 }
 
+func (c *Client) getYTCached(key string) (cacheEntry, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.ytCache == nil {
+		return cacheEntry{}, false
+	}
+	entry, ok := c.ytCache[key]
+	return entry, ok
+}
+
+func (c *Client) setYTCached(key string, entry cacheEntry) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.ytCache == nil {
+		c.ytCache = make(map[string]cacheEntry)
+	}
+	c.ytCache[key] = entry
+}
+
+func (c *Client) hasValidYTCache(videoID string) bool {
+	entry, ok := c.getYTCached("yt:" + strings.TrimSpace(videoID))
+	return ok && entry.err == nil && len(entry.lyrics.Synced) > 0
+}
+
+func (c *Client) hasValidLRCCache(videoID, title, channel string, duration float64) bool {
+	baseKey, ok := buildCacheKey(videoID, CleanQuery(title, channel))
+	if !ok {
+		return false
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.cache == nil {
+		return false
+	}
+	isValid := func(e cacheEntry) bool {
+		return e.err == nil && (len(e.lyrics.Synced) > 0 || len(e.lyrics.Plain) > 0)
+	}
+	if duration > 0 {
+		if entry, hit := c.cache[buildDurationCacheKey(baseKey, duration)]; hit && isValid(entry) {
+			return true
+		}
+	}
+	if entry, hit := c.cache[baseKey]; hit && isValid(entry) {
+		return true
+	}
+	prefix := baseKey + "@dur:"
+	for k, entry := range c.cache {
+		if strings.HasPrefix(k, prefix) && isValid(entry) {
+			return true
+		}
+	}
+	return false
+}
+
 func buildCacheKey(videoID, cleanedQuery string) (string, bool) {
 	if vid := strings.TrimSpace(videoID); vid != "" {
 		return "id:" + vid, true
@@ -225,6 +466,13 @@ func buildCacheKey(videoID, cleanedQuery string) (string, bool) {
 		return "q:" + q, true
 	}
 	return "", false
+}
+
+func buildDurationCacheKey(baseKey string, targetDuration float64) string {
+	if targetDuration <= 0 {
+		return baseKey
+	}
+	return fmt.Sprintf("%s@dur:%d", baseKey, int(math.Round(targetDuration)))
 }
 
 func cloneTrackLyrics(in TrackLyrics) TrackLyrics {
@@ -241,30 +489,84 @@ func cloneTrackLyrics(in TrackLyrics) TrackLyrics {
 }
 
 func selectBestLyrics(items []lrclibSearchItem) (TrackLyrics, bool) {
+	return selectBestLyricsForDuration(items, 0)
+}
+
+func selectBestLyricsForDuration(items []lrclibSearchItem, targetDuration float64) (TrackLyrics, bool) {
+	var bestSynced TrackLyrics
+	var bestSyncedDur float64
+	hasSynced := false
+
 	for _, item := range items {
-		if synced := ParseLRC(item.SyncedLyrics); len(synced) > 0 {
-			return TrackLyrics{
+		synced := ParseLRC(item.SyncedLyrics)
+		if len(synced) == 0 {
+			continue
+		}
+		if !hasSynced || isBetterDurationCandidate(item.Duration, bestSyncedDur, targetDuration) {
+			bestSynced = TrackLyrics{
 				Synced:     synced,
 				Plain:      splitNonEmptyLines(item.PlainLyrics),
 				TrackName:  firstNonEmpty(item.TrackName, item.Name),
 				ArtistName: strings.TrimSpace(item.ArtistName),
-				Source:     "lrclib",
-			}, true
+				Source:     SourceLRCLib,
+				Duration:   item.Duration,
+			}
+			bestSyncedDur = item.Duration
+			hasSynced = true
+			if targetDuration <= 0 {
+				return bestSynced, true
+			}
 		}
 	}
+	if hasSynced {
+		return bestSynced, true
+	}
+
+	var bestPlain TrackLyrics
+	var bestPlainDur float64
+	hasPlain := false
 
 	for _, item := range items {
-		if plain := splitNonEmptyLines(item.PlainLyrics); len(plain) > 0 {
-			return TrackLyrics{
+		plain := splitNonEmptyLines(item.PlainLyrics)
+		if len(plain) == 0 {
+			continue
+		}
+		if !hasPlain || isBetterDurationCandidate(item.Duration, bestPlainDur, targetDuration) {
+			bestPlain = TrackLyrics{
 				Plain:      plain,
 				TrackName:  firstNonEmpty(item.TrackName, item.Name),
 				ArtistName: strings.TrimSpace(item.ArtistName),
-				Source:     "lrclib",
-			}, true
+				Source:     SourceLRCLib,
+				Duration:   item.Duration,
+			}
+			bestPlainDur = item.Duration
+			hasPlain = true
+			if targetDuration <= 0 {
+				return bestPlain, true
+			}
 		}
+	}
+	if hasPlain {
+		return bestPlain, true
 	}
 
 	return TrackLyrics{}, false
+}
+
+func isBetterDurationCandidate(candDur, bestDur, targetDuration float64) bool {
+	if targetDuration <= 0 {
+		return false
+	}
+	if candDur > 0 && bestDur <= 0 {
+		return true
+	}
+	if candDur <= 0 && bestDur > 0 {
+		return false
+	}
+	if candDur <= 0 && bestDur <= 0 {
+		return false
+	}
+	return math.Abs(candDur-targetDuration) < math.Abs(bestDur-targetDuration)
 }
 
 func firstNonEmpty(values ...string) string {

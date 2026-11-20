@@ -459,3 +459,289 @@ func TestClientFetch_UpgradesUnsyncedAndCoreQuery(t *testing.T) {
 		t.Fatalf("expected 2 search calls (unsynced primary -> synced fallback), got %d", calls)
 	}
 }
+
+func TestNewClient_BackwardCompatible(t *testing.T) {
+	c := NewClient()
+	if c.YouTubeEndpointURL != "" {
+		t.Fatalf("NewClient().YouTubeEndpointURL = %q, want empty", c.YouTubeEndpointURL)
+	}
+	if c.CacheDir != "" {
+		t.Fatalf("NewClient().CacheDir = %q, want empty", c.CacheDir)
+	}
+}
+
+func TestSelectBestLyricsForDuration(t *testing.T) {
+	items := []lrclibSearchItem{
+		{
+			TrackName:    "Song Unknown Dur",
+			ArtistName:   "Artist",
+			Duration:     0,
+			SyncedLyrics: "[00:01.00] Unknown dur",
+		},
+		{
+			TrackName:    "Song Radio Edit",
+			ArtistName:   "Artist",
+			Duration:     180,
+			SyncedLyrics: "[00:01.00] Radio edit",
+		},
+		{
+			TrackName:    "Song Live Version",
+			ArtistName:   "Artist",
+			Duration:     245,
+			SyncedLyrics: "[00:01.00] Live version",
+		},
+		{
+			TrackName:    "Song Tie Second",
+			ArtistName:   "Artist",
+			Duration:     245,
+			SyncedLyrics: "[00:01.00] Tie second",
+		},
+	}
+
+	// targetDuration <= 0 preserves first-match behavior while recording Duration.
+	gotZero, ok := selectBestLyricsForDuration(items, 0)
+	if !ok || gotZero.TrackName != "Song Unknown Dur" || gotZero.Duration != 0 {
+		t.Fatalf("targetDuration=0 got %+v (ok=%v), want Song Unknown Dur", gotZero, ok)
+	}
+
+	// targetDuration > 0 prefers Duration > 0 over Duration == 0 and picks closest, tie-breaking earlier.
+	got245, ok := selectBestLyricsForDuration(items, 244)
+	if !ok || got245.TrackName != "Song Live Version" || got245.Duration != 245 {
+		t.Fatalf("targetDuration=244 got %+v (ok=%v), want Song Live Version", got245, ok)
+	}
+
+	// Plain fallback also ranks by duration.
+	plainItems := []lrclibSearchItem{
+		{TrackName: "Plain Unknown", Duration: 0, PlainLyrics: "line 1"},
+		{TrackName: "Plain Far", Duration: 400, PlainLyrics: "line 2"},
+		{TrackName: "Plain Close", Duration: 205, PlainLyrics: "line 3"},
+	}
+	gotPlain, ok := selectBestLyricsForDuration(plainItems, 200)
+	if !ok || gotPlain.TrackName != "Plain Close" || gotPlain.Duration != 205 {
+		t.Fatalf("plain targetDuration=200 got %+v (ok=%v), want Plain Close", gotPlain, ok)
+	}
+}
+
+func TestClientFetchWithOptions_DurationAndSourceRanking(t *testing.T) {
+	t.Run("long-form >600s prefers YouTube captions over close LRCLib", func(t *testing.T) {
+		lrcSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{
+					"trackName":    "Long Mix",
+					"artistName":   "DJ",
+					"duration":     900,
+					"syncedLyrics": "[00:05.00] LRCLib line",
+				},
+			})
+		}))
+		defer lrcSrv.Close()
+
+		var ytSrv *httptest.Server
+		ytSrv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/player" {
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"videoDetails": map[string]any{"title": "Long Mix", "author": "DJ"},
+					"captions": map[string]any{
+						"playerCaptionsTracklistRenderer": map[string]any{
+							"captionTracks": []map[string]any{
+								{"baseUrl": ytSrv.URL + "/tt", "languageCode": "es", "kind": "asr"},
+							},
+						},
+					},
+				})
+				return
+			}
+			_, _ = w.Write([]byte(`{"events":[{"tStartMs":1000,"segs":[{"utf8":"YT long-form line"}]}]}`))
+		}))
+		defer ytSrv.Close()
+
+		c := NewClient()
+		c.BaseURL = lrcSrv.URL
+		c.YouTubeEndpointURL = ytSrv.URL + "/player"
+
+		got, err := c.FetchWithOptions(context.Background(), "longvid1234", "Long Mix", "DJ", FetchOptions{
+			Duration: 902,
+		})
+		if err != nil {
+			t.Fatalf("FetchWithOptions error: %v", err)
+		}
+		if got.Source != SourceYouTubeASR || !got.HasAlternate || got.AltSource != SourceLRCLib {
+			t.Fatalf("expected YT winner with LRCLib alternate, got %+v", got)
+		}
+	})
+
+	t.Run("short track prefers LRCLib within 6s and toggles PreferSource cleanly", func(t *testing.T) {
+		var lrcCalls, ytCalls atomic.Int32
+		lrcSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			lrcCalls.Add(1)
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{
+					"trackName":    "Radio Track",
+					"artistName":   "Band",
+					"duration":     210,
+					"syncedLyrics": "[00:05.00] LRCLib synced",
+				},
+			})
+		}))
+		defer lrcSrv.Close()
+
+		var ytSrv *httptest.Server
+		ytSrv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/player" {
+				ytCalls.Add(1)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"videoDetails": map[string]any{"title": "Radio Track", "author": "Band"},
+					"captions": map[string]any{
+						"playerCaptionsTracklistRenderer": map[string]any{
+							"captionTracks": []map[string]any{
+								{"baseUrl": ytSrv.URL + "/tt", "languageCode": "es", "kind": ""},
+							},
+						},
+					},
+				})
+				return
+			}
+			_, _ = w.Write([]byte(`{"events":[{"tStartMs":1000,"segs":[{"utf8":"YT manual CC"}]}]}`))
+		}))
+		defer ytSrv.Close()
+
+		c := NewClient()
+		c.BaseURL = lrcSrv.URL
+		c.YouTubeEndpointURL = ytSrv.URL + "/player"
+
+		got, err := c.FetchWithOptions(context.Background(), "shortvid123", "Radio Track", "Band", FetchOptions{
+			Duration: 213,
+		})
+		if err != nil {
+			t.Fatalf("FetchWithOptions error: %v", err)
+		}
+		if got.Source != SourceLRCLib || !got.HasAlternate || got.AltSource != SourceYouTube {
+			t.Fatalf("expected LRCLib winner with YouTube alternate, got %+v", got)
+		}
+
+		// Toggle to YouTube using cached entries.
+		gotYT, err := c.FetchWithOptions(context.Background(), "shortvid123", "Radio Track", "Band", FetchOptions{
+			Duration:     213,
+			PreferSource: SourceYouTube,
+		})
+		if err != nil {
+			t.Fatalf("PreferSource=YouTube error: %v", err)
+		}
+		if gotYT.Source != SourceYouTubeCC || !gotYT.HasAlternate || gotYT.AltSource != SourceLRCLib {
+			t.Fatalf("expected YouTubeCC with LRCLib alternate, got %+v", gotYT)
+		}
+
+		// Toggle back to LRCLib using cached entries.
+		gotLRC, err := c.FetchWithOptions(context.Background(), "shortvid123", "Radio Track", "Band", FetchOptions{
+			Duration:     213,
+			PreferSource: SourceLRCLib,
+		})
+		if err != nil {
+			t.Fatalf("PreferSource=LRCLib error: %v", err)
+		}
+		if gotLRC.Source != SourceLRCLib || !gotLRC.HasAlternate || gotLRC.AltSource != SourceYouTube {
+			t.Fatalf("expected LRCLib with YouTube alternate, got %+v", gotLRC)
+		}
+		if lrcCalls.Load() != 1 || ytCalls.Load() != 1 {
+			t.Fatalf("expected separate caches to prevent extra calls (lrc=%d, yt=%d)", lrcCalls.Load(), ytCalls.Load())
+		}
+	})
+
+	t.Run("mid duration diff 6s-25s yields to manual CC but beats ASR", func(t *testing.T) {
+		lrcSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{
+					"trackName":    "Mid Diff",
+					"artistName":   "Artist",
+					"duration":     215,
+					"syncedLyrics": "[00:05.00] LRCLib synced",
+				},
+			})
+		}))
+		defer lrcSrv.Close()
+
+		var kind atomic.Value
+		kind.Store("")
+		var ytSrv *httptest.Server
+		ytSrv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/player" {
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"videoDetails": map[string]any{"title": "Mid Diff", "author": "Artist"},
+					"captions": map[string]any{
+						"playerCaptionsTracklistRenderer": map[string]any{
+							"captionTracks": []map[string]any{
+								{"baseUrl": ytSrv.URL + "/tt", "languageCode": "es", "kind": kind.Load().(string)},
+							},
+						},
+					},
+				})
+				return
+			}
+			_, _ = w.Write([]byte(`{"events":[{"tStartMs":1000,"segs":[{"utf8":"YT line"}]}]}`))
+		}))
+		defer ytSrv.Close()
+
+		// With manual CC and diff=15s (<=25, >6), YT manual wins.
+		c1 := NewClient()
+		c1.BaseURL = lrcSrv.URL
+		c1.YouTubeEndpointURL = ytSrv.URL + "/player"
+		got1, err := c1.FetchWithOptions(context.Background(), "midvid00001", "Mid Diff", "Artist", FetchOptions{Duration: 200})
+		if err != nil {
+			t.Fatalf("got1 err: %v", err)
+		}
+		if got1.Source != SourceYouTubeCC || !got1.HasAlternate || got1.AltSource != SourceLRCLib {
+			t.Fatalf("expected YT manual CC to beat 15s-diff LRCLib, got %+v", got1)
+		}
+
+		// With ASR and diff=15s (<=25), LRCLib wins.
+		kind.Store("asr")
+		c2 := NewClient()
+		c2.BaseURL = lrcSrv.URL
+		c2.YouTubeEndpointURL = ytSrv.URL + "/player"
+		got2, err := c2.FetchWithOptions(context.Background(), "midvid00002", "Mid Diff", "Artist", FetchOptions{Duration: 200})
+		if err != nil {
+			t.Fatalf("got2 err: %v", err)
+		}
+		if got2.Source != SourceLRCLib || !got2.HasAlternate || got2.AltSource != SourceYouTube {
+			t.Fatalf("expected 15s-diff LRCLib to beat YT ASR, got %+v", got2)
+		}
+	})
+
+	t.Run("missing LRCLib falls back to YouTube ASR", func(t *testing.T) {
+		lrcSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusNotFound)
+		}))
+		defer lrcSrv.Close()
+
+		var ytSrv *httptest.Server
+		ytSrv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/player" {
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"videoDetails": map[string]any{"title": "Talk", "author": "Channel"},
+					"captions": map[string]any{
+						"playerCaptionsTracklistRenderer": map[string]any{
+							"captionTracks": []map[string]any{
+								{"baseUrl": ytSrv.URL + "/tt", "languageCode": "es", "kind": "asr"},
+							},
+						},
+					},
+				})
+				return
+			}
+			_, _ = w.Write([]byte(`{"events":[{"tStartMs":500,"segs":[{"utf8":"Fallback ASR"}]}]}`))
+		}))
+		defer ytSrv.Close()
+
+		c := NewClient()
+		c.BaseURL = lrcSrv.URL
+		c.YouTubeEndpointURL = ytSrv.URL + "/player"
+
+		got, err := c.FetchWithOptions(context.Background(), "asrvideon01", "Talk", "Channel", FetchOptions{Duration: 180})
+		if err != nil {
+			t.Fatalf("FetchWithOptions error: %v", err)
+		}
+		if got.Source != SourceYouTubeASR || got.HasAlternate || got.AltSource != "" {
+			t.Fatalf("expected YT ASR without alternate, got %+v", got)
+		}
+	})
+}
