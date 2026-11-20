@@ -331,8 +331,10 @@ func (s *State) handleLeftClick(x, y int) (*State, tea.Cmd) {
 				return s, s.engineCmd(func(ctx context.Context) error { return s.Deps.Engine.AddVolume(ctx, -5) }, "Vol -5%")
 			case x >= 39 && x <= 44:
 				return s, s.engineCmd(func(ctx context.Context) error { return s.Deps.Engine.AddVolume(ctx, 5) }, "Vol +5%")
-			case x >= 46 && x <= 49:
-				return s.ToggleSaveSelected()
+			case x >= 46 && x <= 48:
+				return s.ToggleLikeActive()
+			case x >= 50 && x <= 52:
+				return s.ToggleSaveActive()
 			}
 		}
 		return s, nil
@@ -420,7 +422,7 @@ func (s *State) handleLeftClick(x, y int) (*State, tea.Cmd) {
 		if idx == s.ActiveListIndex() {
 			return s.PlaySelected("auto")
 		}
-		s.SetSelection(idx)
+		s.SelectVisible(idx)
 	}
 	return s, nil
 }

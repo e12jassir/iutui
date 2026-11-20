@@ -80,11 +80,11 @@ func (s *State) SettingsRows() []SettingRow {
 	case "kitty":
 		previewVal = "kitty (HD píxeles)"
 	case "chafa":
-		previewVal = "chafa (Bloques ANSI)"
+		previewVal = "chafa (Bloques ANSI nativos)"
 	case "none":
 		previewVal = "none (Solo texto)"
 	default:
-		previewVal = "auto (Ghostty / Kitty HD)"
+		previewVal = "auto (Kitty HD / Bloques ANSI)"
 	}
 
 	thumbQualVal := "max (Máxima HD)"

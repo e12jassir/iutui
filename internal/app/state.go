@@ -162,27 +162,30 @@ type State struct {
 	Toast   string
 	ToastID int
 
-	ShowHelp          bool
-	ShowSettings      bool
-	SettingsIdx       int
-	ShowQualityModal  bool
-	QualityIdx        int
-	ShowStillWatching bool
-	ShowChapters      bool
-	Chapters          []player.Chapter
-	ChapterIdx        int
-	ShowLyrics        bool
-	LyricsLoading     bool
-	Lyrics            lyrics.TrackLyrics
-	LyricsErr         string
-	LyricsTrack       string
-	LyricsScroll      int
-	ShowQueue         bool
-	QueueIdx          int
-	MPVPlaylist       []player.PlaylistItem
-	SearchSuggestions []string
-	SuggestIdx        int
-	DownloadProgress  map[string]download.Item
+	ShowHelp           bool
+	ShowSettings       bool
+	SettingsIdx        int
+	ShowQualityModal   bool
+	QualityIdx         int
+	ShowStillWatching  bool
+	ShowChapters       bool
+	Chapters           []player.Chapter
+	ChapterIdx         int
+	ShowLyrics         bool
+	LyricsLoading      bool
+	Lyrics             lyrics.TrackLyrics
+	LyricsErr          string
+	LyricsTrack        string
+	LyricsScroll       int
+	LyricsVideoID      string
+	LyricsOffset       float64
+	LyricsPreferSource string
+	ShowQueue          bool
+	QueueIdx           int
+	MPVPlaylist        []player.PlaylistItem
+	SearchSuggestions  []string
+	SuggestIdx         int
+	DownloadProgress   map[string]download.Item
 
 	Autoplay      bool
 	SponsorBlock  bool
@@ -450,6 +453,15 @@ func (s *State) VisibleItems() []model.Video {
 			}
 			items = filtered
 		}
+		if s.ActiveTab == model.TabMusic && s.HomeChip != 1 {
+			filtered := make([]model.Video, 0, len(items))
+			for _, v := range items {
+				if !v.IsLive {
+					filtered = append(filtered, v)
+				}
+			}
+			items = filtered
+		}
 		if s.Interleave {
 			items = interleaveByChannel(items)
 		}
@@ -679,20 +691,35 @@ func (s *State) syncScrollToSelection() {
 	}
 }
 
-// SetSelection updates the active cursor clamped to bounds.
+// SetSelection updates the active cursor clamped to bounds and syncs scroll.
 func (s *State) SetSelection(idx int) {
+	s.setSelection(idx, true)
+}
+
+// SelectVisible updates the active cursor clamped to bounds and prefetches without shifting scroll.
+func (s *State) SelectVisible(idx int) {
+	s.setSelection(idx, false)
+}
+
+func (s *State) setSelection(idx int, syncScroll bool) {
 	items := s.VisibleItems()
 	if len(items) == 0 {
 		switch s.View {
 		case ViewSearch:
 			s.ResultIdx = 0
-			s.ResultScroll = 0
+			if syncScroll {
+				s.ResultScroll = 0
+			}
 		case ViewChannel:
 			s.ChannelIdx = 0
-			s.ChannelScroll = 0
+			if syncScroll {
+				s.ChannelScroll = 0
+			}
 		default:
 			s.SelectedIdx = 0
-			s.ScrollOffset = 0
+			if syncScroll {
+				s.ScrollOffset = 0
+			}
 		}
 		return
 	}
@@ -710,7 +737,9 @@ func (s *State) SetSelection(idx int) {
 	default:
 		s.SelectedIdx = idx
 	}
-	s.syncScrollToSelection()
+	if syncScroll {
+		s.syncScrollToSelection()
+	}
 	if p, ok := s.Deps.Engine.(streamPrefetcher); ok {
 		p.Prefetch(items[idx])
 		if idx+1 < len(items) {

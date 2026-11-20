@@ -13,7 +13,7 @@ type Backend int
 const (
 	// BackendText renders deterministic text placeholder boxes.
 	BackendText Backend = iota
-	// BackendChafa renders thumbnails using chafa terminal graphics.
+	// BackendChafa renders thumbnails as native pure-Go 24-bit ANSI quadrant blocks (no external binary required).
 	BackendChafa
 	// BackendKitty renders thumbnails using the Kitty graphics protocol.
 	BackendKitty
@@ -51,22 +51,65 @@ type BrandRenderer interface {
 }
 
 // DetectBackend determines the thumbnail rendering backend from environment values.
-// Explicit ytPreviewEnv ("none", "text", "chafa", "kitty") takes precedence over
-// terminal auto-detection via kittyWinID, term, and termProgram.
+// Explicit ytPreviewEnv ("none", "text", "chafa", "ansi", "blocks", "kitty") takes
+// precedence over terminal auto-detection via kittyWinID, term, and termProgram.
 func DetectBackend(ytPreviewEnv, kittyWinID, term, termProgram string) Backend {
+	return DetectBackendEnv(ytPreviewEnv, kittyWinID, term, termProgram, "", "")
+}
+
+// DetectBackendEnv determines the thumbnail rendering backend from environment values,
+// including COLORTERM and NO_COLOR.
+func DetectBackendEnv(ytPreviewEnv, kittyWinID, term, termProgram, colorTerm, noColor string) Backend {
 	switch strings.ToLower(strings.TrimSpace(ytPreviewEnv)) {
 	case "none", "text":
 		return BackendText
-	case "chafa":
+	case "chafa", "ansi", "blocks":
 		return BackendChafa
 	case "kitty":
 		return BackendKitty
 	}
 
+	termTrimmed := strings.TrimSpace(term)
+	termProgramTrimmed := strings.TrimSpace(termProgram)
 	if strings.TrimSpace(kittyWinID) != "" ||
-		strings.EqualFold(strings.TrimSpace(term), "xterm-kitty") ||
-		strings.EqualFold(strings.TrimSpace(termProgram), "ghostty") {
+		strings.EqualFold(termTrimmed, "xterm-kitty") ||
+		strings.EqualFold(termProgramTrimmed, "ghostty") {
 		return BackendKitty
+	}
+
+	if strings.TrimSpace(noColor) != "" {
+		return BackendText
+	}
+
+	colorTermTrimmed := strings.TrimSpace(colorTerm)
+	if termTrimmed == "" && termProgramTrimmed == "" && colorTermTrimmed == "" {
+		return BackendText
+	}
+
+	termLower := strings.ToLower(termTrimmed)
+	switch termLower {
+	case "dumb", "linux", "vt100", "vt220", "cons25":
+		return BackendText
+	}
+
+	colorTermLower := strings.ToLower(colorTermTrimmed)
+	if strings.Contains(colorTermLower, "truecolor") || strings.Contains(colorTermLower, "24bit") {
+		return BackendChafa
+	}
+
+	if termProgramTrimmed != "" {
+		return BackendChafa
+	}
+
+	for _, tok := range []string{
+		"256color", "truecolor", "direct",
+		"alacritty", "foot", "wezterm",
+		"tmux", "screen", "xterm", "rxvt",
+		"konsole", "gnome", "vte",
+	} {
+		if strings.Contains(termLower, tok) {
+			return BackendChafa
+		}
 	}
 
 	return BackendText

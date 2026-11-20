@@ -69,10 +69,15 @@ func TestDetectBackend(t *testing.T) {
 			want:      BackendChafa,
 		},
 		{
-			name:        "unknown terminal defaults to text",
+			name:        "alacritty and tmux default to chafa",
 			term:        "alacritty",
 			termProgram: "tmux",
-			want:        BackendText,
+			want:        BackendChafa,
+		},
+		{
+			name: "plain dumb terminal defaults to text",
+			term: "dumb",
+			want: BackendText,
 		},
 	}
 
@@ -82,6 +87,147 @@ func TestDetectBackend(t *testing.T) {
 			if got != tc.want {
 				t.Fatalf("DetectBackend(%q, %q, %q, %q) = %v, want %v",
 					tc.ytPreview, tc.kittyWinID, tc.term, tc.termProgram, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestDetectBackendEnv(t *testing.T) {
+	tests := []struct {
+		name        string
+		ytPreview   string
+		kittyWinID  string
+		term        string
+		termProgram string
+		colorTerm   string
+		noColor     string
+		want        Backend
+	}{
+		{
+			name: "all empty defaults to text",
+			want: BackendText,
+		},
+		{
+			name: "TERM=dumb falls back to text",
+			term: "dumb",
+			want: BackendText,
+		},
+		{
+			name: "TERM=linux falls back to text",
+			term: "linux",
+			want: BackendText,
+		},
+		{
+			name: "TERM=vt100 falls back to text",
+			term: "vt100",
+			want: BackendText,
+		},
+		{
+			name: "TERM=vt220 falls back to text",
+			term: "vt220",
+			want: BackendText,
+		},
+		{
+			name: "TERM=cons25 falls back to text",
+			term: "cons25",
+			want: BackendText,
+		},
+		{
+			name: "unknown plain TERM falls back to text",
+			term: "vt52",
+			want: BackendText,
+		},
+		{
+			name:        "NO_COLOR overrides COLORTERM=truecolor and TERM_PROGRAM",
+			term:        "xterm-256color",
+			termProgram: "WezTerm",
+			colorTerm:   "truecolor",
+			noColor:     "1",
+			want:        BackendText,
+		},
+		{
+			name:      "COLORTERM=truecolor selects chafa",
+			colorTerm: "truecolor",
+			want:      BackendChafa,
+		},
+		{
+			name:      "COLORTERM=24bit selects chafa",
+			colorTerm: "24bit",
+			want:      BackendChafa,
+		},
+		{
+			name: "TERM=alacritty selects chafa",
+			term: "alacritty",
+			want: BackendChafa,
+		},
+		{
+			name: "TERM=xterm-256color selects chafa",
+			term: "xterm-256color",
+			want: BackendChafa,
+		},
+		{
+			name: "TERM=foot selects chafa",
+			term: "foot",
+			want: BackendChafa,
+		},
+		{
+			name: "TERM=tmux-256color selects chafa",
+			term: "tmux-256color",
+			want: BackendChafa,
+		},
+		{
+			name:        "TERM_PROGRAM=WezTerm selects chafa",
+			termProgram: "WezTerm",
+			want:        BackendChafa,
+		},
+		{
+			name:        "TERM_PROGRAM=iTerm.app selects chafa",
+			termProgram: "iTerm.app",
+			want:        BackendChafa,
+		},
+		{
+			name:      "YT_PREVIEW=blocks selects chafa",
+			ytPreview: "blocks",
+			want:      BackendChafa,
+		},
+		{
+			name:      "YT_PREVIEW=ansi selects chafa",
+			ytPreview: "ansi",
+			want:      BackendChafa,
+		},
+		{
+			name:      "YT_PREVIEW=chafa selects chafa",
+			ytPreview: "chafa",
+			want:      BackendChafa,
+		},
+		{
+			name:       "YT_PREVIEW=none overrides COLORTERM=truecolor and kitty",
+			ytPreview:  "none",
+			kittyWinID: "1",
+			term:       "xterm-kitty",
+			colorTerm:  "truecolor",
+			want:       BackendText,
+		},
+		{
+			name:        "TERM_PROGRAM=ghostty selects kitty",
+			termProgram: "ghostty",
+			colorTerm:   "truecolor",
+			want:        BackendKitty,
+		},
+		{
+			name:       "KITTY_WINDOW_ID=1 selects kitty",
+			kittyWinID: "1",
+			colorTerm:  "truecolor",
+			want:       BackendKitty,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := DetectBackendEnv(tc.ytPreview, tc.kittyWinID, tc.term, tc.termProgram, tc.colorTerm, tc.noColor)
+			if got != tc.want {
+				t.Fatalf("DetectBackendEnv(%q, %q, %q, %q, %q, %q) = %v, want %v",
+					tc.ytPreview, tc.kittyWinID, tc.term, tc.termProgram, tc.colorTerm, tc.noColor, got, tc.want)
 			}
 		})
 	}

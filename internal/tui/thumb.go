@@ -429,11 +429,13 @@ var kittyDiacritics = []rune{
 // isKittyGraphicsSupported returns true when running inside Kitty or Ghostty terminal,
 // or when YT_PREVIEW explicitly selects kitty.
 func isKittyGraphicsSupported() bool {
-	return thumbs.DetectBackend(
+	return thumbs.DetectBackendEnv(
 		os.Getenv("YT_PREVIEW"),
 		os.Getenv("KITTY_WINDOW_ID"),
 		os.Getenv("TERM"),
 		os.Getenv("TERM_PROGRAM"),
+		os.Getenv("COLORTERM"),
+		os.Getenv("NO_COLOR"),
 	) == thumbs.BackendKitty
 }
 

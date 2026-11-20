@@ -2,6 +2,8 @@ package app
 
 import (
 	"context"
+	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -64,10 +66,16 @@ func (s *State) DownloadSelected(audioOnly bool) (*State, tea.Cmd) {
 	return s, tea.Batch(toastCmd, dlCmd)
 }
 
-// ToggleSaveSelected persists watch-later state via Store.
-func (s *State) ToggleSaveSelected() (*State, tea.Cmd) {
-	v, ok := s.SelectedVideo()
-	if !ok || s.Deps.Store == nil {
+func (s *State) activeOrSelectedVideo() (model.Video, bool) {
+	if s.CurrentPlaying.ID != "" {
+		return s.CurrentPlaying, true
+	}
+	return s.SelectedVideo()
+}
+
+// ToggleSaveVideo persists watch-later state for v via Store.
+func (s *State) ToggleSaveVideo(v model.Video) (*State, tea.Cmd) {
+	if s.Deps.Store == nil {
 		return s, nil
 	}
 	return s, func() tea.Msg {
@@ -76,10 +84,27 @@ func (s *State) ToggleSaveSelected() (*State, tea.Cmd) {
 	}
 }
 
-// ToggleLikeSelected persists liked state cleanly separate from Watch Later.
-func (s *State) ToggleLikeSelected() (*State, tea.Cmd) {
+// ToggleSaveSelected persists watch-later state for the highlighted video via Store.
+func (s *State) ToggleSaveSelected() (*State, tea.Cmd) {
 	v, ok := s.SelectedVideo()
-	if !ok || s.Deps.Store == nil {
+	if !ok {
+		return s, nil
+	}
+	return s.ToggleSaveVideo(v)
+}
+
+// ToggleSaveActive persists watch-later state for the playing track, falling back to SelectedVideo.
+func (s *State) ToggleSaveActive() (*State, tea.Cmd) {
+	v, ok := s.activeOrSelectedVideo()
+	if !ok {
+		return s, nil
+	}
+	return s.ToggleSaveVideo(v)
+}
+
+// ToggleLikeVideo persists liked state for v cleanly separate from Watch Later.
+func (s *State) ToggleLikeVideo(v model.Video) (*State, tea.Cmd) {
+	if s.Deps.Store == nil {
 		return s, nil
 	}
 	lt, ok := s.Deps.Store.(likedToggler)
@@ -90,6 +115,24 @@ func (s *State) ToggleLikeSelected() (*State, tea.Cmd) {
 		liked, err := lt.ToggleLiked(s.appCtx, v)
 		return ToggledLikeMsg{Video: v, Liked: liked, Err: err}
 	}
+}
+
+// ToggleLikeSelected persists liked state for the highlighted video cleanly separate from Watch Later.
+func (s *State) ToggleLikeSelected() (*State, tea.Cmd) {
+	v, ok := s.SelectedVideo()
+	if !ok {
+		return s, nil
+	}
+	return s.ToggleLikeVideo(v)
+}
+
+// ToggleLikeActive persists liked state for the playing track, falling back to SelectedVideo.
+func (s *State) ToggleLikeActive() (*State, tea.Cmd) {
+	v, ok := s.activeOrSelectedVideo()
+	if !ok {
+		return s, nil
+	}
+	return s.ToggleLikeVideo(v)
 }
 
 func (s *State) maybeFetchLiveChip() tea.Cmd {
@@ -321,33 +364,39 @@ func (s *State) ToggleLyrics() (*State, tea.Cmd) {
 		s.ShowLyrics = false
 		return s, nil
 	}
-	var videoID, title, channel string
+	var videoID, title, channel, durStr string
 	if s.PlayLoading && strings.TrimSpace(s.PlayLoadingTitle) != "" {
 		title = strings.TrimSpace(s.PlayLoadingTitle)
 		if s.CurrentPlaying.ID != "" && strings.TrimSpace(s.CurrentPlaying.Title) == title {
 			videoID = s.CurrentPlaying.ID
 			channel = strings.TrimSpace(s.CurrentPlaying.Channel)
+			durStr = s.CurrentPlaying.Duration
 		} else if matched := s.findVideoForTitle(title); matched.Title != "" {
 			videoID = matched.ID
 			channel = strings.TrimSpace(matched.Channel)
+			durStr = matched.Duration
 		}
 	} else if s.PlayerStatus.IsRunning && strings.TrimSpace(s.PlayerStatus.Title) != "" {
 		title = strings.TrimSpace(s.PlayerStatus.Title)
 		if s.CurrentPlaying.ID != "" && strings.TrimSpace(s.CurrentPlaying.Title) == title {
 			videoID = s.CurrentPlaying.ID
 			channel = strings.TrimSpace(s.CurrentPlaying.Channel)
+			durStr = s.CurrentPlaying.Duration
 		} else if matched := s.findVideoForTitle(title); matched.Title != "" {
 			videoID = matched.ID
 			channel = strings.TrimSpace(matched.Channel)
+			durStr = matched.Duration
 		}
 	} else if strings.TrimSpace(s.CurrentPlaying.Title) != "" {
 		videoID = s.CurrentPlaying.ID
 		title = strings.TrimSpace(s.CurrentPlaying.Title)
 		channel = strings.TrimSpace(s.CurrentPlaying.Channel)
+		durStr = s.CurrentPlaying.Duration
 	} else if v, ok := s.SelectedVideo(); ok {
 		videoID = v.ID
 		title = strings.TrimSpace(v.Title)
 		channel = strings.TrimSpace(v.Channel)
+		durStr = v.Duration
 	}
 	if title == "" {
 		return s, s.toastCmd("Selecciona o reproduce un tema primero")
@@ -356,11 +405,18 @@ func (s *State) ToggleLyrics() (*State, tea.Cmd) {
 	if title == s.LyricsTrack && !s.LyricsLoading && (len(s.Lyrics.Synced) > 0 || len(s.Lyrics.Plain) > 0) {
 		return s, nil
 	}
-	cmd := s.startLyricsFetch(videoID, title, channel)
+	var dur float64
+	if s.PlayerStatus.IsRunning && strings.TrimSpace(s.PlayerStatus.Title) == title {
+		dur = s.PlayerStatus.Duration
+	}
+	if dur <= 0 {
+		dur = float64(parseDurationSeconds(durStr))
+	}
+	cmd := s.startLyricsFetch(videoID, title, channel, dur)
 	return s, tea.Batch(cmd, s.ensureAnimTick())
 }
 
-func (s *State) startLyricsFetch(videoID, title, channel string) tea.Cmd {
+func (s *State) startLyricsFetch(videoID, title, channel string, durationSec float64) tea.Cmd {
 	if strings.TrimSpace(title) == "" {
 		return nil
 	}
@@ -374,19 +430,111 @@ func (s *State) startLyricsFetch(videoID, title, channel string) tea.Cmd {
 	s.LyricsErr = ""
 	s.LyricsScroll = 0
 	s.Lyrics = lyrics.TrackLyrics{}
+	if videoID != s.LyricsVideoID {
+		s.LyricsPreferSource = ""
+	}
+	s.LyricsVideoID = videoID
 
 	client := s.Deps.LyricsClient
 	if client == nil {
 		client = lyrics.NewClient()
 		s.Deps.LyricsClient = client
 	}
+	if videoID != "" {
+		s.LyricsOffset = client.GetOffset(videoID)
+	} else {
+		s.LyricsOffset = 0
+	}
+	prefer := s.LyricsPreferSource
+
 	ctx, cancel := context.WithTimeout(s.appCtx, lyricsTimeout)
 	s.lyricsCancel = cancel
 
 	return func() tea.Msg {
-		tl, err := client.Fetch(ctx, videoID, title, channel)
+		tl, err := client.FetchWithOptions(ctx, videoID, title, channel, lyrics.FetchOptions{
+			Duration:     durationSec,
+			PreferSource: prefer,
+			Lang:         "es",
+		})
 		return LyricsLoadedMsg{Seq: seq, Track: title, Lyrics: tl, Err: err}
 	}
+}
+
+// AdjustLyricsOffset shifts the active lyric sync offset by delta seconds, persists it, and shows a toast.
+func (s *State) AdjustLyricsOffset(delta float64) (*State, tea.Cmd) {
+	if !s.ShowLyrics {
+		return s, nil
+	}
+	next := math.Round((s.LyricsOffset+delta)*10) / 10
+	if next < -60.0 {
+		next = -60.0
+	} else if next > 60.0 {
+		next = 60.0
+	}
+	if math.Abs(next) < 0.05 {
+		next = 0
+	}
+	s.LyricsOffset = next
+	if s.Deps.LyricsClient != nil && s.LyricsVideoID != "" {
+		_ = s.Deps.LyricsClient.SetOffset(s.LyricsVideoID, next)
+	}
+	msg := "⏱ Sync letra: 0.0s"
+	if next != 0 {
+		msg = fmt.Sprintf("⏱ Sync letra: %+.1fs", next)
+	}
+	return s, s.toastCmd(msg)
+}
+
+// ResetLyricsOffset resets the active lyric sync offset to 0.0s and clears any persisted offset.
+func (s *State) ResetLyricsOffset() (*State, tea.Cmd) {
+	if !s.ShowLyrics {
+		return s, nil
+	}
+	s.LyricsOffset = 0
+	if s.Deps.LyricsClient != nil && s.LyricsVideoID != "" {
+		_ = s.Deps.LyricsClient.SetOffset(s.LyricsVideoID, 0)
+	}
+	return s, s.toastCmd("⏱ Sync letra: 0.0s")
+}
+
+// CycleLyricsSource toggles preferred lyrics source between YouTube captions and LRCLib and refetches.
+func (s *State) CycleLyricsSource() (*State, tea.Cmd) {
+	if !s.ShowLyrics || strings.TrimSpace(s.LyricsTrack) == "" {
+		return s, nil
+	}
+	var nextSrc, label string
+	if strings.HasPrefix(s.Lyrics.Source, "youtube") || s.LyricsPreferSource == lyrics.SourceYouTube {
+		nextSrc = lyrics.SourceLRCLib
+		label = "📝 Fuente: LRCLib"
+	} else {
+		nextSrc = lyrics.SourceYouTube
+		label = "📝 Fuente: YouTube CC"
+	}
+
+	videoID := s.LyricsVideoID
+	title := s.LyricsTrack
+	channel := ""
+	dur := s.PlayerStatus.Duration
+	if s.CurrentPlaying.Title == title || (videoID != "" && s.CurrentPlaying.ID == videoID) {
+		channel = strings.TrimSpace(s.CurrentPlaying.Channel)
+		if dur <= 0 {
+			dur = float64(parseDurationSeconds(s.CurrentPlaying.Duration))
+		}
+	} else {
+		v := s.findVideoForTitle(title)
+		channel = strings.TrimSpace(v.Channel)
+		if dur <= 0 {
+			dur = float64(parseDurationSeconds(v.Duration))
+		}
+		if videoID == "" && v.ID != "" {
+			videoID = v.ID
+			s.LyricsVideoID = videoID
+		}
+	}
+	s.LyricsPreferSource = nextSrc
+
+	cmd := s.startLyricsFetch(videoID, title, channel, dur)
+	return s, tea.Batch(s.toastCmd(label), cmd, s.ensureAnimTick())
 }
 
 func (s *State) findVideoForTitle(title string) model.Video {
@@ -459,7 +607,7 @@ func (s *State) enrichVisibleMetadataCmd(items []model.Video, centerIdx int) tea
 	}
 	var ids []string
 	for _, v := range items[start:end] {
-		if (v.Views != "" && v.Published != "") || len(v.ID) != 11 || model.IsPlaylistID(v.ID) {
+		if (v.Views != "" && v.Published != "" && (v.Duration != "" || v.IsLive)) || len(v.ID) != 11 || model.IsPlaylistID(v.ID) {
 			continue
 		}
 		if s.metaRequested[v.ID] {
@@ -501,6 +649,12 @@ func (s *State) applyEnrichedMetadata(meta map[string]catalog.VideoMeta) {
 		if s.CurrentPlaying.Published == "" && m.Published != "" {
 			s.CurrentPlaying.Published = m.Published
 		}
+		if s.CurrentPlaying.Duration == "" && m.Duration != "" {
+			s.CurrentPlaying.Duration = m.Duration
+		}
+		if !s.CurrentPlaying.IsLive && m.IsLive {
+			s.CurrentPlaying.IsLive = true
+		}
 	}
 }
 
@@ -517,6 +671,14 @@ func applyMetaSlice(list []model.Video, meta map[string]catalog.VideoMeta) bool 
 		}
 		if list[i].Published == "" && m.Published != "" {
 			list[i].Published = m.Published
+			changed = true
+		}
+		if list[i].Duration == "" && m.Duration != "" {
+			list[i].Duration = m.Duration
+			changed = true
+		}
+		if !list[i].IsLive && m.IsLive {
+			list[i].IsLive = true
 			changed = true
 		}
 	}

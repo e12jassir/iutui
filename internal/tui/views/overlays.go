@@ -273,6 +273,7 @@ func renderHelpOverlay(s *app.State, width, height int, _ theme.Theme, pal rende
 				{keys: "{ / } / 0 · R", desc: "Velocidad 0.5..2x · Repetir pista"},
 				{keys: "x / V · m", desc: "Solo audio · Mix Radio"},
 				{keys: "o / l · f / c", desc: "Capítulos · Letras · Calidad"},
+				{keys: "z/Z · y", desc: "Sync letra ±0.5s · Fuente CC"},
 			},
 		},
 		{
@@ -459,7 +460,8 @@ func buildLyricsContent(s *app.State, innerW, bodyH int, pal renderPalette) []st
 
 	availLines := max(1, bodyH-len(lines))
 	if len(s.Lyrics.Synced) > 0 {
-		active := lyrics.ActiveLineIndex(s.Lyrics.Synced, s.PlayerStatus.TimePos)
+		effectivePos := s.PlayerStatus.TimePos + s.LyricsOffset
+		active := lyrics.ActiveLineIndex(s.Lyrics.Synced, effectivePos)
 		wrapW := max(8, innerW-4)
 		activeStyle := lipgloss.NewStyle().Foreground(pal.spotAccent).Bold(true)
 		pastStyle := lipgloss.NewStyle().Foreground(pal.dim)

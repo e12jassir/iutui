@@ -1913,7 +1913,7 @@ func TestMetadataEnrichmentAndDeduplication(t *testing.T) {
 		{ID: "RDmix00000001", Title: "Mix"},
 		{ID: "vidAAAAAAA1", Title: "Song A"},
 		{ID: "vidBBBBBBB2", Title: "Song B", Views: "100 vistas"},
-		{ID: "vidCCCCCCC3", Title: "Song C", Views: "5K vistas", Published: "2026-10-01"},
+		{ID: "vidCCCCCCC3", Title: "Song C", Views: "5K vistas", Published: "2026-10-01", Duration: "04:00"},
 	}
 
 	var cmd tea.Cmd
@@ -1950,6 +1950,102 @@ func TestMetadataEnrichmentAndDeduplication(t *testing.T) {
 	// Second trigger on the same items must deduplicate cleanly without re-fetching.
 	if dupCmd := s.enrichVisibleMetadataCmd(s.Feeds[model.TabHome], 0); dupCmd != nil {
 		t.Fatal("expected nil cmd on repeated enrichment request for already requested IDs")
+	}
+}
+
+func TestMetadataEnrichmentFillsTabMusicDuration(t *testing.T) {
+	cat := &fakeMetaCatalog{
+		FakeCatalog: &catalog.FakeCatalog{},
+		reply: map[string]catalog.VideoMeta{
+			"musAAAAAAA1": {Duration: "03:34"},
+			"musBBBBBBB2": {Duration: "1:01:05", Views: "12K vistas"},
+		},
+	}
+	s := NewState(Dependencies{Catalog: cat})
+	defer s.Close()
+
+	musicVideos := []model.Video{
+		{ID: "musAAAAAAA1", Title: "Track 1", Views: "400 vistas", Published: "2026-11-01"},
+		{ID: "musBBBBBBB2", Title: "Track 2"},
+		{ID: "musCCCCCCC3", Title: "Track 3", Views: "1K vistas", Published: "2026-11-02", Duration: "02:15"},
+	}
+	if got := musicVideos[0].Badge(); got != "--:--" {
+		t.Fatalf("expected initial missing duration badge '--:--', got %q", got)
+	}
+
+	var cmd tea.Cmd
+	s, cmd = s.Update(FeedLoadedMsg{Tab: model.TabMusic, Videos: musicVideos})
+	if cmd == nil {
+		t.Fatal("expected metadata enrichment cmd after TabMusic FeedLoadedMsg")
+	}
+	msg := cmd()
+	enriched, ok := msg.(MetadataEnrichedMsg)
+	if !ok {
+		t.Fatalf("expected MetadataEnrichedMsg, got %T", msg)
+	}
+	if len(cat.calls) != 1 || !slices.Equal(cat.calls[0], []string{"musAAAAAAA1", "musBBBBBBB2"}) {
+		t.Fatalf("expected enrichment for items missing Duration, got calls=%v", cat.calls)
+	}
+
+	s.CurrentPlaying = model.Video{ID: "musAAAAAAA1", Title: "Track 1"}
+	s, _ = s.Update(enriched)
+
+	music := s.Feeds[model.TabMusic]
+	if music[0].Duration != "03:34" || music[0].Badge() != "03:34" {
+		t.Fatalf("expected Track 1 Duration='03:34' (replacing '--:--'), got %+v (badge=%q)", music[0], music[0].Badge())
+	}
+	if music[1].Duration != "1:01:05" || music[1].Badge() != "1:01:05" || music[1].Views != "12K vistas" {
+		t.Fatalf("expected Track 2 Duration='1:01:05' & Views='12K vistas', got %+v", music[1])
+	}
+	if music[2].Duration != "02:15" {
+		t.Fatalf("expected Track 3 existing Duration preserved, got %+v", music[2])
+	}
+	if s.CurrentPlaying.Duration != "03:34" {
+		t.Fatalf("expected CurrentPlaying.Duration='03:34', got %+v", s.CurrentPlaying)
+	}
+}
+
+func TestMetadataEnrichmentFillsTabMusicIsLive(t *testing.T) {
+	cat := &fakeMetaCatalog{
+		FakeCatalog: &catalog.FakeCatalog{},
+		reply: map[string]catalog.VideoMeta{
+			"liveMus1111": {IsLive: true},
+		},
+	}
+	s := NewState(Dependencies{Catalog: cat})
+	defer s.Close()
+
+	musicVideos := []model.Video{
+		{ID: "liveMus1111", Title: "24/7 Lofi Station", Views: "1K vistas", Published: "2026-11-01"},
+		{ID: "liveMus2222", Title: "Already Live", Views: "500 vistas", Published: "2026-11-01", IsLive: true},
+	}
+	if got := musicVideos[0].Badge(); got != "--:--" {
+		t.Fatalf("expected initial missing duration badge '--:--', got %q", got)
+	}
+
+	var cmd tea.Cmd
+	s, cmd = s.Update(FeedLoadedMsg{Tab: model.TabMusic, Videos: musicVideos})
+	if cmd == nil {
+		t.Fatal("expected metadata enrichment cmd after TabMusic FeedLoadedMsg")
+	}
+	msg := cmd()
+	enriched, ok := msg.(MetadataEnrichedMsg)
+	if !ok {
+		t.Fatalf("expected MetadataEnrichedMsg, got %T", msg)
+	}
+	if len(cat.calls) != 1 || !slices.Equal(cat.calls[0], []string{"liveMus1111"}) {
+		t.Fatalf("expected enrichment only for non-live item missing Duration, got calls=%v", cat.calls)
+	}
+
+	s.CurrentPlaying = model.Video{ID: "liveMus1111", Title: "24/7 Lofi Station"}
+	s, _ = s.Update(enriched)
+
+	music := s.Feeds[model.TabMusic]
+	if !music[0].IsLive || music[0].Badge() != "🔴 EN VIVO" {
+		t.Fatalf("expected TabMusic item to become IsLive with badge '🔴 EN VIVO', got %+v (badge=%q)", music[0], music[0].Badge())
+	}
+	if !s.CurrentPlaying.IsLive || s.CurrentPlaying.Badge() != "🔴 EN VIVO" {
+		t.Fatalf("expected CurrentPlaying.IsLive=true, got %+v", s.CurrentPlaying)
 	}
 }
 
@@ -2798,4 +2894,501 @@ func TestLiveFiltersDownloadAudioCrossNavAndAll16Settings(t *testing.T) {
 			t.Fatalf("expected mouse click on scrolled Cookies row to toggle back to auto, got %q", s.CookiesMode)
 		}
 	})
+}
+
+type refreshSpyCatalog struct {
+	*catalog.FakeCatalog
+	mu           sync.Mutex
+	refreshCalls []model.Tab
+}
+
+func (c *refreshSpyCatalog) RefreshFeed(ctx context.Context, tab model.Tab) ([]model.Video, error) {
+	c.mu.Lock()
+	c.refreshCalls = append(c.refreshCalls, tab)
+	c.mu.Unlock()
+	return c.FakeCatalog.Feed(ctx, tab)
+}
+
+func (c *refreshSpyCatalog) RefreshCalls() []model.Tab {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]model.Tab(nil), c.refreshCalls...)
+}
+
+func TestCookiesReadyMsgReloadsFeeds(t *testing.T) {
+	newCat := func() *refreshSpyCatalog {
+		return &refreshSpyCatalog{
+			FakeCatalog: &catalog.FakeCatalog{
+				Feeds: map[model.Tab][]model.Video{
+					model.TabHome:          {{ID: "home1", Title: "Home Fresh", Channel: "Ch1"}},
+					model.TabMusic:         {{ID: "music1", Title: "Music Fresh", Channel: "Artist1"}},
+					model.TabSubscriptions: {{ID: "sub1", Title: "Sub Fresh", Channel: "Ch2"}},
+					model.TabDownloads:     {{ID: "dl1", Title: "Local Download", Channel: "Ch3"}},
+				},
+			},
+		}
+	}
+
+	t.Run("reloads active TabHome, TabMusic, and TabSubscriptions on ReloadFeed=true", func(t *testing.T) {
+		for _, activeTab := range []model.Tab{model.TabHome, model.TabMusic, model.TabSubscriptions} {
+			cat := newCat()
+			s := NewState(Dependencies{
+				Catalog:        cat,
+				Engine:         player.NewFakeEngine(),
+				Store:          store.NewFakeStore(),
+				InitialCookies: "auto",
+			})
+			defer s.Close()
+			s.View = ViewHome
+			s.ActiveTab = activeTab
+			s.Feeds[model.TabHome] = []model.Video{{ID: "staleHome", Title: "Stale Home"}}
+			s.Feeds[model.TabMusic] = []model.Video{{ID: "staleMusic", Title: "Stale Music"}}
+			s.Feeds[model.TabSubscriptions] = []model.Video{{ID: "staleSub", Title: "Stale Sub"}}
+			s.Feeds[model.TabDownloads] = []model.Video{{ID: "dl1", Title: "Local Download"}}
+
+			s, cmd := s.Update(CookiesReadyMsg{JarPath: "/tmp/cookies.txt", ReloadFeed: true})
+			if !s.Syncing {
+				t.Fatalf("tab=%v: expected Syncing=true after CookiesReadyMsg", activeTab)
+			}
+			if _, ok := s.Feeds[model.TabHome]; ok {
+				t.Fatalf("tab=%v: expected TabHome cache to be invalidated", activeTab)
+			}
+			if _, ok := s.Feeds[model.TabMusic]; ok {
+				t.Fatalf("tab=%v: expected TabMusic cache to be invalidated", activeTab)
+			}
+			if _, ok := s.Feeds[model.TabSubscriptions]; ok {
+				t.Fatalf("tab=%v: expected TabSubscriptions cache to be invalidated", activeTab)
+			}
+			if _, ok := s.Feeds[model.TabDownloads]; !ok {
+				t.Fatalf("tab=%v: expected TabDownloads cache to remain untouched", activeTab)
+			}
+			if !strings.Contains(s.Toast, "cargando tu feed") {
+				t.Fatalf("tab=%v: unexpected toast %q", activeTab, s.Toast)
+			}
+
+			msgs := collectNonTickMsgs(cmd, 150*time.Millisecond)
+			if calls := cat.RefreshCalls(); !slices.Equal(calls, []model.Tab{activeTab}) {
+				t.Fatalf("tab=%v: RefreshFeed calls = %v, want [%v]", activeTab, calls, activeTab)
+			}
+			var gotFeedLoaded bool
+			for _, m := range msgs {
+				if fl, ok := m.(FeedLoadedMsg); ok && fl.Tab == activeTab && fl.Err == nil {
+					gotFeedLoaded = true
+				}
+			}
+			if !gotFeedLoaded {
+				t.Fatalf("tab=%v: expected FeedLoadedMsg for active tab, got %#v", activeTab, msgs)
+			}
+		}
+	})
+
+	t.Run("ignores ReloadFeed=false, empty JarPath, or CookiesMode=off", func(t *testing.T) {
+		cases := []struct {
+			name        string
+			cookiesMode string
+			msg         CookiesReadyMsg
+		}{
+			{
+				name:        "ReloadFeed=false",
+				cookiesMode: "auto",
+				msg:         CookiesReadyMsg{JarPath: "/tmp/cookies.txt", ReloadFeed: false},
+			},
+			{
+				name:        "empty JarPath",
+				cookiesMode: "auto",
+				msg:         CookiesReadyMsg{JarPath: "   ", ReloadFeed: true},
+			},
+			{
+				name:        "CookiesMode=off",
+				cookiesMode: "off",
+				msg:         CookiesReadyMsg{JarPath: "/tmp/cookies.txt", ReloadFeed: true},
+			},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				cat := newCat()
+				s := NewState(Dependencies{
+					Catalog:        cat,
+					Engine:         player.NewFakeEngine(),
+					Store:          store.NewFakeStore(),
+					InitialCookies: tc.cookiesMode,
+				})
+				defer s.Close()
+				s.View = ViewHome
+				s.ActiveTab = model.TabHome
+				s.Feeds[model.TabHome] = []model.Video{{ID: "keepHome"}}
+				s.Feeds[model.TabMusic] = []model.Video{{ID: "keepMusic"}}
+				s.Feeds[model.TabSubscriptions] = []model.Video{{ID: "keepSub"}}
+
+				s, cmd := s.Update(tc.msg)
+				if s.Syncing {
+					t.Fatal("expected Syncing=false")
+				}
+				if cmd != nil {
+					t.Fatalf("expected nil cmd, got non-nil")
+				}
+				if _, ok := s.Feeds[model.TabHome]; !ok {
+					t.Fatal("expected TabHome feed to remain cached")
+				}
+				if _, ok := s.Feeds[model.TabMusic]; !ok {
+					t.Fatal("expected TabMusic feed to remain cached")
+				}
+				if _, ok := s.Feeds[model.TabSubscriptions]; !ok {
+					t.Fatal("expected TabSubscriptions feed to remain cached")
+				}
+				if calls := cat.RefreshCalls(); len(calls) != 0 {
+					t.Fatalf("expected no RefreshFeed calls, got %v", calls)
+				}
+			})
+		}
+	})
+
+	t.Run("invalidates home/subs without disrupting TabDownloads or ViewSearch", func(t *testing.T) {
+		for _, setup := range []struct {
+			name string
+			view ViewMode
+			tab  model.Tab
+		}{
+			{name: "TabDownloads", view: ViewHome, tab: model.TabDownloads},
+			{name: "ViewSearch", view: ViewSearch, tab: model.TabHome},
+		} {
+			t.Run(setup.name, func(t *testing.T) {
+				cat := newCat()
+				s := NewState(Dependencies{
+					Catalog:        cat,
+					Engine:         player.NewFakeEngine(),
+					Store:          store.NewFakeStore(),
+					InitialCookies: "auto",
+				})
+				defer s.Close()
+				s.View = setup.view
+				s.ActiveTab = setup.tab
+				s.Feeds[model.TabHome] = []model.Video{{ID: "staleHome"}}
+				s.Feeds[model.TabMusic] = []model.Video{{ID: "staleMusic"}}
+				s.Feeds[model.TabSubscriptions] = []model.Video{{ID: "staleSub"}}
+				s.Feeds[model.TabDownloads] = []model.Video{{ID: "dl1"}}
+
+				s, cmd := s.Update(CookiesReadyMsg{JarPath: "/tmp/cookies.txt", ReloadFeed: true})
+				if s.Syncing {
+					t.Fatal("expected Syncing=false when not viewing Home/Music/Subscriptions")
+				}
+				if _, ok := s.Feeds[model.TabHome]; ok {
+					t.Fatal("expected TabHome cache to be invalidated")
+				}
+				if _, ok := s.Feeds[model.TabMusic]; ok {
+					t.Fatal("expected TabMusic cache to be invalidated")
+				}
+				if _, ok := s.Feeds[model.TabSubscriptions]; ok {
+					t.Fatal("expected TabSubscriptions cache to be invalidated")
+				}
+				if _, ok := s.Feeds[model.TabDownloads]; !ok {
+					t.Fatal("expected TabDownloads cache to stay intact")
+				}
+				if !strings.Contains(s.Toast, "Sesión de navegador detectada") {
+					t.Fatalf("unexpected toast: %q", s.Toast)
+				}
+				_ = collectNonTickMsgs(cmd, 150*time.Millisecond)
+				if calls := cat.RefreshCalls(); len(calls) != 0 {
+					t.Fatalf("expected no RefreshFeed calls, got %v", calls)
+				}
+			})
+		}
+	})
+}
+
+func TestLyricsSyncOffsetAndSourceToggle(t *testing.T) {
+	lrcSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode([]map[string]any{
+			{
+				"trackName":    "Radio Track",
+				"artistName":   "Band",
+				"duration":     210,
+				"syncedLyrics": "[00:05.00] LRCLib line",
+			},
+		})
+	}))
+	defer lrcSrv.Close()
+
+	var ytSrv *httptest.Server
+	ytSrv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/player" {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"videoDetails": map[string]any{"title": "Radio Track", "author": "Band"},
+				"captions": map[string]any{
+					"playerCaptionsTracklistRenderer": map[string]any{
+						"captionTracks": []map[string]any{
+							{"baseUrl": ytSrv.URL + "/tt", "languageCode": "es", "kind": ""},
+						},
+					},
+				},
+			})
+			return
+		}
+		_, _ = w.Write([]byte(`{"events":[{"tStartMs":1000,"segs":[{"utf8":"YT caption line"}]}]}`))
+	}))
+	defer ytSrv.Close()
+
+	cacheDir := t.TempDir()
+	lrc := lyrics.NewClient()
+	lrc.BaseURL = lrcSrv.URL
+	lrc.EnableYouTubeCaptions(cacheDir)
+	lrc.YouTubeEndpointURL = ytSrv.URL + "/player"
+
+	videoID := "shortvid123"
+	vid := model.Video{ID: videoID, Title: "Radio Track", Channel: "Band", Duration: "03:32"}
+	s := NewState(Dependencies{
+		Catalog: &catalog.FakeCatalog{
+			Feeds: map[model.Tab][]model.Video{model.TabHome: {vid}},
+		},
+		Engine:       player.NewFakeEngine(),
+		LyricsClient: lrc,
+	})
+	defer s.Close()
+	s, _ = s.Update(FeedLoadedMsg{Tab: model.TabHome, Videos: []model.Video{vid}})
+
+	// 1. z/Z/Y/y must do nothing when ShowLyrics == false.
+	for _, r := range []rune{'z', 'Z', 'Y', 'y'} {
+		var cmd tea.Cmd
+		s, cmd = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		if cmd != nil || s.LyricsOffset != 0 || s.LyricsPreferSource != "" {
+			t.Fatalf("key %q with ShowLyrics=false changed state: cmd=%v offset=%v prefer=%q", string(r), cmd != nil, s.LyricsOffset, s.LyricsPreferSource)
+		}
+	}
+
+	// 2. Open lyrics via 'L' -> auto selects LRCLib (duration 212s within 6s of 210s).
+	s.PlayerStatus = player.Status{IsRunning: true, Title: "Radio Track", Duration: 212, TimePos: 10}
+	var cmd tea.Cmd
+	s, cmd = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'L'}})
+	for _, msg := range collectNonTickMsgs(cmd, 250*time.Millisecond) {
+		s, _ = s.Update(msg)
+	}
+	if !s.ShowLyrics || s.Lyrics.Source != lyrics.SourceLRCLib {
+		t.Fatalf("expected ShowLyrics=true with LRCLib source, got show=%v source=%q err=%q", s.ShowLyrics, s.Lyrics.Source, s.LyricsErr)
+	}
+
+	// 3. Z (+0.5s), Z (+1.0s), z (-0.5s -> +0.5s), verify persistence on fresh client, then Y resets to 0.
+	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'Z'}})
+	if s.LyricsOffset != 0.5 || !strings.Contains(s.Toast, "+0.5s") {
+		t.Fatalf("after first Z: offset=%v toast=%q", s.LyricsOffset, s.Toast)
+	}
+	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'Z'}})
+	if s.LyricsOffset != 1.0 || !strings.Contains(s.Toast, "+1.0s") {
+		t.Fatalf("after second Z: offset=%v toast=%q", s.LyricsOffset, s.Toast)
+	}
+	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'z'}})
+	if s.LyricsOffset != 0.5 || !strings.Contains(s.Toast, "+0.5s") {
+		t.Fatalf("after z: offset=%v toast=%q", s.LyricsOffset, s.Toast)
+	}
+
+	fresh := lyrics.NewClient()
+	fresh.EnableYouTubeCaptions(cacheDir)
+	if got := fresh.GetOffset(videoID); got != 0.5 {
+		t.Fatalf("persisted GetOffset(%q) = %v, want 0.5", videoID, got)
+	}
+
+	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'Y'}})
+	if s.LyricsOffset != 0 || !strings.Contains(s.Toast, "0.0s") {
+		t.Fatalf("after Y reset: offset=%v toast=%q", s.LyricsOffset, s.Toast)
+	}
+	freshAfterReset := lyrics.NewClient()
+	freshAfterReset.EnableYouTubeCaptions(cacheDir)
+	if got := freshAfterReset.GetOffset(videoID); got != 0 {
+		t.Fatalf("persisted GetOffset after reset = %v, want 0", got)
+	}
+
+	// 4. 'y' cycles source from LRCLib -> YouTube CC -> LRCLib.
+	s, cmd = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	if s.LyricsPreferSource != lyrics.SourceYouTube || !strings.Contains(s.Toast, "YouTube CC") {
+		t.Fatalf("expected YouTube CC source preference after first y, got prefer=%q toast=%q", s.LyricsPreferSource, s.Toast)
+	}
+	for _, msg := range collectNonTickMsgs(cmd, 250*time.Millisecond) {
+		s, _ = s.Update(msg)
+	}
+	if s.Lyrics.Source != lyrics.SourceYouTubeCC || len(s.Lyrics.Synced) == 0 || s.Lyrics.Synced[0].Text != "YT caption line" {
+		t.Fatalf("expected YouTube CC lyrics after first y, got %+v err=%q", s.Lyrics, s.LyricsErr)
+	}
+
+	s, cmd = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	if s.LyricsPreferSource != lyrics.SourceLRCLib || !strings.Contains(s.Toast, "LRCLib") {
+		t.Fatalf("expected LRCLib source preference after second y, got prefer=%q toast=%q", s.LyricsPreferSource, s.Toast)
+	}
+	for _, msg := range collectNonTickMsgs(cmd, 250*time.Millisecond) {
+		s, _ = s.Update(msg)
+	}
+	if s.Lyrics.Source != lyrics.SourceLRCLib || len(s.Lyrics.Synced) == 0 || s.Lyrics.Synced[0].Text != "LRCLib line" {
+		t.Fatalf("expected LRCLib lyrics after second y, got %+v err=%q", s.Lyrics, s.LyricsErr)
+	}
+}
+
+func TestPlayerBarClickLikeAndSaveButtons(t *testing.T) {
+	s, _, _, st := newTestState()
+	defer s.Close()
+	s.Width, s.Height = 120, 36
+
+	videos := []model.Video{
+		{ID: "vidOne11111", Title: "Selected Video", Channel: "ChanA"},
+		{ID: "vidPlay2222", Title: "Playing Video", Channel: "ChanB"},
+	}
+	s, _ = s.Update(FeedLoadedMsg{Tab: model.TabHome, Videos: videos})
+	s.SelectedIdx = 0
+	s.PlayerStatus = player.Status{IsRunning: true, Title: videos[1].Title}
+	s.CurrentPlaying = videos[1]
+
+	// Click [♡] at x=47, y=Height-2 -> likes CurrentPlaying (vidPlay2222) into TabLiked.
+	var cmd tea.Cmd
+	s, cmd = s.Update(tea.MouseMsg{
+		X:      47,
+		Y:      s.Height - 2,
+		Button: tea.MouseButtonLeft,
+		Action: tea.MouseActionPress,
+	})
+	for _, m := range collectNonTickMsgs(cmd, 150*time.Millisecond) {
+		s, _ = s.Update(m)
+	}
+	if !s.LikedIDs["vidPlay2222"] || s.SavedIDs["vidPlay2222"] {
+		t.Fatalf("expected vidPlay2222 only in LikedIDs, got liked=%v saved=%v", s.LikedIDs, s.SavedIDs)
+	}
+	if len(s.Feeds[model.TabLiked]) != 1 || s.Feeds[model.TabLiked][0].ID != "vidPlay2222" {
+		t.Fatalf("expected TabLiked=[vidPlay2222], got %+v", s.Feeds[model.TabLiked])
+	}
+	likedInStore, err := st.Liked(context.Background())
+	if err != nil || len(likedInStore) != 1 || likedInStore[0].ID != "vidPlay2222" {
+		t.Fatalf("expected ToggleLiked persisted vidPlay2222, got %+v err=%v", likedInStore, err)
+	}
+
+	// Click [◷] at x=51, y=Height-2 -> saves CurrentPlaying (vidPlay2222) into TabWatchLater.
+	s, cmd = s.Update(tea.MouseMsg{
+		X:      51,
+		Y:      s.Height - 2,
+		Button: tea.MouseButtonLeft,
+		Action: tea.MouseActionPress,
+	})
+	for _, m := range collectNonTickMsgs(cmd, 150*time.Millisecond) {
+		s, _ = s.Update(m)
+	}
+	if !s.SavedIDs["vidPlay2222"] {
+		t.Fatalf("expected vidPlay2222 in SavedIDs, got %v", s.SavedIDs)
+	}
+	if len(s.Feeds[model.TabWatchLater]) != 1 || s.Feeds[model.TabWatchLater][0].ID != "vidPlay2222" {
+		t.Fatalf("expected TabWatchLater=[vidPlay2222], got %+v", s.Feeds[model.TabWatchLater])
+	}
+	savedInStore, err := st.Saved(context.Background())
+	if err != nil || len(savedInStore) != 1 || savedInStore[0].ID != "vidPlay2222" {
+		t.Fatalf("expected ToggleSaved persisted vidPlay2222, got %+v err=%v", savedInStore, err)
+	}
+
+	// Fallback: when CurrentPlaying.ID is empty, clicking [♡] targets SelectedVideo (vidOne11111).
+	s.CurrentPlaying = model.Video{}
+	s, cmd = s.Update(tea.MouseMsg{
+		X:      47,
+		Y:      s.Height - 2,
+		Button: tea.MouseButtonLeft,
+		Action: tea.MouseActionPress,
+	})
+	for _, m := range collectNonTickMsgs(cmd, 150*time.Millisecond) {
+		s, _ = s.Update(m)
+	}
+	if !s.LikedIDs["vidOne11111"] {
+		t.Fatalf("expected fallback like on SelectedVideo vidOne11111, got %v", s.LikedIDs)
+	}
+}
+
+func TestClickPartiallyVisibleBottomCardDoesNotScrollAndPlaysOnSecondClick(t *testing.T) {
+	s, _, eng, _ := newTestState()
+	defer s.Close()
+
+	// Size 120x38 with no player bar -> bodyH=32, gridCardHeight=15 => 2 full visible rows
+	// (y=5..19 and y=20..34), with row 2 partially visible at y=35..36.
+	s, _ = s.Update(tea.WindowSizeMsg{Width: 120, Height: 38})
+
+	cols := s.GridCols()
+	total := 3 * cols
+	videos := make([]model.Video, 0, total)
+	for i := 0; i < total; i++ {
+		videos = append(videos, model.Video{
+			ID:       fmt.Sprintf("vid%02d", i),
+			Title:    fmt.Sprintf("Video %02d", i),
+			Channel:  "Chan",
+			Duration: "04:00",
+		})
+	}
+	s, _ = s.Update(FeedLoadedMsg{Tab: model.TabHome, Videos: videos})
+
+	if vis := s.VisibleGridRows(); vis != 2 {
+		t.Fatalf("VisibleGridRows = %d, want 2 at 120x38", vis)
+	}
+
+	row2Idx := 2 * cols
+	clickX := s.mainOriginX() + 2
+	clickY := 5 + 2*s.gridCardHeight() // relY == 2*gridCardHeight(), inside BodyHeight (32)
+	if relY := clickY - 5; relY < 2*s.gridCardHeight() || relY >= s.BodyHeight() {
+		t.Fatalf("test geometry invalid: relY=%d cardH=%d bodyH=%d", relY, s.gridCardHeight(), s.BodyHeight())
+	}
+
+	// First click selects row 2's partially visible card in place without scrolling.
+	s, _ = s.Update(tea.MouseMsg{
+		X:      clickX,
+		Y:      clickY,
+		Button: tea.MouseButtonLeft,
+		Action: tea.MouseActionPress,
+	})
+	if s.ScrollOffset != 0 {
+		t.Fatalf("ScrollOffset after first click on partial bottom card = %d, want 0", s.ScrollOffset)
+	}
+	if s.SelectedIdx != row2Idx {
+		t.Fatalf("SelectedIdx after first click = %d, want %d", s.SelectedIdx, row2Idx)
+	}
+	if s.PlayLoading || len(eng.Calls()) != 0 {
+		t.Fatalf("expected first click only to select without playing, loading=%v calls=%+v", s.PlayLoading, eng.Calls())
+	}
+
+	// Second click at the exact same (x, y) triggers PlaySelected("auto") for row 2's card.
+	var cmd tea.Cmd
+	s, cmd = s.Update(tea.MouseMsg{
+		X:      clickX,
+		Y:      clickY,
+		Button: tea.MouseButtonLeft,
+		Action: tea.MouseActionPress,
+	})
+	if !s.PlayLoading || s.PlayLoadingTitle != videos[row2Idx].Title {
+		t.Fatalf("expected second click at (%d,%d) to trigger PlaySelected for %q, got loading=%v title=%q",
+			clickX, clickY, videos[row2Idx].Title, s.PlayLoading, s.PlayLoadingTitle)
+	}
+	for _, m := range collectNonTickMsgs(cmd, 150*time.Millisecond) {
+		s, _ = s.Update(m)
+	}
+	playedTarget := false
+	for _, c := range eng.Calls() {
+		if c.Method == "Play" && c.Video.ID == videos[row2Idx].ID {
+			playedTarget = true
+			break
+		}
+	}
+	if !playedTarget {
+		t.Fatalf("expected Play call for %s on second click, got calls=%+v", videos[row2Idx].ID, eng.Calls())
+	}
+}
+
+func TestTabMusicHidesLiveStationsOnDefaultChip(t *testing.T) {
+	s, _, _, _ := newTestState()
+	defer s.Close()
+
+	s.ActiveTab = model.TabMusic
+	s.HomeChip = 0
+	s.Feeds[model.TabMusic] = []model.Video{
+		{ID: "song1111111", Title: "De Música Ligera", Channel: "Soda Stereo", Duration: "03:32"},
+		{ID: "live2222222", Title: "Oasis - The Station", Channel: "Oasis", IsLive: true},
+	}
+
+	vis := s.VisibleItems()
+	if len(vis) != 1 || vis[0].ID != "song1111111" {
+		t.Fatalf("TabMusic Todo chip visible = %+v, want only non-live song1111111", vis)
+	}
+
+	// Explicit En vivo chip (HomeChip == 1) still surfaces live streams if requested.
+	s.HomeChip = 1
+	visLive := s.VisibleItems()
+	if len(visLive) != 1 || visLive[0].ID != "live2222222" {
+		t.Fatalf("TabMusic En vivo chip visible = %+v, want live2222222", visLive)
+	}
 }

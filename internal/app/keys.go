@@ -408,6 +408,22 @@ func (s *State) handleKey(msg tea.KeyMsg) (*State, tea.Cmd) {
 			return s, nil
 		}
 		return s.ToggleLyrics()
+	case "z":
+		if s.ShowLyrics {
+			return s.AdjustLyricsOffset(-0.5)
+		}
+	case "Z":
+		if s.ShowLyrics {
+			return s.AdjustLyricsOffset(0.5)
+		}
+	case "y":
+		if s.ShowLyrics {
+			return s.CycleLyricsSource()
+		}
+	case "Y":
+		if s.ShowLyrics {
+			return s.ResetLyricsOffset()
+		}
 	case "b", "B":
 		return s.ToggleSponsorBlock()
 	case "t", "T":

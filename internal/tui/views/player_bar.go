@@ -105,7 +105,23 @@ func renderPlayerPanel(s *app.State, th theme.Theme, width int, pal renderPalett
 	row2 := " " + lipgloss.NewStyle().Foreground(pal.muted).Render(posStr) + "  " + progBar + "  " + lipgloss.NewStyle().Foreground(pal.muted).Render(durStr)
 
 	// Row 3: ultra-minimalist transport controls only (zero shortcut/command clutter).
+	activeID := s.CurrentPlaying.ID
+	if activeID == "" {
+		if v, ok := s.SelectedVideo(); ok {
+			activeID = v.ID
+		}
+	}
 	btnStyle := lipgloss.NewStyle().Foreground(pal.ctrlBtn).Bold(true)
+	accentBtnStyle := lipgloss.NewStyle().Foreground(pal.spotAccent).Bold(true)
+	spotifyLikeStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#1DB954")).Bold(true)
+	likeStyle := btnStyle
+	if activeID != "" && s.LikedIDs[activeID] {
+		likeStyle = spotifyLikeStyle
+	}
+	saveStyle := btnStyle
+	if activeID != "" && s.SavedIDs[activeID] {
+		saveStyle = accentBtnStyle
+	}
 	btns := strings.Join([]string{
 		btnStyle.Render("[|<]"),
 		btnStyle.Render("[▶/⏸]"),
@@ -114,7 +130,8 @@ func renderPlayerPanel(s *app.State, th theme.Theme, width int, pal renderPalett
 		btnStyle.Render("[+10s]"),
 		btnStyle.Render("[Vol-]"),
 		btnStyle.Render("[Vol+]"),
-		btnStyle.Render("[★]"),
+		likeStyle.Render("[♥]"),
+		saveStyle.Render("[◷]"),
 	}, " ")
 	row3 := truncateStyledLine(" "+btns, innerW)
 

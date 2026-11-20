@@ -277,7 +277,7 @@ func (s *State) playVideo(v model.Video, mode string) (*State, tea.Cmd) {
 	}
 	var lyricsCmd tea.Cmd
 	if s.ShowLyrics {
-		lyricsCmd = s.startLyricsFetch(v.ID, v.Title, v.Channel)
+		lyricsCmd = s.startLyricsFetch(v.ID, v.Title, v.Channel, float64(parseDurationSeconds(v.Duration)))
 	}
 	return s, tea.Batch(toastCmd, playCmd, lyricsCmd, s.ensureAnimTick())
 }

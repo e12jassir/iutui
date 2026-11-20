@@ -540,6 +540,33 @@ func TestRenderChannelChaptersLyricsAndThemes(t *testing.T) {
 			t.Fatalf("expected plain lyrics near end of track to auto-scroll to line 35, got:\n%s", outPlain)
 		}
 	})
+
+	t.Run("lyrics_offset_shifts_active_line_cleanly", func(t *testing.T) {
+		s := newTestState(app.ViewHome, 120, 36)
+		defer s.Close()
+		s.ShowLyrics = true
+		s.LyricsTrack = "De Música Ligera"
+		s.PlayerStatus.TimePos = 15
+		s.LyricsOffset = 8.0
+		s.Lyrics = lyrics.TrackLyrics{
+			TrackName:  "De Música Ligera",
+			ArtistName: "Soda Stereo",
+			Source:     lyrics.SourceLRCLib,
+			Synced: []lyrics.Line{
+				{Time: 5, Text: "Ella durmió"},
+				{Time: 12, Text: "Al calor de las masas"},
+				{Time: 22, Text: "Y yo desperté"},
+			},
+		}
+		out := Render(s, th, tr)
+		assertBounds(t, out, 120, 36)
+		if !strings.Contains(out, "▶ Y yo desperté") {
+			t.Fatalf("expected active lyric shifted to '▶ Y yo desperté' with +8.0s offset, got:\n%s", out)
+		}
+		if strings.Contains(out, "LRCLib") || strings.Contains(out, "[z/Z] Sync") {
+			t.Fatalf("expected clean lyrics panel without source badge or bottom hint, got:\n%s", out)
+		}
+	})
 }
 
 func TestRenderBrandVersionAndNoItemCounter(t *testing.T) {
@@ -856,4 +883,49 @@ func TestRenderHelpStudioOverlay(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestRenderPlayerBarLikeAndSaveButtons(t *testing.T) {
+	th := theme.DefaultTheme()
+	tr := thumbs.NewTextRenderer()
+	pal := resolveRenderPalette("youtube-dark")
+
+	prevProfile := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(0)
+	defer lipgloss.SetColorProfile(prevProfile)
+
+	accentLike := lipgloss.NewStyle().Foreground(lipgloss.Color("#1DB954")).Bold(true).Render("[♥]")
+	plainLike := lipgloss.NewStyle().Foreground(pal.ctrlBtn).Bold(true).Render("[♥]")
+	accentSave := lipgloss.NewStyle().Foreground(pal.spotAccent).Bold(true).Render("[◷]")
+	plainSave := lipgloss.NewStyle().Foreground(pal.ctrlBtn).Bold(true).Render("[◷]")
+
+	s := newTestState(app.ViewHome, 120, 36)
+	defer s.Close()
+	s.CurrentPlaying = fixedVideos()[1] // vid002 (neither liked nor saved in newTestState)
+
+	outUnliked := Render(s, th, tr)
+	assertBounds(t, outUnliked, 120, 36)
+	if !strings.Contains(outUnliked, plainLike+" "+plainSave) {
+		t.Fatalf("expected unliked player bar to render [♥] [◷] with ctrlBtn style, got:\n%s", outUnliked)
+	}
+	if strings.Contains(outUnliked, accentLike) {
+		t.Fatalf("did not expect accent like styling when CurrentPlaying is not in LikedIDs")
+	}
+
+	s.LikedIDs[s.CurrentPlaying.ID] = true
+	outLiked := Render(s, th, tr)
+	assertBounds(t, outLiked, 120, 36)
+	if !strings.Contains(outLiked, accentLike) {
+		t.Fatalf("expected [♥] to use spotAccent style when CurrentPlaying.ID is in LikedIDs, got:\n%s", outLiked)
+	}
+	if !strings.Contains(outLiked, plainSave) {
+		t.Fatalf("expected [◷] to remain ctrlBtn style when CurrentPlaying.ID is not in SavedIDs")
+	}
+
+	s.SavedIDs[s.CurrentPlaying.ID] = true
+	outBoth := Render(s, th, tr)
+	assertBounds(t, outBoth, 120, 36)
+	if !strings.Contains(outBoth, accentLike) || !strings.Contains(outBoth, accentSave) {
+		t.Fatalf("expected both [♥] and [◷] to use spotAccent style when liked & saved")
+	}
 }

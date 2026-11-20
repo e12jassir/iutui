@@ -18,7 +18,7 @@ import (
 const (
 	searchTimeout           = 45 * time.Second
 	channelTimeout          = 20 * time.Second
-	lyricsTimeout           = 6 * time.Second
+	lyricsTimeout           = 8 * time.Second
 	feedTimeout             = 30 * time.Second
 	uiTickRate              = 250 * time.Millisecond // 4 Hz cap
 	animTickRate            = 90 * time.Millisecond
@@ -185,6 +185,12 @@ type DownloadProgressMsg struct {
 	Item download.Item
 }
 
+// CookiesReadyMsg notifies the TUI that browser cookie extraction completed.
+type CookiesReadyMsg struct {
+	JarPath    string
+	ReloadFeed bool
+}
+
 // Init starts initial feed/store loading and subscribes to player status push updates.
 func (s *State) Init() tea.Cmd {
 	if s.Deps.Catalog != nil {
@@ -296,6 +302,26 @@ func (s *State) Update(msg tea.Msg) (*State, tea.Cmd) {
 
 	case ThumbReadyMsg:
 		return s, nil
+
+	case CookiesReadyMsg:
+		if strings.TrimSpace(msg.JarPath) == "" || s.CookiesMode == "off" {
+			return s, nil
+		}
+		if !msg.ReloadFeed {
+			return s, nil
+		}
+		delete(s.Feeds, model.TabHome)
+		delete(s.Feeds, model.TabMusic)
+		delete(s.Feeds, model.TabSubscriptions)
+		if s.View == ViewHome && (s.ActiveTab == model.TabHome || s.ActiveTab == model.TabMusic || s.ActiveTab == model.TabSubscriptions) {
+			s.Syncing = true
+			return s, tea.Batch(
+				s.toastCmd("🍪 Sesión detectada · cargando tu feed..."),
+				s.loadFeedCmd(s.ActiveTab, true),
+				s.ensureAnimTick(),
+			)
+		}
+		return s, s.toastCmd("🍪 Sesión de navegador detectada")
 
 	case ActionResultMsg:
 		if msg.Err != nil {
@@ -472,6 +498,14 @@ func (s *State) Update(msg tea.Msg) (*State, tea.Cmd) {
 
 	case MetadataEnrichedMsg:
 		s.applyEnrichedMetadata(msg.Meta)
+		if s.View == ViewHome && s.ActiveTab == model.TabMusic {
+			if vis := s.VisibleItems(); len(vis) > 0 && s.SelectedIdx >= len(vis) {
+				s.SetSelection(len(vis) - 1)
+			} else if len(vis) == 0 {
+				s.SelectedIdx = 0
+				s.ScrollOffset = 0
+			}
+		}
 		return s, nil
 
 	case SuggestTickMsg:
@@ -542,7 +576,11 @@ func (s *State) Update(msg tea.Msg) (*State, tea.Cmd) {
 		cmds := []tea.Cmd{s.waitPlayerStatusCmd()}
 		if s.ShowLyrics && msg.Status.IsRunning && strings.TrimSpace(msg.Status.Title) != "" && msg.Status.Title != s.LyricsTrack {
 			v := s.findVideoForTitle(msg.Status.Title)
-			if cmd := s.startLyricsFetch(v.ID, msg.Status.Title, v.Channel); cmd != nil {
+			dur := msg.Status.Duration
+			if dur <= 0 {
+				dur = float64(parseDurationSeconds(v.Duration))
+			}
+			if cmd := s.startLyricsFetch(v.ID, msg.Status.Title, v.Channel, dur); cmd != nil {
 				cmds = append(cmds, cmd, s.ensureAnimTick())
 			}
 		}
