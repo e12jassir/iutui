@@ -47,10 +47,269 @@ func (c *IPCClient) SetAutoplayFallback(ids []string) {
 	c.fallbackMu.Unlock()
 }
 
+// SetRadioTaste updates the listener's liked/history taste signals used to
+// curate smart radio queues while preserving in-session skip/seed feedback.
+func (c *IPCClient) SetRadioTaste(taste TasteProfile) {
+	if c == nil {
+		return
+	}
+	c.tasteMu.Lock()
+	c.taste = taste
+	c.tasteMu.Unlock()
+}
+
+func (c *IPCClient) snapshotTasteLocked() (TasteProfile, []string) {
+	c.tasteMu.RLock()
+	tp := TasteProfile{
+		LikedArtists:   c.taste.LikedArtists,
+		LikedTracks:    c.taste.LikedTracks,
+		HistoryArtists: c.taste.HistoryArtists,
+		HistoryTracks:  c.taste.HistoryTracks,
+		SkippedArtists: make(map[string]float64, len(c.taste.SkippedArtists)+len(c.sessionSkippedArtists)),
+		SkippedTracks:  make(map[string]bool, len(c.taste.SkippedTracks)+len(c.sessionSkippedTracks)),
+	}
+	for k, v := range c.taste.SkippedArtists {
+		tp.SkippedArtists[k] += v
+	}
+	for k, v := range c.sessionSkippedArtists {
+		tp.SkippedArtists[k] += v
+	}
+	for k, v := range c.taste.SkippedTracks {
+		if v {
+			tp.SkippedTracks[k] = true
+		}
+	}
+	for k, v := range c.sessionSkippedTracks {
+		if v {
+			tp.SkippedTracks[k] = true
+		}
+	}
+	var extras []string
+	for _, s := range c.completedSeeds {
+		if s.ID != "" {
+			extras = append(extras, s.ID)
+		}
+	}
+	c.tasteMu.RUnlock()
+	return tp, extras
+}
+
+// RecordCompletedTrack remembers a track that the listener stayed with so future
+// radio extensions can blend up to 3 recent session tracks as a multi-track seed.
+func (c *IPCClient) RecordCompletedTrack(v model.Video) {
+	if c == nil {
+		return
+	}
+	vid := ExtractYouTubeID(v.ID)
+	if vid == "" {
+		return
+	}
+	c.tasteMu.Lock()
+	defer c.tasteMu.Unlock()
+	next := make([]RadioTrack, 0, 3)
+	next = append(next, RadioTrack{ID: vid, Title: v.Title, Artist: v.Channel})
+	for _, prev := range c.completedSeeds {
+		if prev.ID == vid {
+			continue
+		}
+		next = append(next, prev)
+		if len(next) >= 3 {
+			break
+		}
+	}
+	c.completedSeeds = next
+}
+
+// RecordFastSkip learns an in-session fast skip, demoting the track & artist
+// and removing upcoming radio tracks by the same artist (never user-queued tracks).
+func (c *IPCClient) RecordFastSkip(v model.Video) {
+	if c == nil {
+		return
+	}
+	vid := ExtractYouTubeID(v.ID)
+	songKey := canonicalSongKey(v.Title, v.Channel)
+	artistKey := primaryArtistKey(v.Channel, v.Title)
+
+	c.tasteMu.Lock()
+	if c.sessionSkippedTracks == nil {
+		c.sessionSkippedTracks = make(map[string]bool)
+	}
+	if vid != "" {
+		c.sessionSkippedTracks[vid] = true
+	}
+	if songKey != "" {
+		c.sessionSkippedTracks[songKey] = true
+	}
+	if artistKey != "" {
+		if c.sessionSkippedArtists == nil {
+			c.sessionSkippedArtists = make(map[string]float64)
+		}
+		c.sessionSkippedArtists[artistKey] += 1.0
+	}
+	c.tasteMu.Unlock()
+
+	if artistKey != "" && c.isConnected() && c.ctx.Err() == nil {
+		go c.pruneSkippedArtistFromPlaylist(artistKey)
+	}
+}
+
+func (c *IPCClient) pruneSkippedArtistFromPlaylist(artistKey string) {
+	if artistKey == "" || !c.isConnected() {
+		return
+	}
+	ctx, cancel := context.WithTimeout(c.ctx, 1500*time.Millisecond)
+	defer cancel()
+
+	items, err := c.Playlist(ctx)
+	if err != nil || len(items) == 0 {
+		return
+	}
+	st := c.Status()
+	curPos := st.PlaylistPos
+	if curPos < 0 {
+		for _, it := range items {
+			if it.Current {
+				curPos = it.Index
+				break
+			}
+		}
+	}
+	if curPos < 0 {
+		curPos = 0
+	}
+
+	c.playlistMu.Lock()
+	userQ := make(map[string]bool, len(c.userQueuedIDs))
+	for _, qid := range c.userQueuedIDs {
+		if qid != "" {
+			userQ[qid] = true
+		}
+	}
+	c.playlistMu.Unlock()
+
+	var toRemove []int
+	for _, it := range items {
+		if it.Index <= curPos {
+			continue
+		}
+		vid := ExtractYouTubeID(it.Filename)
+		if vid != "" && userQ[vid] {
+			continue
+		}
+		itemArtist := primaryArtistKey(it.Artist, it.Title)
+		if itemArtist == artistKey {
+			toRemove = append(toRemove, it.Index)
+			if len(toRemove) >= 3 {
+				break
+			}
+		}
+	}
+	for i := len(toRemove) - 1; i >= 0; i-- {
+		if _, err := c.sendCommand(ctx, "playlist-remove", toRemove[i]); err != nil {
+			return
+		}
+	}
+}
+
+func (c *IPCClient) cacheRadioTracks(tracks []RadioTrack) {
+	if len(tracks) == 0 {
+		return
+	}
+	c.metaMu.Lock()
+	if c.trackMeta == nil {
+		c.trackMeta = make(map[string]RadioTrack, len(tracks))
+	}
+	for _, tr := range tracks {
+		id := ExtractYouTubeID(tr.ID)
+		if id == "" {
+			id = strings.TrimSpace(tr.ID)
+		}
+		if id == "" {
+			continue
+		}
+		tr.ID = id
+		if tr.Title != "" || tr.Artist != "" {
+			c.trackMeta[id] = tr
+		}
+	}
+	c.metaMu.Unlock()
+}
+
+func (c *IPCClient) lookupDisplayTitle(videoID string) (string, bool) {
+	if videoID == "" {
+		return "", false
+	}
+	c.metaMu.RLock()
+	tr, ok := c.trackMeta[videoID]
+	c.metaMu.RUnlock()
+	if !ok {
+		return "", false
+	}
+	title := tr.DisplayTitle()
+	return title, title != ""
+}
+
+func (c *IPCClient) onNewPlayTrack(v model.Video) {
+	vid := ExtractYouTubeID(v.ID)
+	if vid == "" {
+		vid = model.MixSeedVideoID(v.ID)
+	}
+	if vid != "" && v.Title != "" {
+		c.cacheRadioTracks([]RadioTrack{{
+			ID:     vid,
+			Title:  v.Title,
+			Artist: v.Channel,
+		}})
+	}
+	c.resetMixQueueState(vid)
+}
+
+func (c *IPCClient) resetMixQueueState(seedID string) {
+	c.playlistMu.Lock()
+	c.userQueuedIDs = nil
+	c.extendingSeq = 0
+	if seedID != "" {
+		c.appendPlayedHistoryLocked(seedID)
+	}
+	c.playlistMu.Unlock()
+}
+
+func (c *IPCClient) recordPlayedTrackID(videoID string) {
+	if videoID == "" {
+		return
+	}
+	c.playlistMu.Lock()
+	for i, id := range c.userQueuedIDs {
+		if id == videoID {
+			c.userQueuedIDs = append(c.userQueuedIDs[:i], c.userQueuedIDs[i+1:]...)
+			break
+		}
+	}
+	c.appendPlayedHistoryLocked(videoID)
+	c.playlistMu.Unlock()
+}
+
+func (c *IPCClient) appendPlayedHistoryLocked(videoID string) {
+	if videoID == "" {
+		return
+	}
+	for i, id := range c.playedHistoryIDs {
+		if id == videoID {
+			c.playedHistoryIDs = append(c.playedHistoryIDs[:i], c.playedHistoryIDs[i+1:]...)
+			break
+		}
+	}
+	c.playedHistoryIDs = append(c.playedHistoryIDs, videoID)
+	if len(c.playedHistoryIDs) > 100 {
+		c.playedHistoryIDs = c.playedHistoryIDs[len(c.playedHistoryIDs)-100:]
+	}
+}
+
 func (c *IPCClient) scheduleMixAppend(mixCtx context.Context, seq uint64, plan resolvedPlayTarget) {
 	if (!plan.isMix && !plan.isAutoplay) || plan.seedID == "" || (plan.playlistFetched && len(plan.playlistIDs) == 0) {
 		return
 	}
+	c.resetMixQueueState(plan.seedID)
 	c.subMu.Lock()
 	canSpawn := !c.closed && c.ctx.Err() == nil && c.isCurrentPlay(seq)
 	if canSpawn {
@@ -69,27 +328,56 @@ func (c *IPCClient) appendMixTracks(mixCtx context.Context, seq uint64, targetUR
 		return
 	}
 
-	if len(playlistIDs) == 0 {
-		playlistIDs = c.fetchPlaylistIDs(mixCtx, targetURL, 20)
+	taste, extraSeeds := c.snapshotTasteLocked()
+
+	var candidates []RadioTrack
+	if len(playlistIDs) > 0 {
+		candidates = idsToRadioTracks(playlistIDs)
+	} else {
+		if c.radioClient != nil && (isAutoplay || strings.Contains(targetURL, "list=RD")) {
+			if fetched, err := c.radioClient.FetchMultiSeedRadio(mixCtx, seedID, extraSeeds, 40); err == nil && len(fetched) > 0 {
+				candidates = fetched
+			}
+		}
+		if !c.isCurrentPlay(seq) || mixCtx.Err() != nil {
+			return
+		}
+		if len(candidates) == 0 {
+			candidates = idsToRadioTracks(c.fetchPlaylistIDs(mixCtx, targetURL, 20))
+		}
 	}
 	if !c.isCurrentPlay(seq) || mixCtx.Err() != nil {
 		return
 	}
 
-	remaining := deduplicateTrackIDs(playlistIDs, seedID)
-	if len(remaining) == 0 && isAutoplay {
+	if len(candidates) == 0 && isAutoplay {
 		c.fallbackMu.RLock()
 		fallbackIDs := append([]string(nil), c.autoplayFallbackIDs...)
 		c.fallbackMu.RUnlock()
-		remaining = deduplicateTrackIDs(fallbackIDs, seedID)
-	}
-	if len(remaining) == 0 {
-		return
+		candidates = idsToRadioTracks(fallbackIDs)
 	}
 
+	c.playlistMu.Lock()
+	recentIDs := append([]string(nil), c.playedHistoryIDs...)
+	c.playlistMu.Unlock()
+
+	curated := CurateRadioQueue(seedID, candidates, taste, recentIDs, 25)
+	if len(curated) == 0 && isAutoplay {
+		c.fallbackMu.RLock()
+		fallbackIDs := append([]string(nil), c.autoplayFallbackIDs...)
+		c.fallbackMu.RUnlock()
+		if len(fallbackIDs) > 0 {
+			curated = CurateRadioQueue(seedID, idsToRadioTracks(fallbackIDs), taste, recentIDs, 25)
+		}
+	}
+	if len(curated) == 0 {
+		return
+	}
+	c.cacheRadioTracks(curated)
+
 	if c.resolver != nil {
-		for i := 0; i < len(remaining) && i < 2; i++ {
-			c.resolver.Prefetch(mixCtx, model.Video{ID: remaining[i]})
+		for i := 0; i < len(curated) && i < 2; i++ {
+			c.resolver.Prefetch(mixCtx, model.Video{ID: curated[i].ID, Title: curated[i].DisplayTitle()})
 		}
 	}
 
@@ -97,14 +385,139 @@ func (c *IPCClient) appendMixTracks(mixCtx context.Context, seq uint64, targetUR
 		return
 	}
 
-	for _, id := range remaining {
+	for _, tr := range curated {
 		if !c.isCurrentPlay(seq) || mixCtx.Err() != nil {
 			return
 		}
-		if _, err := c.sendCommand(mixCtx, "loadfile", "https://www.youtube.com/watch?v="+id, "append"); err != nil {
+		if err := c.appendTrackToMPV(mixCtx, tr, "append"); err != nil {
 			return
 		}
 	}
+}
+
+func (c *IPCClient) appendTrackToMPV(ctx context.Context, tr RadioTrack, appendMode string) error {
+	url := fmt.Sprintf("https://www.youtube.com/watch?v=%s", tr.ID)
+	if title := tr.DisplayTitle(); title != "" {
+		if _, err := c.sendCommand(ctx, "loadfile", url, appendMode, -1, map[string]any{"force-media-title": title}); err == nil {
+			return nil
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+	}
+	_, err := c.sendCommand(ctx, "loadfile", url, appendMode)
+	return err
+}
+
+func (c *IPCClient) prefetchUpcomingTracks(pos, count int) {
+	if c.resolver == nil || pos < 0 || pos+1 >= count {
+		return
+	}
+	ctx, cancel := context.WithTimeout(c.ctx, 1500*time.Millisecond)
+	defer cancel()
+	items, err := c.Playlist(ctx)
+	if err != nil {
+		return
+	}
+	for offset := 1; offset <= 2; offset++ {
+		idx := pos + offset
+		if idx < 0 || idx >= len(items) {
+			break
+		}
+		vid := ExtractYouTubeID(items[idx].Filename)
+		if vid != "" {
+			c.resolver.Prefetch(c.ctx, model.Video{ID: vid, Title: items[idx].Title})
+		}
+	}
+}
+
+func (c *IPCClient) maybeExtendRadio(activeVideoID string) {
+	if c.radioClient == nil || !c.autoplay.Load() || !c.isConnected() {
+		return
+	}
+	seq := c.playSeq.Load()
+	if seq == 0 {
+		return
+	}
+
+	c.playlistMu.Lock()
+	if c.extendingSeq == seq {
+		c.playlistMu.Unlock()
+		return
+	}
+	c.extendingSeq = seq
+	recentIDs := append([]string(nil), c.playedHistoryIDs...)
+	c.playlistMu.Unlock()
+
+	defer func() {
+		c.playlistMu.Lock()
+		if c.extendingSeq == seq {
+			c.extendingSeq = 0
+		}
+		c.playlistMu.Unlock()
+	}()
+
+	ctx, cancel := context.WithTimeout(c.ctx, 10*time.Second)
+	defer cancel()
+
+	items, err := c.Playlist(ctx)
+	if err == nil {
+		for _, it := range items {
+			if id := ExtractYouTubeID(it.Filename); id != "" {
+				recentIDs = append(recentIDs, id)
+			}
+		}
+	}
+
+	seedID := ExtractYouTubeID(activeVideoID)
+	if seedID == "" && len(items) > 0 {
+		for i := len(items) - 1; i >= 0; i-- {
+			if id := ExtractYouTubeID(items[i].Filename); id != "" {
+				seedID = id
+				break
+			}
+		}
+	}
+	if seedID == "" || !c.isCurrentPlay(seq) || c.ctx.Err() != nil {
+		return
+	}
+
+	taste, extraSeeds := c.snapshotTasteLocked()
+
+	candidates, err := c.radioClient.FetchMultiSeedRadio(ctx, seedID, extraSeeds, 40)
+	if err != nil || len(candidates) == 0 || !c.isCurrentPlay(seq) {
+		return
+	}
+
+	curated := CurateRadioQueue(seedID, candidates, taste, recentIDs, 15)
+	if len(curated) == 0 || !c.isCurrentPlay(seq) {
+		return
+	}
+	c.cacheRadioTracks(curated)
+
+	for _, tr := range curated {
+		if !c.isCurrentPlay(seq) || ctx.Err() != nil {
+			return
+		}
+		if err := c.appendTrackToMPV(ctx, tr, "append"); err != nil {
+			return
+		}
+	}
+}
+
+func idsToRadioTracks(ids []string) []RadioTrack {
+	if len(ids) == 0 {
+		return nil
+	}
+	out := make([]RadioTrack, 0, len(ids))
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		out = append(out, RadioTrack{ID: id})
+	}
+	return out
 }
 
 func deduplicateTrackIDs(rawIDs []string, excludeID string) []string {
@@ -241,7 +654,9 @@ func parsePlaylistIDs(data []byte, limit int) []string {
 	return ids
 }
 
-// Enqueue appends v to the active playlist or starts playback if no mpv instance is connected.
+// Enqueue appends v to the active playlist (inserting right after the current
+// track ahead of autoplay radio tracks) or starts playback if no mpv instance
+// is connected.
 func (c *IPCClient) Enqueue(ctx context.Context, v model.Video) error {
 	if c.ctx.Err() != nil {
 		return ErrClientClosed
@@ -253,18 +668,46 @@ func (c *IPCClient) Enqueue(ctx context.Context, v model.Video) error {
 		return ctx.Err()
 	}
 
+	vid := ExtractYouTubeID(v.ID)
+	if vid == "" {
+		vid = strings.TrimSpace(v.ID)
+	}
+	tr := RadioTrack{
+		ID:     vid,
+		Title:  v.Title,
+		Artist: v.Channel,
+	}
+	c.cacheRadioTracks([]RadioTrack{tr})
+
 	if !c.isConnected() {
 		_ = c.tryConnectImmediateCtx(ctx, 150*time.Millisecond)
 	}
 	if c.isConnected() {
-		url := fmt.Sprintf("https://www.youtube.com/watch?v=%s", v.ID)
-		if v.Title != "" {
-			if _, err := c.sendCommand(ctx, "loadfile", url, "append-play", -1, map[string]any{"force-media-title": v.Title}); err == nil {
-				return nil
+		if err := c.appendTrackToMPV(ctx, tr, "append-play"); err != nil {
+			return err
+		}
+		st := c.Status()
+		if st.PlaylistPos >= 0 && st.PlaylistCount > 1 {
+			c.playlistMu.Lock()
+			offset := len(c.userQueuedIDs)
+			c.userQueuedIDs = append(c.userQueuedIDs, vid)
+			c.playlistMu.Unlock()
+
+			if cntResp, err := c.sendCommand(ctx, "get_property", "playlist-count"); err == nil && cntResp.Data != nil {
+				if f, ok := toFloat64(cntResp.Data); ok {
+					newCount := int(f)
+					fromIdx := newCount - 1
+					toIdx := st.PlaylistPos + 1 + offset
+					if toIdx < st.PlaylistPos+1 {
+						toIdx = st.PlaylistPos + 1
+					}
+					if fromIdx > toIdx {
+						_, _ = c.sendCommand(ctx, "playlist-move", fromIdx, toIdx)
+					}
+				}
 			}
 		}
-		_, err := c.sendCommand(ctx, "loadfile", url, "append-play")
-		return err
+		return nil
 	}
 	return c.Play(ctx, v, "")
 }

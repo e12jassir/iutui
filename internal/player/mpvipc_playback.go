@@ -27,6 +27,122 @@ type resolvedPlayTarget struct {
 	launchAllowPlaylist bool
 }
 
+type playFallbackState struct {
+	seq         uint64
+	video       model.Video
+	plan        resolvedPlayTarget
+	fallbackURL string
+	armed       bool
+}
+
+func (c *IPCClient) armDirectStreamFallback(seq uint64, v model.Video, plan resolvedPlayTarget) {
+	c.fallbackPlayMu.Lock()
+	defer c.fallbackPlayMu.Unlock()
+	if plan.fallbackURL != "" && plan.url != plan.fallbackURL {
+		c.playFallback = playFallbackState{
+			seq:         seq,
+			video:       v,
+			plan:        plan,
+			fallbackURL: plan.fallbackURL,
+			armed:       true,
+		}
+		return
+	}
+	c.playFallback = playFallbackState{}
+}
+
+func (c *IPCClient) clearDirectStreamFallback(seq uint64) {
+	c.fallbackPlayMu.Lock()
+	if seq == 0 || c.playFallback.seq == seq {
+		c.playFallback = playFallbackState{}
+	}
+	c.fallbackPlayMu.Unlock()
+}
+
+func (c *IPCClient) takeDirectStreamFallback() (playFallbackState, bool) {
+	c.fallbackPlayMu.Lock()
+	defer c.fallbackPlayMu.Unlock()
+	if !c.playFallback.armed || !c.isCurrentPlay(c.playFallback.seq) {
+		return playFallbackState{}, false
+	}
+	fb := c.playFallback
+	c.playFallback = playFallbackState{}
+	return fb, true
+}
+
+func (c *IPCClient) spawnDirectStreamFallback(fb playFallbackState) {
+	if c.resolver != nil {
+		c.resolver.Invalidate(fb.video.ID)
+		if fb.plan.seedID != "" && fb.plan.seedID != fb.video.ID {
+			c.resolver.Invalidate(fb.plan.seedID)
+		}
+	}
+
+	c.subMu.Lock()
+	canSpawn := !c.closed && c.ctx.Err() == nil && c.isCurrentPlay(fb.seq)
+	if canSpawn {
+		c.wg.Add(1)
+	}
+	c.subMu.Unlock()
+	if !canSpawn {
+		return
+	}
+
+	go func() {
+		defer c.wg.Done()
+		if !c.isCurrentPlay(fb.seq) || c.ctx.Err() != nil {
+			return
+		}
+
+		c.playMu.Lock()
+		if !c.isCurrentPlay(fb.seq) || c.ctx.Err() != nil {
+			c.playMu.Unlock()
+			return
+		}
+		prevCancel := c.playCancel
+		mixCtx, mixCancel := context.WithCancel(c.ctx)
+		c.playCancel = mixCancel
+		c.playMu.Unlock()
+		if prevCancel != nil {
+			prevCancel()
+		}
+
+		c.step3Mu.Lock()
+		if !c.isCurrentPlay(fb.seq) || c.ctx.Err() != nil || !c.isConnected() {
+			c.step3Mu.Unlock()
+			return
+		}
+
+		cmdCtx, cancel := context.WithTimeout(mixCtx, 2*time.Second)
+		_, _ = c.sendCommand(cmdCtx, "set_property", "audio-files", []string{})
+		_, _ = c.sendCommand(cmdCtx, "set_property", "force-media-title", "")
+		_, _ = c.sendCommand(cmdCtx, "playlist-clear")
+
+		perFileOpts := map[string]any{
+			"start": "none",
+		}
+		if fb.video.Title != "" {
+			perFileOpts["force-media-title"] = fb.video.Title
+		}
+		_, err := c.sendCommand(cmdCtx, "loadfile", fb.fallbackURL, "replace", -1, perFileOpts)
+		if err != nil && c.isCurrentPlay(fb.seq) && c.ctx.Err() == nil && c.isConnected() {
+			_, err = c.sendCommand(cmdCtx, "loadfile", fb.fallbackURL, "replace")
+		}
+		if err == nil && c.isCurrentPlay(fb.seq) {
+			_, _ = c.sendCommand(cmdCtx, "set_property", "pause", false)
+		}
+		cancel()
+		c.step3Mu.Unlock()
+
+		if err == nil && c.isCurrentPlay(fb.seq) && mixCtx.Err() == nil {
+			fbPlan := fb.plan
+			fbPlan.url = fb.fallbackURL
+			fbPlan.audioFile = ""
+			c.scheduleMixAppend(mixCtx, fb.seq, fbPlan)
+		}
+	}()
+}
+
 func (c *IPCClient) hasManagedProc() bool {
 	c.procMu.Lock()
 	defer c.procMu.Unlock()
@@ -102,6 +218,7 @@ func (c *IPCClient) playWithResume(ctx context.Context, v model.Video, mode stri
 	}
 
 	c.clearSponsorBlockState(seq)
+	c.clearDirectStreamFallback(0)
 
 	waitCtx, waitCancel := context.WithCancel(mixCtx)
 	defer waitCancel()
@@ -168,6 +285,11 @@ func (c *IPCClient) cutActivePlayback(waitCtx context.Context, seq uint64) (skip
 			if conn != nil {
 				c.handleDisconnect(conn)
 			}
+			if c.isConnected() && !c.hasManagedProc() {
+				quitCtx, quitCancel := context.WithTimeout(waitCtx, 150*time.Millisecond)
+				_, _ = c.sendCommand(quitCtx, "quit")
+				quitCancel()
+			}
 			c.killManagedMPV()
 			return true, true
 		}
@@ -176,6 +298,11 @@ func (c *IPCClient) cutActivePlayback(waitCtx context.Context, seq uint64) (skip
 	if c.hasManagedProc() {
 		if !c.isCurrentPlay(seq) || c.ctx.Err() != nil {
 			return false, false
+		}
+		if c.isConnected() && !c.hasManagedProc() {
+			quitCtx, quitCancel := context.WithTimeout(waitCtx, 150*time.Millisecond)
+			_, _ = c.sendCommand(quitCtx, "quit")
+			quitCancel()
 		}
 		c.killManagedMPV()
 		return true, true
@@ -278,9 +405,94 @@ func (c *IPCClient) resolvePlayTarget(waitCtx context.Context, v model.Video, mo
 	return plan
 }
 
+func socketExists(path string) bool {
+	if strings.TrimSpace(path) == "" {
+		return false
+	}
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// CleanupOrphanSocket connects to any leftover mpv socket from an abrupt crash
+// (e.g. SIGKILL) and asks it to quit cleanly before WarmUp or Play runs.
+func (c *IPCClient) CleanupOrphanSocket() {
+	if c == nil || c.ctx.Err() != nil {
+		return
+	}
+	c.launchMu.RLock()
+	sock := strings.TrimSpace(c.launchDefaults.SocketPath)
+	c.launchMu.RUnlock()
+	if sock == "" || !socketExists(sock) {
+		return
+	}
+	if c.isConnected() || c.hasManagedProc() {
+		return
+	}
+	ctx, cancel := context.WithTimeout(c.ctx, 180*time.Millisecond)
+	defer cancel()
+	if c.tryConnectImmediateCtx(ctx, 120*time.Millisecond) {
+		_, _ = c.sendCommand(ctx, "quit")
+		c.connMu.Lock()
+		conn := c.conn
+		c.conn = nil
+		c.connMu.Unlock()
+		if conn != nil {
+			_ = conn.Close()
+		}
+	}
+	_ = os.Remove(sock)
+}
+
+// WarmUp pre-launches an invisible idle mpv instance in audio-only mode so the
+// first Play skips cold mpv process startup (~130ms) and connects immediately.
+func (c *IPCClient) WarmUp() {
+	if c == nil || c.ctx.Err() != nil {
+		return
+	}
+	c.launchMu.RLock()
+	opts := c.launchDefaults
+	c.launchMu.RUnlock()
+
+	if !(opts.AudioOnly || opts.Mode == "audio") || strings.TrimSpace(opts.SocketPath) == "" {
+		return
+	}
+	if c.isConnected() || c.hasManagedProc() || socketExists(opts.SocketPath) {
+		return
+	}
+
+	c.step3Mu.Lock()
+	defer c.step3Mu.Unlock()
+	if c.ctx.Err() != nil || c.isConnected() || c.hasManagedProc() {
+		return
+	}
+
+	_ = os.MkdirAll(filepath.Dir(opts.SocketPath), 0o700)
+	_ = os.Remove(opts.SocketPath)
+	warmOpts := LaunchOpts{
+		SocketPath:   opts.SocketPath,
+		AudioOnly:    true,
+		Mode:         "audio",
+		Quality:      opts.Quality,
+		Volume:       opts.Volume,
+		Speed:        opts.Speed,
+		FastPlayback: opts.FastPlayback,
+	}
+	proc, err := StartMPVProcess("mpv", warmOpts)
+	if err != nil {
+		return
+	}
+	c.procMu.Lock()
+	c.mpvProc = proc
+	c.procAudioOnly = true
+	c.procMu.Unlock()
+	c.signalWake()
+}
+
 func (c *IPCClient) playOnSingleMPV(ctx, waitCtx context.Context, seq uint64, v model.Video, plan resolvedPlayTarget, skipReconnect bool, startPos float64, startPaused bool) error {
 	if !skipReconnect && !c.isConnected() {
-		_ = c.tryConnectImmediateCtx(waitCtx, 150*time.Millisecond)
+		if c.hasManagedProc() || socketExists(c.socketFinder()) {
+			_ = c.tryConnectImmediateCtx(waitCtx, 150*time.Millisecond)
+		}
 	}
 
 	c.step3Mu.Lock()
@@ -324,6 +536,11 @@ func (c *IPCClient) playOnSingleMPV(ctx, waitCtx context.Context, seq uint64, v 
 		return LaunchMPV("mpv", opts)
 	}
 
+	if c.isConnected() && !c.hasManagedProc() {
+		quitCtx, quitCancel := context.WithTimeout(waitCtx, 150*time.Millisecond)
+		_, _ = c.sendCommand(quitCtx, "quit")
+		quitCancel()
+	}
 	c.killManagedMPV()
 	c.procMu.Lock()
 	if !c.isCurrentPlay(seq) || c.ctx.Err() != nil {
@@ -355,8 +572,10 @@ func (c *IPCClient) playOnSingleMPV(ctx, waitCtx context.Context, seq uint64, v 
 			opts.Mode = "window"
 		}
 	}
+	c.armDirectStreamFallback(seq, v, plan)
 	proc, err := StartMPVProcess("mpv", opts)
 	if err != nil {
+		c.clearDirectStreamFallback(seq)
 		c.procMu.Unlock()
 		c.step3Mu.Unlock()
 		return err
@@ -404,6 +623,7 @@ func (c *IPCClient) tryPlayViaIPC(waitCtx context.Context, seq uint64, v model.V
 	_, _ = c.sendCommand(waitCtx, "set_property", "ytdl-format", formatSelectorForVideo(quality, wantAudioOnly, v.IsLive))
 	_, _ = c.sendCommand(waitCtx, "set_property", "audio-files", []string{})
 	_, _ = c.sendCommand(waitCtx, "set_property", "force-media-title", "")
+	_, _ = c.sendCommand(waitCtx, "playlist-clear")
 	if !c.isCurrentPlay(seq) || c.ctx.Err() != nil {
 		return true
 	}
@@ -414,6 +634,8 @@ func (c *IPCClient) tryPlayViaIPC(waitCtx context.Context, seq uint64, v model.V
 		c.setGainBestEffort(waitCtx, fadeFloorDB)
 		c.pendingFadeIn.Store(true)
 	}
+
+	c.armDirectStreamFallback(seq, v, plan)
 
 	var err error
 	perFileOpts := map[string]any{
@@ -429,6 +651,7 @@ func (c *IPCClient) tryPlayViaIPC(waitCtx context.Context, seq uint64, v model.V
 			_, err = c.sendCommand(waitCtx, "loadfile", plan.url, "replace", 0, "audio-file="+plan.audioFile)
 		}
 		if err != nil && c.isCurrentPlay(seq) && c.ctx.Err() == nil && c.isConnected() {
+			c.clearDirectStreamFallback(seq)
 			_, err = c.sendCommand(waitCtx, "loadfile", plan.fallbackURL, "replace")
 		}
 	} else {
@@ -437,6 +660,7 @@ func (c *IPCClient) tryPlayViaIPC(waitCtx context.Context, seq uint64, v model.V
 			_, err = c.sendCommand(waitCtx, "loadfile", plan.url, "replace")
 		}
 		if err != nil && plan.url != plan.fallbackURL && c.isCurrentPlay(seq) && c.ctx.Err() == nil && c.isConnected() {
+			c.clearDirectStreamFallback(seq)
 			_, err = c.sendCommand(waitCtx, "loadfile", plan.fallbackURL, "replace")
 		}
 	}
@@ -445,6 +669,7 @@ func (c *IPCClient) tryPlayViaIPC(waitCtx context.Context, seq uint64, v model.V
 		return true
 	}
 	if err != nil {
+		c.clearDirectStreamFallback(seq)
 		if c.fadeDuration > 0 {
 			c.pendingFadeIn.Store(false)
 			c.setGainBestEffort(c.ctx, 0.0)
@@ -452,9 +677,15 @@ func (c *IPCClient) tryPlayViaIPC(waitCtx context.Context, seq uint64, v model.V
 		return false
 	}
 
+	c.onNewPlayTrack(v)
 	c.statusMu.Lock()
 	if v.Title != "" {
 		c.status.Title = v.Title
+	}
+	if vid := ExtractYouTubeID(v.ID); vid != "" {
+		c.status.VideoID = vid
+	} else {
+		c.status.VideoID = model.MixSeedVideoID(v.ID)
 	}
 	c.status.TimePos = 0
 	c.status.Duration = 0

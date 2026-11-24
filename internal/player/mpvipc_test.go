@@ -3901,3 +3901,409 @@ func TestIPCClient_AudioFade(t *testing.T) {
 		}
 	})
 }
+
+func TestIPCClient_ObservePlaylistPosAndPath(t *testing.T) {
+	srv := startTestMPVServer(t, nil)
+	client := NewIPCClient(WithSocketPath(srv.sockPath), WithCommandTimeout(time.Second))
+	defer client.Close()
+
+	var serverConn net.Conn
+	select {
+	case serverConn = <-srv.accepts:
+	case <-time.After(time.Second):
+		t.Fatalf("server did not accept client connection")
+	}
+
+	client.cacheRadioTracks([]RadioTrack{
+		{ID: "adiosTrack1", Title: "Adiós", Artist: "Gustavo Cerati"},
+	})
+
+	ch := client.Subscribe(context.Background())
+	_ = srv.SendJSON(serverConn, map[string]any{"event": "property-change", "name": "playlist-count", "data": float64(5)})
+	_ = srv.SendJSON(serverConn, map[string]any{"event": "property-change", "name": "playlist-pos", "data": float64(2)})
+	_ = srv.SendJSON(serverConn, map[string]any{"event": "property-change", "name": "path", "data": "https://www.youtube.com/watch?v=adiosTrack1"})
+
+	deadline := time.After(2 * time.Second)
+	for {
+		st := client.Status()
+		if st.PlaylistCount == 5 && st.PlaylistPos == 2 && st.VideoID == "adiosTrack1" && st.Title == "Gustavo Cerati - Adiós" {
+			break
+		}
+		select {
+		case <-ch:
+		case <-deadline:
+			t.Fatalf("timed out waiting for observed playlist-pos/path update, got %+v", client.Status())
+		}
+	}
+}
+
+func TestIPCClient_EnqueueMovesAheadOfAutoplayTracks(t *testing.T) {
+	var mu sync.Mutex
+	var recorded [][]any
+
+	var srv *testMPVServer
+	srv = startTestMPVServer(t, func(conn net.Conn, cmd []any, reqID int64) {
+		if len(cmd) > 0 {
+			name, _ := cmd[0].(string)
+			mu.Lock()
+			recorded = append(recorded, cmd)
+			appendCount := 0
+			for _, c := range recorded {
+				if len(c) > 0 && c[0] == "loadfile" {
+					appendCount++
+				}
+			}
+			mu.Unlock()
+			if name == "get_property" && len(cmd) > 1 && cmd[1] == "playlist-count" {
+				_ = srv.SendJSON(conn, map[string]any{"data": float64(5 + appendCount), "error": "success", "request_id": reqID})
+				return
+			}
+		}
+		_ = srv.SendJSON(conn, map[string]any{"data": nil, "error": "success", "request_id": reqID})
+	})
+
+	client := NewIPCClient(WithSocketPath(srv.sockPath), WithCommandTimeout(time.Second))
+	defer client.Close()
+
+	var serverConn net.Conn
+	select {
+	case serverConn = <-srv.accepts:
+	case <-time.After(time.Second):
+		t.Fatalf("server did not accept client connection")
+	}
+
+	ch := client.Subscribe(context.Background())
+	_ = srv.SendJSON(serverConn, map[string]any{"event": "property-change", "name": "playlist-count", "data": float64(5)})
+	_ = srv.SendJSON(serverConn, map[string]any{"event": "property-change", "name": "playlist-pos", "data": float64(0)})
+	deadline := time.After(2 * time.Second)
+	for {
+		st := client.Status()
+		if st.PlaylistCount == 5 && st.PlaylistPos == 0 {
+			break
+		}
+		select {
+		case <-ch:
+		case <-deadline:
+			t.Fatalf("timed out waiting for initial playlist status, got %+v", client.Status())
+		}
+	}
+
+	if err := client.Enqueue(context.Background(), model.Video{ID: "queuedFirst", Title: "Primera en Cola", Channel: "Soda Stereo"}); err != nil {
+		t.Fatalf("Enqueue 1: %v", err)
+	}
+	if err := client.Enqueue(context.Background(), model.Video{ID: "queuedSecnd", Title: "Segunda en Cola", Channel: "Cerati"}); err != nil {
+		t.Fatalf("Enqueue 2: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	var moves []string
+	for _, cmd := range recorded {
+		if len(cmd) == 3 && cmd[0] == "playlist-move" {
+			moves = append(moves, fmt.Sprintf("%v->%v", cmd[1], cmd[2]))
+		}
+	}
+	if len(moves) != 2 || moves[0] != "5->1" || moves[1] != "6->2" {
+		t.Fatalf("expected priority playlist-move [5->1 6->2], got moves=%v recorded=%v", moves, recorded)
+	}
+}
+
+func TestIPCClient_SmartRadioCuratesAndHydratesPlaylistTitles(t *testing.T) {
+	ytmSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{
+			"contents": {
+				"playlistPanelRenderer": {
+					"contents": [
+						{
+							"playlistPanelVideoRenderer": {
+								"videoId": "seedTrack01",
+								"title": {"runs": [{"text": "Signos"}]},
+								"longBylineText": {"runs": [{"text": "Soda Stereo"}]},
+								"lengthText": {"runs": [{"text": "5:15"}]},
+								"navigationEndpoint": {"watchEndpoint": {"videoId": "seedTrack01", "watchEndpointMusicSupportedConfigs": {"watchEndpointMusicConfig": {"musicVideoType": "MUSIC_VIDEO_TYPE_ATV"}}}}
+							}
+						},
+						{
+							"playlistPanelVideoRenderer": {
+								"videoId": "curatedTrk1",
+								"title": {"runs": [{"text": "Adiós"}]},
+								"longBylineText": {"runs": [{"text": "Gustavo Cerati"}]},
+								"lengthText": {"runs": [{"text": "3:52"}]},
+								"navigationEndpoint": {"watchEndpoint": {"videoId": "curatedTrk1", "watchEndpointMusicSupportedConfigs": {"watchEndpointMusicConfig": {"musicVideoType": "MUSIC_VIDEO_TYPE_ATV"}}}}
+							}
+						}
+					]
+				}
+			}
+		}`))
+	}))
+	defer ytmSrv.Close()
+
+	var mu sync.Mutex
+	var loadTitles []string
+	var srv *testMPVServer
+	srv = startTestMPVServer(t, func(conn net.Conn, cmd []any, reqID int64) {
+		if len(cmd) >= 5 && cmd[0] == "loadfile" {
+			if opts, ok := cmd[4].(map[string]any); ok {
+				if title, _ := opts["force-media-title"].(string); title != "" {
+					mu.Lock()
+					loadTitles = append(loadTitles, title)
+					mu.Unlock()
+				}
+			}
+		}
+		if len(cmd) == 2 && cmd[0] == "get_property" && cmd[1] == "playlist" {
+			_ = srv.SendJSON(conn, map[string]any{
+				"data": []any{
+					map[string]any{"filename": "https://www.youtube.com/watch?v=seedTrack01", "current": true},
+					map[string]any{"filename": "https://www.youtube.com/watch?v=curatedTrk1"},
+				},
+				"error":      "success",
+				"request_id": reqID,
+			})
+			return
+		}
+		_ = srv.SendJSON(conn, map[string]any{"data": nil, "error": "success", "request_id": reqID})
+	})
+
+	rc := NewRadioClient(WithRadioBaseURL(ytmSrv.URL), WithRadioCookiesPath(filepath.Join(t.TempDir(), "missing.txt")))
+	client := NewIPCClient(WithSocketPath(srv.sockPath), WithRadioClient(rc), WithCommandTimeout(time.Second))
+	defer client.Close()
+
+	select {
+	case <-srv.accepts:
+	case <-time.After(time.Second):
+		t.Fatalf("server did not accept client connection")
+	}
+
+	client.onNewPlayTrack(model.Video{ID: "seedTrack01", Title: "Signos", Channel: "Soda Stereo"})
+	client.wg.Add(1)
+	go client.appendMixTracks(context.Background(), client.playSeq.Load(), "https://www.youtube.com/watch?v=seedTrack01&list=RDseedTrack01", "seedTrack01", nil, true)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		n := len(loadTitles)
+		mu.Unlock()
+		if n == 1 {
+			break
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+
+	mu.Lock()
+	if len(loadTitles) != 1 || loadTitles[0] != "Gustavo Cerati - Adiós" {
+		mu.Unlock()
+		t.Fatalf("expected loadfile force-media-title [Gustavo Cerati - Adiós], got %v", loadTitles)
+	}
+	mu.Unlock()
+
+	pl, err := client.Playlist(context.Background())
+	if err != nil {
+		t.Fatalf("Playlist: %v", err)
+	}
+	if len(pl) != 2 || pl[0].Title != "Soda Stereo - Signos" || pl[1].Title != "Gustavo Cerati - Adiós" {
+		t.Fatalf("expected hydrated playlist titles, got %+v", pl)
+	}
+}
+
+func TestIPCClient_RecordFastSkipPrunesUpcomingRadioNotUserQueue(t *testing.T) {
+	var mu sync.Mutex
+	var removed []int
+	var srv *testMPVServer
+	srv = startTestMPVServer(t, func(conn net.Conn, cmd []any, reqID int64) {
+		if len(cmd) == 2 && cmd[0] == "get_property" && cmd[1] == "playlist" {
+			_ = srv.SendJSON(conn, map[string]any{
+				"data": []any{
+					map[string]any{"filename": "https://www.youtube.com/watch?v=curTrack001", "title": "Skip Artist - Track 1", "current": true},
+					map[string]any{"filename": "https://www.youtube.com/watch?v=userQueue01", "title": "Skip Artist - Enqueued By User"},
+					map[string]any{"filename": "https://www.youtube.com/watch?v=radioSkip02", "title": "Skip Artist - Autoplay Spam"},
+					map[string]any{"filename": "https://www.youtube.com/watch?v=goodTrack03", "title": "Good Artist - Keeper"},
+				},
+				"error":      "success",
+				"request_id": reqID,
+			})
+			return
+		}
+		if len(cmd) == 2 && cmd[0] == "playlist-remove" {
+			if idx, ok := cmd[1].(float64); ok {
+				mu.Lock()
+				removed = append(removed, int(idx))
+				mu.Unlock()
+			}
+		}
+		_ = srv.SendJSON(conn, map[string]any{"data": nil, "error": "success", "request_id": reqID})
+	})
+
+	client := NewIPCClient(WithSocketPath(srv.sockPath), WithCommandTimeout(time.Second))
+	defer client.Close()
+
+	select {
+	case conn := <-srv.accepts:
+		_ = srv.SendJSON(conn, map[string]any{"event": "property-change", "name": "playlist-pos", "data": float64(0)})
+		_ = srv.SendJSON(conn, map[string]any{"event": "property-change", "name": "playlist-count", "data": float64(4)})
+	case <-time.After(time.Second):
+		t.Fatal("server did not accept connection")
+	}
+
+	client.playlistMu.Lock()
+	client.userQueuedIDs = []string{"userQueue01"}
+	client.playlistMu.Unlock()
+
+	client.RecordFastSkip(model.Video{ID: "curTrack001", Title: "Skip Artist - Track 1", Channel: "Skip Artist"})
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		n := len(removed)
+		mu.Unlock()
+		if n > 0 {
+			break
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(removed) != 1 || removed[0] != 2 {
+		t.Fatalf("expected only upcoming autoplay index 2 removed (preserving user-queued index 1), got removed=%v", removed)
+	}
+}
+
+func TestIPCClient_CloseSendsQuitAndPlayClearsStalePlaylist(t *testing.T) {
+	var mu sync.Mutex
+	var cmds [][]any
+	var srv *testMPVServer
+	srv = startTestMPVServer(t, func(conn net.Conn, cmd []any, reqID int64) {
+		mu.Lock()
+		cmds = append(cmds, slices.Clone(cmd))
+		mu.Unlock()
+		_ = srv.SendJSON(conn, map[string]any{"data": nil, "error": "success", "request_id": reqID})
+	})
+
+	client := NewIPCClient(WithSocketPath(srv.sockPath), WithCommandTimeout(time.Second))
+	select {
+	case <-srv.accepts:
+	case <-time.After(time.Second):
+		t.Fatal("server did not accept connection")
+	}
+
+	if err := client.Play(context.Background(), model.Video{ID: "fresh123456", Title: "Fresh"}, "window"); err != nil {
+		t.Fatalf("Play failed: %v", err)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	clearIdx, loadIdx, quitIdx := -1, -1, -1
+	for i, c := range cmds {
+		if len(c) == 0 {
+			continue
+		}
+		switch fmt.Sprint(c[0]) {
+		case "playlist-clear":
+			clearIdx = i
+		case "loadfile":
+			if len(c) >= 3 && fmt.Sprint(c[2]) == "replace" {
+				loadIdx = i
+			}
+		case "quit":
+			quitIdx = i
+		}
+	}
+	if clearIdx < 0 || loadIdx <= clearIdx {
+		t.Fatalf("expected playlist-clear before loadfile replace, cmds=%v", cmds)
+	}
+	if quitIdx < 0 {
+		t.Fatalf("expected Close() to send IPC quit when connected, cmds=%v", cmds)
+	}
+}
+
+func TestIPCClient_EndFileErrorOnDirectStreamFallsBackToWatchURL(t *testing.T) {
+	var mu sync.Mutex
+	var replaceURLs []string
+	var srv *testMPVServer
+	srv = startTestMPVServer(t, func(conn net.Conn, cmd []any, reqID int64) {
+		if len(cmd) >= 3 && fmt.Sprint(cmd[0]) == "loadfile" && fmt.Sprint(cmd[2]) == "replace" {
+			mu.Lock()
+			replaceURLs = append(replaceURLs, fmt.Sprint(cmd[1]))
+			mu.Unlock()
+		}
+		_ = srv.SendJSON(conn, map[string]any{"data": nil, "error": "success", "request_id": reqID})
+	})
+
+	bin := writeFakeYTDLP(t, "printf 'https://rr4---sn-0ox.googlevideo.com/videoplayback?c=IOS\\n'\n")
+	client := NewIPCClient(
+		WithSocketPath(srv.sockPath),
+		WithCommandTimeout(time.Second),
+		WithFadeDuration(0),
+		WithLaunchDefaults(LaunchOpts{
+			SocketPath:   srv.sockPath,
+			AudioOnly:    true,
+			Mode:         "audio",
+			YtdlpBin:     bin,
+			FastPlayback: true,
+		}),
+	)
+	defer client.Close()
+	client.SetAutoplay(false)
+
+	var serverConn net.Conn
+	select {
+	case serverConn = <-srv.accepts:
+	case <-time.After(time.Second):
+		t.Fatal("server did not accept connection")
+	}
+
+	if err := client.Play(context.Background(), model.Video{ID: "chosenVid01", Title: "Prófugos"}, "audio"); err != nil {
+		t.Fatalf("Play failed: %v", err)
+	}
+
+	mu.Lock()
+	if len(replaceURLs) != 1 || !strings.Contains(replaceURLs[0], "googlevideo.com") {
+		mu.Unlock()
+		t.Fatalf("expected initial direct stream loadfile, got %v", replaceURLs)
+	}
+	mu.Unlock()
+
+	// Simulate mpv failing to open the direct stream URL (e.g. HTTP 403).
+	if err := srv.SendJSON(serverConn, map[string]any{"event": "end-file", "reason": "error"}); err != nil {
+		t.Fatalf("send end-file error: %v", err)
+	}
+
+	wantFallback := "https://www.youtube.com/watch?v=chosenVid01"
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		n := len(replaceURLs)
+		mu.Unlock()
+		if n >= 2 {
+			break
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+
+	mu.Lock()
+	got := slices.Clone(replaceURLs)
+	mu.Unlock()
+	if len(got) != 2 || got[1] != wantFallback {
+		t.Fatalf("expected fallback loadfile %q after end-file error, got %v", wantFallback, got)
+	}
+	if _, cached := client.resolver.GetCachedForMode("chosenVid01", true); cached {
+		t.Fatal("expected broken direct stream URL to be evicted from resolver cache")
+	}
+
+	// A second end-file error must NOT trigger an infinite reload loop.
+	_ = srv.SendJSON(serverConn, map[string]any{"event": "end-file", "reason": "error"})
+	time.Sleep(120 * time.Millisecond)
+
+	mu.Lock()
+	gotAfter := slices.Clone(replaceURLs)
+	mu.Unlock()
+	if len(gotAfter) != 2 {
+		t.Fatalf("expected one-shot fallback recovery (no loop), got %v", gotAfter)
+	}
+}

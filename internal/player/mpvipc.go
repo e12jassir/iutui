@@ -32,6 +32,8 @@ var observedProperties = []string{
 	"volume",
 	"media-title",
 	"playlist-count",
+	"playlist-pos",
+	"path",
 	"speed",
 	"loop-file",
 }
@@ -115,6 +117,15 @@ func WithFadeDuration(d time.Duration) IPCOption {
 	}
 }
 
+// WithRadioClient configures the RadioClient used for YouTube Music smart radio curation.
+func WithRadioClient(rc *RadioClient) IPCOption {
+	return func(c *IPCClient) {
+		if rc != nil {
+			c.radioClient = rc
+		}
+	}
+}
+
 // Chapter represents a single playback chapter marker reported by mpv.
 type Chapter struct {
 	Title string  `json:"title"`
@@ -162,14 +173,29 @@ type IPCClient struct {
 	mpvProc       *os.Process
 	procAudioOnly bool
 
-	playMu     sync.Mutex
-	playSeq    atomic.Uint64
-	playCancel context.CancelFunc
-	step3Mu    sync.Mutex
+	playMu         sync.Mutex
+	playSeq        atomic.Uint64
+	playCancel     context.CancelFunc
+	step3Mu        sync.Mutex
+	fallbackPlayMu sync.Mutex
+	playFallback   playFallbackState
 
 	autoplay            atomic.Bool
 	fallbackMu          sync.RWMutex
 	autoplayFallbackIDs []string
+
+	radioClient           *RadioClient
+	tasteMu               sync.RWMutex
+	taste                 TasteProfile
+	sessionSkippedArtists map[string]float64
+	sessionSkippedTracks  map[string]bool
+	completedSeeds        []RadioTrack
+	metaMu                sync.RWMutex
+	trackMeta             map[string]RadioTrack
+	playlistMu            sync.Mutex
+	userQueuedIDs         []string
+	playedHistoryIDs      []string
+	extendingSeq          uint64
 
 	sponsorBlock   atomic.Bool
 	sbClient       *SponsorBlockClient
@@ -223,8 +249,9 @@ func NewIPCClient(opts ...IPCOption) *IPCClient {
 		done:           make(chan struct{}),
 		wakeCh:         make(chan struct{}, 1),
 		pending:        make(map[int64]chan ipcResponse),
-		status:         Status{Speed: 1.0},
+		status:         Status{Speed: 1.0, PlaylistPos: -1},
 		subs:           make(map[uint64]chan Status),
+		trackMeta:      make(map[string]RadioTrack),
 	}
 	c.autoplay.Store(true)
 	c.sponsorBlock.Store(true)
@@ -383,6 +410,7 @@ func (c *IPCClient) handleLine(line []byte) {
 	case "property-change":
 		c.applyPropertyChange(msg.Name, msg.Data)
 	case "playback-restart", "file-loaded":
+		c.clearDirectStreamFallback(0)
 		if c.fadeDuration > 0 && c.pendingFadeIn.Swap(false) {
 			fseq, fctx := c.beginFade()
 			c.spawnFadeIn(fctx, fseq, c.fadeInDuration())
@@ -397,7 +425,11 @@ func (c *IPCClient) handleLine(line []byte) {
 		c.status.TimePos = 0
 		st := c.status
 		c.statusMu.Unlock()
-		if msg.Reason == "eof" {
+		if msg.Reason == "error" {
+			if fb, ok := c.takeDirectStreamFallback(); ok {
+				c.spawnDirectStreamFallback(fb)
+			}
+		} else if msg.Reason == "eof" {
 			c.clearSponsorBlockState(0)
 			c.spawnClearForcedTitle()
 		} else if c.fadeDuration > 0 && !c.pendingFadeIn.Load() && !st.Paused && gain < -1.0 {
@@ -431,6 +463,9 @@ func (c *IPCClient) applyPropertyChange(name string, data any) {
 	prevPaused := c.status.Paused
 	changed := false
 	timePosUpdated := false
+	playlistPosChanged := false
+	newPos := -1
+	pathVideoID := ""
 	switch name {
 	case "time-pos":
 		if f, ok := toFloat64(data); ok {
@@ -462,9 +497,16 @@ func (c *IPCClient) applyPropertyChange(name string, data any) {
 	case "media-title":
 		if s, ok := data.(string); ok {
 			trimmed := strings.TrimSpace(s)
-			if trimmed != "" && !strings.HasPrefix(trimmed, "videoplayback") && trimmed != c.status.Title {
-				c.status.Title = trimmed
-				changed = true
+			if trimmed != "" && !strings.HasPrefix(trimmed, "videoplayback") && !strings.HasPrefix(trimmed, "http") {
+				if display, okMeta := c.lookupDisplayTitle(c.status.VideoID); okMeta && display != "" {
+					if c.status.Title != display {
+						c.status.Title = display
+						changed = true
+					}
+				} else if trimmed != c.status.Title {
+					c.status.Title = trimmed
+					changed = true
+				}
 			}
 		} else if data == nil && c.status.Title != "" {
 			c.status.Title = ""
@@ -473,6 +515,36 @@ func (c *IPCClient) applyPropertyChange(name string, data any) {
 	case "playlist-count":
 		if f, ok := toFloat64(data); ok {
 			c.status.PlaylistCount = int(f)
+			changed = true
+		}
+	case "playlist-pos":
+		if f, ok := toFloat64(data); ok {
+			pos := int(f)
+			if c.status.PlaylistPos != pos {
+				c.status.PlaylistPos = pos
+				changed = true
+				playlistPosChanged = true
+				newPos = pos
+			}
+		} else if data == nil && c.status.PlaylistPos != -1 {
+			c.status.PlaylistPos = -1
+			changed = true
+		}
+	case "path":
+		if s, ok := data.(string); ok {
+			if vid := ExtractYouTubeID(s); vid != "" {
+				if c.status.VideoID != vid {
+					c.status.VideoID = vid
+					changed = true
+					pathVideoID = vid
+				}
+				if display, okMeta := c.lookupDisplayTitle(vid); okMeta && display != "" && c.status.Title != display {
+					c.status.Title = display
+					changed = true
+				}
+			}
+		} else if data == nil && c.status.VideoID != "" {
+			c.status.VideoID = ""
 			changed = true
 		}
 	case "speed":
@@ -495,6 +567,17 @@ func (c *IPCClient) applyPropertyChange(name string, data any) {
 	if changed {
 		c.broadcast(st)
 	}
+	if pathVideoID != "" {
+		c.recordPlayedTrackID(pathVideoID)
+	}
+	if playlistPosChanged && newPos >= 0 {
+		if c.resolver != nil {
+			go c.prefetchUpcomingTracks(newPos, st.PlaylistCount)
+		}
+		if c.autoplay.Load() && c.radioClient != nil && st.PlaylistCount > 1 && newPos >= st.PlaylistCount-2 {
+			go c.maybeExtendRadio(st.VideoID)
+		}
+	}
 	if name == "pause" && prevPaused && !st.Paused && c.fadeDuration > 0 {
 		c.fadeMu.Lock()
 		needFadeIn := c.fadeGain < -1.0 && !c.fadingIn
@@ -505,6 +588,9 @@ func (c *IPCClient) applyPropertyChange(name string, data any) {
 		}
 	}
 	if timePosUpdated {
+		if st.TimePos > 0 {
+			c.clearDirectStreamFallback(0)
+		}
 		c.markSponsorTimeObserved()
 		if !st.Paused && c.SponsorBlockEnabled() {
 			c.checkAndSkipSponsorSegment(st.TimePos)
@@ -560,10 +646,11 @@ func (c *IPCClient) handleDisconnect(conn net.Conn) {
 	_ = conn.Close()
 	c.failPending(ErrNotConnected)
 	c.clearSponsorBlockState(0)
+	c.clearDirectStreamFallback(0)
 	c.resetFadeState()
 
 	c.statusMu.Lock()
-	c.status = Status{IsRunning: false, Speed: 1.0}
+	c.status = Status{IsRunning: false, Speed: 1.0, PlaylistPos: -1}
 	st := c.status
 	c.statusMu.Unlock()
 
@@ -1239,15 +1326,42 @@ func (c *IPCClient) Playlist(ctx context.Context) ([]PlaylistItem, error) {
 		item := PlaylistItem{Index: i}
 		if fn, ok := m["filename"].(string); ok {
 			item.Filename = fn
+			item.VideoID = ExtractYouTubeID(fn)
 		}
 		if title, ok := m["title"].(string); ok {
 			item.Title = title
 		}
-		if strings.TrimSpace(item.Title) == "" {
-			item.Title = item.Filename
-		}
 		if cur, ok := m["current"].(bool); ok {
 			item.Current = cur
+		}
+		if item.VideoID == "" && item.Current {
+			c.statusMu.RLock()
+			curVID := c.status.VideoID
+			c.statusMu.RUnlock()
+			if curVID != "" {
+				item.VideoID = curVID
+			}
+		}
+		if item.VideoID != "" {
+			c.metaMu.RLock()
+			meta, okMeta := c.trackMeta[item.VideoID]
+			c.metaMu.RUnlock()
+			if okMeta {
+				if strings.TrimSpace(item.Title) == "" || item.Title == item.Filename || strings.HasPrefix(item.Title, "http") {
+					if disp := meta.DisplayTitle(); disp != "" {
+						item.Title = disp
+					}
+				}
+				if meta.Artist != "" {
+					item.Artist = meta.Artist
+				}
+				if meta.DurationSec > 0 {
+					item.Duration = FormatTime(float64(meta.DurationSec))
+				}
+			}
+		}
+		if strings.TrimSpace(item.Title) == "" {
+			item.Title = item.Filename
 		}
 		items = append(items, item)
 	}
@@ -1277,6 +1391,9 @@ func (c *IPCClient) RemovePlaylistIndex(ctx context.Context, index int) error {
 
 // ClearPlaylist removes all playlist entries except the currently playing item.
 func (c *IPCClient) ClearPlaylist(ctx context.Context) error {
+	c.playlistMu.Lock()
+	c.userQueuedIDs = nil
+	c.playlistMu.Unlock()
 	_, err := c.sendCommand(ctx, "playlist-clear")
 	return err
 }
@@ -1350,6 +1467,11 @@ func (c *IPCClient) broadcast(st Status) {
 // socket, and releases all subscribers.
 func (c *IPCClient) Close() error {
 	c.closeOnce.Do(func() {
+		if c.isConnected() {
+			quitCtx, quitCancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+			_, _ = c.sendCommand(quitCtx, "quit")
+			quitCancel()
+		}
 		c.cancel()
 		c.resetFadeState()
 		close(c.done)

@@ -40,7 +40,7 @@ type FakeEngine struct {
 // NewFakeEngine creates a new FakeEngine with default initial status.
 func NewFakeEngine() *FakeEngine {
 	return &FakeEngine{
-		status:       Status{Speed: 1.0},
+		status:       Status{Speed: 1.0, PlaylistPos: -1},
 		subs:         make(map[uint64]chan Status),
 		done:         make(chan struct{}),
 		sponsorBlock: true,
@@ -78,6 +78,20 @@ func (f *FakeEngine) SetPlaylist(items []PlaylistItem) {
 	copy(copied, items)
 	f.playlist = copied
 	f.status.PlaylistCount = len(copied)
+	pos := -1
+	for i, item := range copied {
+		if item.Current {
+			pos = i
+			if id := ExtractYouTubeID(item.Filename); id != "" {
+				f.status.VideoID = id
+			}
+			break
+		}
+	}
+	if pos < 0 && len(copied) > 0 {
+		pos = 0
+	}
+	f.status.PlaylistPos = pos
 	f.mu.Unlock()
 }
 
@@ -100,10 +114,14 @@ func (f *FakeEngine) Play(_ context.Context, v model.Video, mode string) error {
 	}
 	f.status.IsRunning = true
 	f.status.Title = v.Title
+	f.status.VideoID = model.MixSeedVideoID(v.ID)
 	f.status.Paused = false
 	f.status.TimePos = 0
 	if f.status.PlaylistCount == 0 {
 		f.status.PlaylistCount = 1
+		f.status.PlaylistPos = 0
+	} else if f.status.PlaylistPos < 0 {
+		f.status.PlaylistPos = 0
 	}
 	f.broadcastLocked(f.status)
 	return nil
@@ -122,10 +140,14 @@ func (f *FakeEngine) PlayFrom(_ context.Context, v model.Video, mode string, sta
 	}
 	f.status.IsRunning = true
 	f.status.Title = v.Title
+	f.status.VideoID = model.MixSeedVideoID(v.ID)
 	f.status.Paused = false
 	f.status.TimePos = startPos
 	if f.status.PlaylistCount == 0 {
 		f.status.PlaylistCount = 1
+		f.status.PlaylistPos = 0
+	} else if f.status.PlaylistPos < 0 {
+		f.status.PlaylistPos = 0
 	}
 	f.broadcastLocked(f.status)
 	return nil
@@ -166,6 +188,14 @@ func (f *FakeEngine) Next(_ context.Context) error {
 	if f.err != nil {
 		return f.err
 	}
+	if len(f.playlist) > 0 && f.status.PlaylistPos >= 0 && f.status.PlaylistPos+1 < len(f.playlist) {
+		f.status.PlaylistPos++
+		for i := range f.playlist {
+			f.playlist[i].Current = i == f.status.PlaylistPos
+		}
+		f.status.Title = f.playlist[f.status.PlaylistPos].Title
+		f.status.VideoID = ExtractYouTubeID(f.playlist[f.status.PlaylistPos].Filename)
+	}
 	f.status.TimePos = 0
 	f.broadcastLocked(f.status)
 	return nil
@@ -178,6 +208,14 @@ func (f *FakeEngine) Prev(_ context.Context) error {
 	f.calls = append(f.calls, FakeCall{Method: "Prev"})
 	if f.err != nil {
 		return f.err
+	}
+	if len(f.playlist) > 0 && f.status.PlaylistPos > 0 {
+		f.status.PlaylistPos--
+		for i := range f.playlist {
+			f.playlist[i].Current = i == f.status.PlaylistPos
+		}
+		f.status.Title = f.playlist[f.status.PlaylistPos].Title
+		f.status.VideoID = ExtractYouTubeID(f.playlist[f.status.PlaylistPos].Filename)
 	}
 	f.status.TimePos = 0
 	f.broadcastLocked(f.status)
@@ -410,7 +448,9 @@ func (f *FakeEngine) PlayPlaylistIndex(_ context.Context, index int) error {
 			f.playlist[i].Current = i == index
 		}
 		f.status.Title = f.playlist[index].Title
+		f.status.VideoID = ExtractYouTubeID(f.playlist[index].Filename)
 	}
+	f.status.PlaylistPos = index
 	f.status.IsRunning = true
 	f.status.Paused = false
 	f.status.TimePos = 0
@@ -434,10 +474,15 @@ func (f *FakeEngine) RemovePlaylistIndex(_ context.Context, index int) error {
 			return fmt.Errorf("playlist index out of range: %d", index)
 		}
 		f.playlist = append(f.playlist[:index], f.playlist[index+1:]...)
+		curPos := -1
 		for i := range f.playlist {
 			f.playlist[i].Index = i
+			if f.playlist[i].Current {
+				curPos = i
+			}
 		}
 		f.status.PlaylistCount = len(f.playlist)
+		f.status.PlaylistPos = curPos
 	} else if f.status.PlaylistCount > 0 {
 		f.status.PlaylistCount--
 	}
@@ -463,6 +508,11 @@ func (f *FakeEngine) ClearPlaylist(_ context.Context) error {
 	}
 	f.playlist = kept
 	f.status.PlaylistCount = len(kept)
+	if len(kept) > 0 {
+		f.status.PlaylistPos = 0
+	} else {
+		f.status.PlaylistPos = -1
+	}
 	f.broadcastLocked(f.status)
 	return nil
 }

@@ -2,7 +2,10 @@ package player
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -432,15 +435,15 @@ printf 'https://cdn.example.com/android-fast.mp4\n'
 		if strings.Contains(got, "--cookies") {
 			t.Errorf("did not expect --cookies on fast android success:\n%s", got)
 		}
-		if !strings.Contains(got, "--extractor-args\nyoutube:player_client=visionos\n") {
-			t.Errorf("expected youtube:player_client=visionos extractor-args:\n%s", got)
+		if !strings.Contains(got, "--extractor-args\nyoutube:player_client=android\n") {
+			t.Errorf("expected youtube:player_client=android extractor-args:\n%s", got)
 		}
-		if strings.Contains(got, "player_client=visionos,web") {
-			t.Errorf("did not expect web client on fast visionos primary path:\n%s", got)
+		if strings.Contains(got, "player_client=android,web") {
+			t.Errorf("did not expect web client on fast android primary path:\n%s", got)
 		}
 	})
 
-	t.Run("retries with --cookies when cookieless visionos fails or returns zero URLs", func(t *testing.T) {
+	t.Run("retries with --cookies when cookieless android fails or returns zero URLs", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		cookieFile := filepath.Join(tmpDir, "cookies.txt")
 		if err := os.WriteFile(cookieFile, []byte("# Netscape HTTP Cookie File\n"), 0o600); err != nil {
@@ -492,11 +495,11 @@ done
 				if len(calls) != 2 {
 					t.Fatalf("yt-dlp invocations = %d, want 2:\n%s", len(calls), string(raw))
 				}
-				if strings.Contains(calls[0], "--cookies") || !strings.Contains(calls[0], "--extractor-args\nyoutube:player_client=visionos\n") {
-					t.Errorf("attempt 1 should use cookieless visionos:\n%s", calls[0])
+				if strings.Contains(calls[0], "--cookies") || !strings.Contains(calls[0], "--extractor-args\nyoutube:player_client=android\n") {
+					t.Errorf("attempt 1 should use cookieless android:\n%s", calls[0])
 				}
-				if !strings.Contains(calls[1], "--cookies\n"+cookieFile+"\n") || strings.Contains(calls[1], "player_client=visionos") {
-					t.Errorf("attempt 2 should use --cookies without player_client=visionos:\n%s", calls[1])
+				if !strings.Contains(calls[1], "--cookies\n"+cookieFile+"\n") || strings.Contains(calls[1], "player_client=android") {
+					t.Errorf("attempt 2 should use --cookies without player_client=android:\n%s", calls[1])
 				}
 			})
 		}
@@ -545,8 +548,8 @@ exit 1
 				if strings.Contains(got, "--cookies") {
 					t.Errorf("did not expect --cookies retry:\n%s", got)
 				}
-				if !strings.Contains(got, "--extractor-args\nyoutube:player_client=visionos\n") {
-					t.Errorf("expected visionos extractor-args on single attempt:\n%s", got)
+				if !strings.Contains(got, "--extractor-args\nyoutube:player_client=android\n") {
+					t.Errorf("expected android extractor-args on single attempt:\n%s", got)
 				}
 			})
 		}
@@ -690,6 +693,106 @@ printf 'https://cdn.example.com/stale.mp4\n'
 			}
 		case <-time.After(1 * time.Second):
 			t.Fatal("WaitOrGet stayed blocked instead of unblocking when old goroutine exited")
+		}
+	})
+}
+
+func TestStreamResolver_InnerTubeFastPathAndFallback(t *testing.T) {
+	t.Run("resolves audio and HD video via InnerTube without spawning yt-dlp", func(t *testing.T) {
+		markerFile := filepath.Join(t.TempDir(), "ytdlp-called.txt")
+		bin := writeFakeYTDLP(t, fmt.Sprintf("touch %q\nexit 1\n", markerFile))
+
+		var gotClients []string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var req struct {
+				Context struct {
+					Client struct {
+						ClientName string `json:"clientName"`
+					} `json:"client"`
+				} `json:"context"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			gotClients = append(gotClients, req.Context.Client.ClientName)
+			_, _ = w.Write([]byte(`{
+				"playabilityStatus": {"status": "OK"},
+				"streamingData": {
+					"adaptiveFormats": [
+						{"url": "https://cdn.example.com/audio-128.m4a", "mimeType": "audio/mp4; codecs=\"mp4a.40.2\"", "bitrate": 130000},
+						{"url": "https://cdn.example.com/video-1080.mp4", "mimeType": "video/mp4; codecs=\"avc1\"", "height": 1080, "bitrate": 2500000},
+						{"url": "https://cdn.example.com/video-720.mp4", "mimeType": "video/mp4; codecs=\"avc1\"", "height": 720, "bitrate": 1200000}
+					]
+				}
+			}`))
+		}))
+		defer srv.Close()
+
+		r := NewStreamResolver(bin, 720)
+		r.SetInnerTubeEndpoint(srv.URL)
+
+		stAudio, ok := r.WaitOrGetForMode(context.Background(), "fastVid0001", true, time.Second)
+		if !ok || stAudio.AudioURL != "https://cdn.example.com/audio-128.m4a" || stAudio.VideoURL != "" {
+			t.Fatalf("unexpected audio-only InnerTube result: ok=%v st=%+v", ok, stAudio)
+		}
+
+		stVideo, ok := r.WaitOrGetForMode(context.Background(), "fastVid0002", false, time.Second)
+		if !ok || stVideo.VideoURL != "https://cdn.example.com/video-720.mp4" || stVideo.AudioURL != "https://cdn.example.com/audio-128.m4a" {
+			t.Fatalf("unexpected 720p video InnerTube result: ok=%v st=%+v", ok, stVideo)
+		}
+		if _, err := os.Stat(markerFile); !os.IsNotExist(err) {
+			t.Fatalf("expected InnerTube fast path to skip yt-dlp binary completely")
+		}
+		if len(gotClients) == 0 || gotClients[0] != "ANDROID_VR" {
+			t.Fatalf("expected ANDROID_VR primary InnerTube client, got %v", gotClients)
+		}
+	})
+
+	t.Run("falls back cleanly to yt-dlp when InnerTube returns unplayable status", func(t *testing.T) {
+		bin := writeFakeYTDLP(t, "printf 'https://cdn.example.com/fallback-ytdlp.m4a\n'\n")
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(`{"playabilityStatus": {"status": "LOGIN_REQUIRED"}}`))
+		}))
+		defer srv.Close()
+
+		r := NewStreamResolver(bin, 720)
+		r.SetInnerTubeEndpoint(srv.URL)
+
+		st, ok := r.WaitOrGetForMode(context.Background(), "lockedVid01", true, time.Second)
+		if !ok || st.AudioURL != "https://cdn.example.com/fallback-ytdlp.m4a" {
+			t.Fatalf("expected yt-dlp fallback stream URL, got ok=%v st=%+v", ok, st)
+		}
+	})
+}
+
+func TestStreamResolver_DisablesUnverifiedInnerTubeByDefaultAndInvalidatesCache(t *testing.T) {
+	t.Run("NewStreamResolver disables unverified InnerTube fast path by default", func(t *testing.T) {
+		for _, bin := range []string{"", "yt-dlp"} {
+			r := NewStreamResolver(bin, 720)
+			if r.enableInnerTube {
+				t.Fatalf("NewStreamResolver(%q, 720) enabled unverified InnerTube by default", bin)
+			}
+		}
+	})
+
+	t.Run("Invalidate evicts cached video and audio entries", func(t *testing.T) {
+		r := NewStreamResolver("yt-dlp", 720)
+		r.mu.Lock()
+		r.cache["badVid00001"] = ResolvedStream{
+			VideoURL:  "https://cdn.example.com/403.mp4",
+			ExpiresAt: time.Now().Add(10 * time.Minute),
+		}
+		r.audioCache["badVid00001"] = ResolvedStream{
+			AudioURL:  "https://cdn.example.com/403.webm",
+			ExpiresAt: time.Now().Add(10 * time.Minute),
+		}
+		r.mu.Unlock()
+
+		r.Invalidate("badVid00001")
+
+		if _, ok := r.GetCachedForMode("badVid00001", false); ok {
+			t.Fatal("expected video cache entry to be evicted after Invalidate")
+		}
+		if _, ok := r.GetCachedForMode("badVid00001", true); ok {
+			t.Fatal("expected audio cache entry to be evicted after Invalidate")
 		}
 	})
 }

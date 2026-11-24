@@ -15,6 +15,7 @@ import (
 // Status represents the current mpv playback state.
 type Status struct {
 	Title         string  `json:"title"`
+	VideoID       string  `json:"video_id,omitempty"`
 	TimePos       float64 `json:"time_pos"`
 	Duration      float64 `json:"duration"`
 	Paused        bool    `json:"paused"`
@@ -22,13 +23,17 @@ type Status struct {
 	Speed         float64 `json:"speed,omitempty"`
 	LoopFile      bool    `json:"loop_file,omitempty"`
 	PlaylistCount int     `json:"playlist_count"`
+	PlaylistPos   int     `json:"playlist_pos"`
 	IsRunning     bool    `json:"is_running"`
 }
 
 // PlaylistItem represents a single entry in mpv's active playlist.
 type PlaylistItem struct {
 	Index    int    `json:"index"`
+	VideoID  string `json:"video_id,omitempty"`
 	Title    string `json:"title"`
+	Artist   string `json:"artist,omitempty"`
+	Duration string `json:"duration,omitempty"`
 	Filename string `json:"filename"`
 	Current  bool   `json:"current"`
 }
@@ -155,14 +160,14 @@ func GetStatus() (Status, error) {
 		return d.Data, nil
 	}
 
-	st := Status{IsRunning: false}
+	st := Status{IsRunning: false, PlaylistPos: -1}
 
 	// Verify mpv actually responds to an IPC property query before marking IsRunning = true
 	paused, err := getProp("pause")
 	if err != nil {
 		// Stale socket left over by a dead mpv process; remove it so FindSocket stays clean
 		_ = os.Remove(sockPath)
-		return Status{IsRunning: false}, nil
+		return Status{IsRunning: false, PlaylistPos: -1}, nil
 	}
 
 	st.IsRunning = true
@@ -196,6 +201,16 @@ func GetStatus() (Status, error) {
 	if loopFile, err := getProp("loop-file"); err == nil && loopFile != nil {
 		if b, ok := parseLoopFileValue(loopFile); ok {
 			st.LoopFile = b
+		}
+	}
+	if pPos, err := getProp("playlist-pos"); err == nil && pPos != nil {
+		if f, ok := toFloat64(pPos); ok {
+			st.PlaylistPos = int(f)
+		}
+	}
+	if pathVal, err := getProp("path"); err == nil && pathVal != nil {
+		if s, ok := pathVal.(string); ok {
+			st.VideoID = ExtractYouTubeID(s)
 		}
 	}
 
