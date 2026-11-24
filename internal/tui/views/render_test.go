@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/e12jassir/iutui/internal/app"
 	"github.com/e12jassir/iutui/internal/download"
+	"github.com/e12jassir/iutui/internal/i18n"
 	"github.com/e12jassir/iutui/internal/lyrics"
 	"github.com/e12jassir/iutui/internal/model"
 	"github.com/e12jassir/iutui/internal/player"
@@ -74,6 +75,7 @@ func fixedVideos() []model.Video {
 
 func newTestState(view app.ViewMode, w, h int) *app.State {
 	s := app.NewState(app.Dependencies{AppVersion: "1.0.0"})
+	s.SetLangPref("es")
 	videos := fixedVideos()
 	s.View = view
 	s.ActiveTab = model.TabHome
@@ -745,12 +747,12 @@ func TestRenderSearchCursorAndWindowing(t *testing.T) {
 		lipgloss.SetColorProfile(0)
 		defer lipgloss.SetColorProfile(prevProfile)
 
-		lineEnd := renderSearchInputLine("pink floyd", 10, 40, pal)
+		lineEnd := renderSearchInputLine("pink floyd", 10, 40, pal, i18n.For("es").Views)
 		if !strings.Contains(lineEnd, "pink floyd█") {
 			t.Fatalf("expected block cursor at end, got %q", lineEnd)
 		}
 
-		lineStart := renderSearchInputLine("pink floyd", 0, 40, pal)
+		lineStart := renderSearchInputLine("pink floyd", 0, 40, pal, i18n.For("es").Views)
 		if strings.Contains(lineStart, "█") {
 			t.Fatalf("did not expect trailing block cursor when cursor=0, got %q", lineStart)
 		}
@@ -758,7 +760,7 @@ func TestRenderSearchCursorAndWindowing(t *testing.T) {
 			t.Fatalf("expected reverse-video highlight on first rune 'p' when cursor=0, got %q", lineStart)
 		}
 
-		lineMid := renderSearchInputLine("pink floyd", 4, 40, pal)
+		lineMid := renderSearchInputLine("pink floyd", 4, 40, pal, i18n.For("es").Views)
 		if strings.Contains(lineMid, "█") {
 			t.Fatalf("did not expect trailing block cursor when cursor=4, got %q", lineMid)
 		}
@@ -771,7 +773,7 @@ func TestRenderSearchCursorAndWindowing(t *testing.T) {
 		longDraft := "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
 		avail := 24
 
-		lineStart := renderSearchInputLine(longDraft, 2, avail, pal)
+		lineStart := renderSearchInputLine(longDraft, 2, avail, pal, i18n.For("es").Views)
 		if w := lipgloss.Width(lineStart); w > avail {
 			t.Fatalf("start window width %d > %d", w, avail)
 		}
@@ -779,7 +781,7 @@ func TestRenderSearchCursorAndWindowing(t *testing.T) {
 			t.Fatalf("expected prefix window with trailing ellipsis, got %q", lineStart)
 		}
 
-		lineMid := renderSearchInputLine(longDraft, 30, avail, pal)
+		lineMid := renderSearchInputLine(longDraft, 30, avail, pal, i18n.For("es").Views)
 		if w := lipgloss.Width(lineMid); w > avail {
 			t.Fatalf("mid window width %d > %d", w, avail)
 		}
@@ -787,7 +789,7 @@ func TestRenderSearchCursorAndWindowing(t *testing.T) {
 			t.Fatalf("expected mid window around rune %q with both ellipses, got %q", string(longDraft[30]), lineMid)
 		}
 
-		lineEnd := renderSearchInputLine(longDraft, len([]rune(longDraft)), avail, pal)
+		lineEnd := renderSearchInputLine(longDraft, len([]rune(longDraft)), avail, pal, i18n.For("es").Views)
 		if w := lipgloss.Width(lineEnd); w > avail {
 			t.Fatalf("end window width %d > %d", w, avail)
 		}
@@ -1219,6 +1221,38 @@ func TestRenderSidebarIconSymmetryAndRoundedTopPanels(t *testing.T) {
 		}
 		if strings.Contains(lines[3], "⠋") {
 			t.Fatalf("did not expect duplicate loading spinner in main header row (line 3), got:\n%s", lines[3])
+		}
+	})
+}
+
+func TestRenderEnglishLocale(t *testing.T) {
+	th := theme.DefaultTheme()
+	tr := thumbs.NewTextRenderer()
+
+	t.Run("home_view_english", func(t *testing.T) {
+		s := newTestState(app.ViewHome, 140, 36)
+		defer s.Close()
+		s.SetLangPref("en")
+
+		out := Render(s, th, tr)
+		assertBounds(t, out, 140, 36)
+		for _, want := range []string{"MAIN", "LIBRARY", "SUBSCRIPTIONS", "● LIVE", "Player"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("expected English label %q in Home view output", want)
+			}
+		}
+	})
+
+	t.Run("settings_overlay_english", func(t *testing.T) {
+		s := newTestState(app.ViewHome, 120, 36)
+		defer s.Close()
+		s.SetLangPref("en")
+		s.ShowSettings = true
+
+		out := Render(s, th, tr)
+		assertBounds(t, out, 120, 36)
+		if !strings.Contains(out, "Settings") {
+			t.Errorf("expected English 'Settings' in Settings overlay")
 		}
 	})
 }

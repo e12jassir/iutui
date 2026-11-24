@@ -2,29 +2,32 @@ package views
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/e12jassir/iutui/internal/app"
 	"github.com/e12jassir/iutui/internal/download"
+	"github.com/e12jassir/iutui/internal/i18n"
 	"github.com/e12jassir/iutui/internal/model"
 	"github.com/e12jassir/iutui/internal/tui/theme"
 	"github.com/e12jassir/iutui/internal/tui/thumbs"
 )
 
 func renderHomeGrid(s *app.State, th theme.Theme, tr thumbs.Renderer, width, height int, pal renderPalette) string {
+	vs := s.Catalog().Views
 	items := s.VisibleItems()
 	if len(items) == 0 {
 		if s.Syncing {
-			return renderLoadingBox("Cargando videos...", s.ActiveTab.String(), s.AnimFrame, width, height, pal)
+			return renderLoadingBox(vs.LoadingVideos, s.ActiveTab.String(), s.AnimFrame, width, height, pal)
 		}
 		if s.HomeChip == 1 && s.LiveLoading[s.ActiveTab] {
-			return renderLoadingBox("Buscando directos en vivo...", s.ActiveTab.String(), s.AnimFrame, width, height, pal)
+			return renderLoadingBox(vs.LoadingLive, s.ActiveTab.String(), s.AnimFrame, width, height, pal)
 		}
-		msg := "No hay videos en esta vista. Presiona '/' para buscar o 'r' para recargar."
+		msg := vs.EmptyView
 		if s.HomeChip == 1 {
-			msg = "Sin directos en vivo ahora mismo. Pulsa '/' para buscar o '[' para volver."
+			msg = vs.EmptyLive
 		}
 		empty := lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center,
 			lipgloss.NewStyle().Foreground(pal.muted).Render(truncatePlain(msg, max(1, width-4))))
@@ -64,7 +67,7 @@ func renderHomeGrid(s *app.State, th theme.Theme, tr thumbs.Renderer, width, hei
 			liked := s.LikedIDs[v.ID]
 			playing := isVideoPlaying(s, v)
 			dlBadge := downloadProgressBadge(s, v.ID)
-			card := renderCard(v, selected, saved, liked, playing, dlBadge, th, tr, actualCardW, pal)
+			card := renderCard(v, selected, saved, liked, playing, dlBadge, th, tr, actualCardW, pal, vs)
 			if c > 0 {
 				rowCards = append(rowCards, gapStr)
 			}
@@ -78,7 +81,7 @@ func renderHomeGrid(s *app.State, th theme.Theme, tr thumbs.Renderer, width, hei
 	return fitBlock(strings.Join(gridRows, "\n"), width, height)
 }
 
-func renderCard(v model.Video, selected, saved, liked, playing bool, dlBadge string, th theme.Theme, tr thumbs.Renderer, cardW int, pal renderPalette) string {
+func renderCard(v model.Video, selected, saved, liked, playing bool, dlBadge string, th theme.Theme, tr thumbs.Renderer, cardW int, pal renderPalette, vs i18n.ViewStrings) string {
 	innerW := max(4, cardW-4) // border(2) + padding(2)
 	thumbH := max(homeThumbH, min(11, innerW*9/32))
 
@@ -88,7 +91,7 @@ func renderCard(v model.Video, selected, saved, liked, playing bool, dlBadge str
 	// 2. Meta badges row IMMEDIATELY BELOW the thumbnail.
 	var badgeParts []string
 	if v.IsLive {
-		badgeParts = append(badgeParts, th.BadgeLive.Render("● EN VIVO"))
+		badgeParts = append(badgeParts, th.BadgeLive.Render(vs.BadgeLive))
 	} else {
 		dur := v.Duration
 		if dur == "" {
@@ -103,7 +106,7 @@ func renderCard(v model.Video, selected, saved, liked, playing bool, dlBadge str
 		badgeParts = append(badgeParts, lipgloss.NewStyle().Foreground(pal.yellow).Bold(true).Render("󰥔"))
 	}
 	if playing {
-		badgeParts = append(badgeParts, lipgloss.NewStyle().Foreground(pal.spotAccent).Bold(true).Render("󰎈 Sonando"))
+		badgeParts = append(badgeParts, lipgloss.NewStyle().Foreground(pal.spotAccent).Bold(true).Render(vs.BadgePlaying))
 	}
 	if dlBadge != "" {
 		badgeParts = append(badgeParts, lipgloss.NewStyle().Foreground(pal.spotAccent).Bold(true).Render(dlBadge))
@@ -133,7 +136,7 @@ func renderCard(v model.Video, selected, saved, liked, playing bool, dlBadge str
 		chName = "-"
 	}
 	ch := lipgloss.NewStyle().Foreground(pal.muted).Render(truncatePlain(chName, innerW))
-	vwText := strings.TrimSpace(formatViewsLine(v))
+	vwText := strings.TrimSpace(formatViewsLine(v, vs))
 	if vwText == "" {
 		vwText = " "
 	}
@@ -148,23 +151,24 @@ func renderCard(v model.Video, selected, saved, liked, playing bool, dlBadge str
 }
 
 func renderSearchList(s *app.State, th theme.Theme, tr thumbs.Renderer, width, height int, pal renderPalette) string {
+	vs := s.Catalog().Views
 	items := s.VisibleItems()
 	if len(items) == 0 {
 		if s.View == app.ViewChannel {
 			if s.ChannelPending {
-				return renderLoadingBox("Cargando canal...", s.ChannelTitle, s.AnimFrame, width, height, pal)
+				return renderLoadingBox(vs.LoadingChannel, s.ChannelTitle, s.AnimFrame, width, height, pal)
 			}
-			msg := "No hay videos disponibles para este canal. Pulsa Esc para volver."
+			msg := vs.EmptyChannel
 			empty := lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center,
 				lipgloss.NewStyle().Foreground(pal.muted).Render(truncatePlain(msg, max(1, width-4))))
 			return fitBlock(empty, width, height)
 		}
 		if s.SearchPending {
-			return renderLoadingBox(fmt.Sprintf("Buscando %q...", s.SearchQuery), "Resultados de YouTube", s.AnimFrame, width, height, pal)
+			return renderLoadingBox(i18n.Format(vs.SearchingQuery, map[string]string{"query": s.SearchQuery}), vs.YouTubeResults, s.AnimFrame, width, height, pal)
 		}
-		msg := fmt.Sprintf("Sin resultados para %q.", s.SearchQuery)
+		msg := i18n.Format(vs.NoResultsFor, map[string]string{"query": s.SearchQuery})
 		if s.SearchQuery == "" {
-			msg = "Presiona '/' para buscar videos en YouTube."
+			msg = vs.PressSlashToSearch
 		}
 		empty := lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center,
 			lipgloss.NewStyle().Foreground(pal.muted).Render(truncatePlain(msg, max(1, width-4))))
@@ -186,14 +190,14 @@ func renderSearchList(s *app.State, th theme.Theme, tr thumbs.Renderer, width, h
 		v := items[i]
 		tr.Prefetch(v.ID)
 		dlBadge := downloadProgressBadge(s, v.ID)
-		row := renderSearchRow(v, i == curIdx, s.SavedIDs[v.ID], s.LikedIDs[v.ID], isVideoPlaying(s, v), dlBadge, th, tr, width, pal)
+		row := renderSearchRow(v, i == curIdx, s.SavedIDs[v.ID], s.LikedIDs[v.ID], isVideoPlaying(s, v), dlBadge, th, tr, width, pal, vs)
 		rows = append(rows, row)
 		usedH += lipgloss.Height(row)
 	}
 	return fitBlock(strings.Join(rows, "\n"), width, height)
 }
 
-func renderSearchRow(v model.Video, selected, saved, liked, playing bool, dlBadge string, th theme.Theme, tr thumbs.Renderer, rowW int, pal renderPalette) string {
+func renderSearchRow(v model.Video, selected, saved, liked, playing bool, dlBadge string, th theme.Theme, tr thumbs.Renderer, rowW int, pal renderPalette, vs i18n.ViewStrings) string {
 	innerW := max(10, rowW-4)
 	tw := min(searchThumbW, max(12, innerW/3))
 	thumbStr := tr.Render(v.ID, tw, searchThumbH)
@@ -206,7 +210,7 @@ func renderSearchRow(v model.Video, selected, saved, liked, playing bool, dlBadg
 	titleLines := wrapTwoLines(v.Title, infoW)
 	t1 := titleStyle.Render(titleLines[0])
 	t2 := titleStyle.Render(titleLines[1])
-	views := lipgloss.NewStyle().Foreground(pal.dim).Render(truncatePlain(formatViewsLine(v), infoW))
+	views := lipgloss.NewStyle().Foreground(pal.dim).Render(truncatePlain(formatViewsLine(v, vs), infoW))
 	chName := cleanChannelName(v.Channel)
 	if chName == "" {
 		chName = "-"
@@ -215,7 +219,7 @@ func renderSearchRow(v model.Video, selected, saved, liked, playing bool, dlBadg
 
 	var badges []string
 	if v.IsLive {
-		badges = append(badges, th.BadgeLive.Render("● EN VIVO"))
+		badges = append(badges, th.BadgeLive.Render(vs.BadgeLive))
 	} else {
 		dur := v.Duration
 		if dur == "" {
@@ -227,10 +231,10 @@ func renderSearchRow(v model.Video, selected, saved, liked, playing bool, dlBadg
 		badges = append(badges, lipgloss.NewStyle().Foreground(lipgloss.Color("#1DB954")).Bold(true).Render("󰋑"))
 	}
 	if saved {
-		badges = append(badges, lipgloss.NewStyle().Foreground(pal.yellow).Bold(true).Render("󰥔 Guardado"))
+		badges = append(badges, lipgloss.NewStyle().Foreground(pal.yellow).Bold(true).Render(vs.BadgeSaved))
 	}
 	if playing {
-		badges = append(badges, lipgloss.NewStyle().Foreground(pal.spotAccent).Bold(true).Render("󰎈 Sonando"))
+		badges = append(badges, lipgloss.NewStyle().Foreground(pal.spotAccent).Bold(true).Render(vs.BadgePlaying))
 	}
 	if dlBadge != "" {
 		badges = append(badges, lipgloss.NewStyle().Foreground(pal.spotAccent).Bold(true).Render(dlBadge))
@@ -247,9 +251,9 @@ func renderSearchRow(v model.Video, selected, saved, liked, playing bool, dlBadg
 	return style.Width(max(1, rowW-2)).Render(joined)
 }
 
-func formatViewsLine(v model.Video) string {
+func formatViewsLine(v model.Video, vs i18n.ViewStrings) string {
 	views := strings.TrimSpace(v.Views)
-	pub := formatRelativeDate(strings.TrimSpace(v.Published))
+	pub := formatRelativeDate(strings.TrimSpace(v.Published), vs)
 	switch {
 	case views != "" && pub != "":
 		return views + " · " + pub
@@ -262,7 +266,7 @@ func formatViewsLine(v model.Video) string {
 	}
 }
 
-func formatRelativeDate(raw string) string {
+func formatRelativeDate(raw string, vs i18n.ViewStrings) string {
 	if raw == "" {
 		return ""
 	}
@@ -274,19 +278,19 @@ func formatRelativeDate(raw string) string {
 			case days <= 0:
 				hours := int(time.Since(t).Hours())
 				if hours <= 1 {
-					return "hoy"
+					return vs.RelToday
 				}
-				return fmt.Sprintf("hace %d h", hours)
+				return i18n.Format(vs.RelHoursAgo, map[string]string{"n": strconv.Itoa(hours)})
 			case days == 1:
-				return "ayer"
+				return vs.RelYesterday
 			case days < 7:
-				return fmt.Sprintf("hace %d d", days)
+				return i18n.Format(vs.RelDaysAgo, map[string]string{"n": strconv.Itoa(days)})
 			case days < 30:
-				return fmt.Sprintf("hace %d sem", days/7)
+				return i18n.Format(vs.RelWeeksAgo, map[string]string{"n": strconv.Itoa(days / 7)})
 			case days < 365:
-				return fmt.Sprintf("hace %d m", days/30)
+				return i18n.Format(vs.RelMonthsAgo, map[string]string{"n": strconv.Itoa(days / 30)})
 			default:
-				return fmt.Sprintf("hace %d a", days/365)
+				return i18n.Format(vs.RelYearsAgo, map[string]string{"n": strconv.Itoa(days / 365)})
 			}
 		}
 	}
@@ -307,7 +311,7 @@ func downloadProgressBadge(s *app.State, id string) string {
 	}
 	switch it.Status {
 	case download.StatusPending:
-		return "⬇ En cola..."
+		return s.Catalog().Views.DownloadQueued
 	case download.StatusDownloading:
 		if spd := strings.TrimSpace(it.Speed); spd != "" {
 			return fmt.Sprintf("⬇ %.0f%% · %s", it.Progress, spd)

@@ -3,13 +3,14 @@
 package views
 
 import (
-	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/e12jassir/iutui/internal/app"
+	"github.com/e12jassir/iutui/internal/i18n"
 	"github.com/e12jassir/iutui/internal/model"
 	"github.com/e12jassir/iutui/internal/tui/theme"
 	"github.com/e12jassir/iutui/internal/tui/thumbs"
@@ -176,7 +177,7 @@ func Render(s *app.State, th theme.Theme, tr thumbs.Renderer) string {
 		th = theme.ThemeFromPalette(pal.theme)
 	}
 	if s.Width < minWidth || s.Height < minHeight {
-		return renderTooSmall(s.Width, s.Height, th, pal)
+		return renderTooSmall(s.Width, s.Height, th, pal, s.Catalog().Views)
 	}
 
 	topBar := renderTopPanels(s, th, tr, s.Width, pal)
@@ -257,7 +258,7 @@ func renderSearchSuggestionsPanel(s *app.State, panelW, sugH int, pal renderPale
 	innerW := max(4, panelW-2)
 
 	maxItems := max(1, min(len(s.SearchSuggestions), sugH-2))
-	title := "Sugerencias"
+	title := s.Catalog().Views.SuggestionsTitle
 
 	rows := make([]string, 0, maxItems)
 	for i := 0; i < maxItems; i++ {
@@ -358,13 +359,18 @@ func dropLeftColumns(s string, cols int) string {
 	return ""
 }
 
-func renderTooSmall(w, h int, th theme.Theme, pal renderPalette) string {
+func renderTooSmall(w, h int, th theme.Theme, pal renderPalette, vs i18n.ViewStrings) string {
 	if w <= 0 || h <= 0 {
 		return ""
 	}
-	msg1 := "Terminal demasiado pequeña"
-	msg2 := fmt.Sprintf("Actual: %dx%d · Mín: %dx%d", w, h, minWidth, minHeight)
-	msg3 := "Amplía la ventana"
+	msg1 := vs.TooSmallTitle
+	msg2 := i18n.Format(vs.TooSmallCurrent, map[string]string{
+		"w":  strconv.Itoa(w),
+		"h":  strconv.Itoa(h),
+		"mw": strconv.Itoa(minWidth),
+		"mh": strconv.Itoa(minHeight),
+	})
+	msg3 := vs.TooSmallHint
 
 	boxStyle := th.Toast.Align(lipgloss.Center)
 	content := strings.Join([]string{
@@ -416,10 +422,10 @@ func renderTopPanels(s *app.State, _ theme.Theme, _ thumbs.Renderer, width int, 
 				leftTxt = " " + whiteStyle.Render("█")
 			}
 		} else {
-			leftTxt = renderSearchInputLine(s.SearchDraft, s.SearchCursorPos(), textAvail, pal)
+			leftTxt = renderSearchInputLine(s.SearchDraft, s.SearchCursorPos(), textAvail, pal, s.Catalog().Views)
 		}
 	} else {
-		searchText := "󰍉 Buscar en YouTube..."
+		searchText := "󰍉 " + s.Catalog().Views.SearchPlaceholder
 		textStyle := lipgloss.NewStyle().Foreground(pal.muted)
 		if s.SearchQuery != "" {
 			searchText = "󰍉 " + s.SearchQuery
@@ -470,14 +476,14 @@ func renderTopPanels(s *app.State, _ theme.Theme, _ thumbs.Renderer, width int, 
 	return fitBlock(lipgloss.JoinHorizontal(lipgloss.Top, brandPanel, right), width, 3)
 }
 
-func renderSearchInputLine(draft string, cursor int, avail int, pal renderPalette) string {
+func renderSearchInputLine(draft string, cursor int, avail int, pal renderPalette, vs i18n.ViewStrings) string {
 	whiteStyle := lipgloss.NewStyle().Foreground(pal.white)
 	cursorStyle := lipgloss.NewStyle().Foreground(pal.white).Reverse(true).Bold(true)
 	mutedStyle := lipgloss.NewStyle().Foreground(pal.muted)
 
 	if draft == "" {
 		if avail >= 10 {
-			return " " + whiteStyle.Render("█") + mutedStyle.Render(" "+truncatePlain("Buscar en YouTube...", max(0, avail-3)))
+			return " " + whiteStyle.Render("█") + mutedStyle.Render(" "+truncatePlain(vs.SearchPlaceholder, max(0, avail-3)))
 		}
 		return " " + whiteStyle.Render("█")
 	}
@@ -603,7 +609,7 @@ func renderSearchInputLine(draft string, cursor int, avail int, pal renderPalett
 func renderChips(s *app.State, th theme.Theme, width int, pal renderPalette) string {
 	var line string
 	if s.View == app.ViewChannel {
-		line = " " + th.ChipActive.Render("Canal") + " " + th.Chip.Render(truncatePlain(s.ChannelTitle, max(8, width/3)))
+		line = " " + th.ChipActive.Render(s.Catalog().Views.ChipChannel) + " " + th.Chip.Render(truncatePlain(s.ChannelTitle, max(8, width/3)))
 	} else {
 		chips := app.HomeChips
 		active := s.HomeChip
@@ -636,27 +642,28 @@ func renderChips(s *app.State, th theme.Theme, width int, pal renderPalette) str
 }
 
 func renderSidebarFull(s *app.State, th theme.Theme, width, height int, pal renderPalette) string {
+	vs := s.Catalog().Views
 	innerW := max(4, width-2)
 	sectionStyle := lipgloss.NewStyle().Foreground(pal.dim).Bold(true)
 	divider := lipgloss.NewStyle().Foreground(pal.spotBorder).Render(" " + strings.Repeat("─", max(1, innerW-2)))
 
 	// Row 0 (y=3) is the rounded panel top border; PRINCIPAL sits at y=4 -> tabs at y=5..7.
 	var lines []string
-	lines = append(lines, sectionStyle.Render(" PRINCIPAL"))
+	lines = append(lines, sectionStyle.Render(vs.SidebarMain))
 	for _, t := range []model.Tab{model.TabHome, model.TabMusic, model.TabSubscriptions} {
 		lines = append(lines, renderSidebarTabLine(t, t == s.ActiveTab, s.Focus == app.FocusSidebar, "", th, innerW, pal))
 	}
 
 	lines = append(lines, divider)
-	lines = append(lines, sectionStyle.Render(" BIBLIOTECA"))
+	lines = append(lines, sectionStyle.Render(vs.SidebarLibrary))
 	for _, t := range []model.Tab{model.TabHistory, model.TabWatchLater, model.TabPlaylists, model.TabLiked, model.TabDownloads} {
 		lines = append(lines, renderSidebarTabLine(t, t == s.ActiveTab, s.Focus == app.FocusSidebar, "", th, innerW, pal))
 	}
 
 	lines = append(lines, divider)
-	lines = append(lines, sectionStyle.Render(" SUSCRIPCIONES"))
+	lines = append(lines, sectionStyle.Render(vs.SidebarSubscriptions))
 	if len(s.Subscriptions) == 0 {
-		lines = append(lines, lipgloss.NewStyle().Foreground(pal.dim).Render("  (sin canales)"))
+		lines = append(lines, lipgloss.NewStyle().Foreground(pal.dim).Render(vs.SidebarNoChannels))
 	} else {
 		maxSubs := min(len(s.Subscriptions), 4)
 		for i := 0; i < maxSubs; i++ {
@@ -669,7 +676,7 @@ func renderSidebarFull(s *app.State, th theme.Theme, width, height int, pal rend
 			lines = append(lines, "  "+lipgloss.NewStyle().Foreground(pal.muted).Render("󰀄")+"  "+lipgloss.NewStyle().Foreground(pal.text).Render(name))
 		}
 		if len(s.Subscriptions) > maxSubs && len(lines) < height-2 {
-			lines = append(lines, lipgloss.NewStyle().Foreground(pal.dim).Render(fmt.Sprintf("  +%d más", len(s.Subscriptions)-maxSubs)))
+			lines = append(lines, lipgloss.NewStyle().Foreground(pal.dim).Render(i18n.Format(vs.SidebarMoreSubs, map[string]string{"n": strconv.Itoa(len(s.Subscriptions) - maxSubs)})))
 		}
 	}
 
@@ -771,11 +778,12 @@ func renderMain(s *app.State, th theme.Theme, tr thumbs.Renderer, width, height 
 
 	headerRow := ""
 	if s.View == app.ViewSearch || s.View == app.ViewChannel {
+		vs := s.Catalog().Views
 		headerIcon := "󰍉"
-		title := "Búsqueda: " + s.SearchQuery
+		title := i18n.Format(vs.HeaderSearch, map[string]string{"query": s.SearchQuery})
 		if s.View == app.ViewChannel {
 			headerIcon = "󰗃"
-			title = "Canal: " + s.ChannelTitle
+			title = i18n.Format(vs.HeaderChannel, map[string]string{"title": s.ChannelTitle})
 		}
 		headerRow = lipgloss.NewStyle().Foreground(pal.spotAccent).Bold(true).Render(" "+headerIcon) + " " +
 			lipgloss.NewStyle().Foreground(pal.white).Bold(true).Render(truncatePlain(title, max(4, innerW-6)))

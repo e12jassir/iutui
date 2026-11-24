@@ -2,10 +2,12 @@ package views
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/e12jassir/iutui/internal/app"
+	"github.com/e12jassir/iutui/internal/i18n"
 	"github.com/e12jassir/iutui/internal/lyrics"
 	"github.com/e12jassir/iutui/internal/player"
 	"github.com/e12jassir/iutui/internal/tui/theme"
@@ -14,9 +16,10 @@ import (
 )
 
 func renderQualityOverlay(s *app.State, width, height int, th theme.Theme, pal renderPalette) string {
+	vs := s.Catalog().Views
 	_, _, boxW, _, _ := s.QualityModalBounds()
 	innerW := max(12, boxW-4)
-	title := lipgloss.NewStyle().Foreground(pal.spotAccent).Bold(true).Render("🎬 Calidad, Ahorro y Solo Audio")
+	title := lipgloss.NewStyle().Foreground(pal.spotAccent).Bold(true).Render(vs.QualityTitle)
 	rows := []string{title, ""}
 
 	for i, opt := range app.QualityOptions {
@@ -39,12 +42,13 @@ func renderQualityOverlay(s *app.State, width, height int, th theme.Theme, pal r
 			rows = append(rows, lipgloss.NewStyle().Foreground(pal.text).Render(lineText))
 		}
 	}
-	rows = append(rows, "", lipgloss.NewStyle().Foreground(pal.dim).Render(truncatePlain("  [↑/↓] Mover · [Enter/Click] Aplicar · [1-5] · [Esc]", innerW)))
+	rows = append(rows, "", lipgloss.NewStyle().Foreground(pal.dim).Render(truncatePlain(vs.QualityFooter, innerW)))
 	modal := th.Toast.BorderForeground(pal.spotAccent).Width(boxW - 2).Render(strings.Join(rows, "\n"))
 	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, modal)
 }
 
 func renderSettingsOverlay(s *app.State, width, height int, th theme.Theme, pal renderPalette) string {
+	vs := s.Catalog().Views
 	_, _, boxW, boxH, scroll, visBodyH, layout := s.SettingsModalWindow()
 	innerW := max(20, boxW-2)
 	rows := s.SettingsRows()
@@ -56,7 +60,7 @@ func renderSettingsOverlay(s *app.State, width, height int, th theme.Theme, pal 
 		selIdx = 0
 	}
 
-	titleLeft := lipgloss.NewStyle().Foreground(pal.spotAccent).Bold(true).Render(" ⚙ Configuración · iutui")
+	titleLeft := lipgloss.NewStyle().Foreground(pal.spotAccent).Bold(true).Render(vs.SettingsHeader)
 	scrollInd := ""
 	if len(layout) > visBodyH {
 		hasAbove := scroll > 0
@@ -87,9 +91,9 @@ func renderSettingsOverlay(s *app.State, width, height int, th theme.Theme, pal 
 		var rightTxt string
 		if r.IsBool {
 			if r.Enabled {
-				rightTxt = "● ACTIVADO"
+				rightTxt = vs.SettingsEnabled
 			} else {
-				rightTxt = "○ DESACTIVADO"
+				rightTxt = vs.SettingsDisabled
 			}
 		} else if sel {
 			rightTxt = "◀ " + r.Value + " ▶"
@@ -167,17 +171,18 @@ func renderSettingsOverlay(s *app.State, width, height int, th theme.Theme, pal 
 	descBar := " " + lipgloss.NewStyle().Foreground(pal.ctrlBtn).Bold(true).Render("ⓘ") + " " +
 		lipgloss.NewStyle().Foreground(pal.muted).Render(truncatePlain(rows[selIdx].Desc, max(8, innerW-4)))
 	footer := " " + lipgloss.NewStyle().Foreground(pal.dim).Render(
-		truncatePlain("~/.config/iutui/config  ·  ↑/↓ Mover · ←/→/Enter Cambiar · [?] Atajos · Esc", max(10, innerW-2)),
+		truncatePlain(vs.SettingsFooter, max(10, innerW-2)),
 	)
 
 	content = append(content, divider, descBar, footer)
 
-	panel := renderSpotatuiPanel("Configuración", content, boxW, boxH, true, pal)
+	panel := renderSpotatuiPanel(vs.SettingsPanelTitle, content, boxW, boxH, true, pal)
 	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, panel)
 }
 
 func renderStillWatchingOverlay(s *app.State, width, height int, th theme.Theme, pal renderPalette) string {
-	title := lipgloss.NewStyle().Foreground(pal.spotAccent).Bold(true).Render("⏸ ¿Todavía estás viendo?")
+	vs := s.Catalog().Views
+	title := lipgloss.NewStyle().Foreground(pal.spotAccent).Bold(true).Render(vs.StillWatchingTitle)
 	track := strings.TrimSpace(s.PlayerStatus.Title)
 	if track == "" {
 		track = strings.TrimSpace(s.PlayLoadingTitle)
@@ -185,16 +190,16 @@ func renderStillWatchingOverlay(s *app.State, width, height int, th theme.Theme,
 	rows := []string{
 		title,
 		"",
-		"  La reproducción automática lleva varios videos seguidos",
-		"  sin actividad reciente y se pausó automáticamente.",
+		vs.StillWatchingLine1,
+		vs.StillWatchingLine2,
 	}
 	if track != "" {
-		rows = append(rows, "", "  En pausa: "+truncatePlain(track, 46))
+		rows = append(rows, "", i18n.Format(vs.StillWatchingPaused, map[string]string{"track": truncatePlain(track, 46)}))
 	}
 	rows = append(rows,
 		"",
-		"  [Enter / Space] Continuar viendo",
-		"  [Esc / q]       Mantener en pausa",
+		vs.StillWatchingContinue,
+		vs.StillWatchingKeepPaused,
 	)
 	boxW := min(62, max(34, width-8))
 	trimmed := make([]string, 0, len(rows))
@@ -244,47 +249,48 @@ func renderHelpColumn(sections []helpSection, colW, keyColW int, withSpacers boo
 }
 
 func renderHelpOverlay(s *app.State, width, height int, _ theme.Theme, pal renderPalette) string {
+	vs := s.Catalog().Views
 	leftSections := []helpSection{
 		{
-			title: "NAVEGACIÓN & VISTAS",
+			title: vs.HelpSecNav,
 			items: []helpItem{
-				{keys: "j/k / ↑/↓", desc: "Mover selección (o puntero)"},
-				{keys: "h/l / ←/→", desc: "Lateral / Sidebar / Tarjeta"},
-				{keys: "1..5 · Tab", desc: "Pestañas · Cambiar foco"},
-				{keys: "/ · [ / ]", desc: "Buscar · Cambiar filtro"},
-				{keys: "r · g", desc: "Recargar · Abrir canal"},
+				{keys: "j/k / ↑/↓", desc: vs.HelpNavMove},
+				{keys: "h/l / ←/→", desc: vs.HelpNavSide},
+				{keys: "1..5 · Tab", desc: vs.HelpNavTabs},
+				{keys: "/ · [ / ]", desc: vs.HelpNavSearch},
+				{keys: "r · g", desc: vs.HelpNavReload},
 			},
 		},
 		{
-			title: "BIBLIOTECA & COLA",
+			title: vs.HelpSecLib,
 			items: []helpItem{
-				{keys: "w / W", desc: "Guardar · Me gusta"},
-				{keys: "s · q", desc: "Suscribir · Añadir a cola"},
-				{keys: "u · d", desc: "Ver Cola · Descargar"},
+				{keys: "w / W", desc: vs.HelpLibSave},
+				{keys: "s · q", desc: vs.HelpLibSub},
+				{keys: "u · d", desc: vs.HelpLibQueue},
 			},
 		},
 	}
 
 	rightSections := []helpSection{
 		{
-			title: "REPRODUCCIÓN (MPV)",
+			title: vs.HelpSecPlay,
 			items: []helpItem{
-				{keys: "Enter / a / v", desc: "Reproducir (auto / audio / video)"},
-				{keys: "Space · n / p", desc: "Pausa · Siguiente · Anterior"},
-				{keys: ", / . · - / +", desc: "Saltar ±10s · Volumen ±5%"},
-				{keys: "{ / } / 0 · R", desc: "Velocidad 0.5..2x · Repetir pista"},
-				{keys: "x / V · m", desc: "Solo audio · Mix Radio"},
-				{keys: "o / l · f / c", desc: "Capítulos · Letras · Calidad"},
-				{keys: "z/Z · y", desc: "Sync letra ±0.5s · Fuente CC"},
+				{keys: "Enter / a / v", desc: vs.HelpPlayStart},
+				{keys: "Space · n / p", desc: vs.HelpPlayPause},
+				{keys: ", / . · - / +", desc: vs.HelpPlaySeek},
+				{keys: "{ / } / 0 · R", desc: vs.HelpPlaySpeed},
+				{keys: "x / V · m", desc: vs.HelpPlayAudio},
+				{keys: "o / l · f / c", desc: vs.HelpPlayChapters},
+				{keys: "z/Z · y", desc: vs.HelpPlaySync},
 			},
 		},
 		{
-			title: "SISTEMA & AJUSTES",
+			title: vs.HelpSecSys,
 			items: []helpItem{
-				{keys: "A", desc: "Activar/desactivar Autoplay"},
-				{keys: "b / t", desc: "SponsorBlock · Cambiar tema"},
-				{keys: "S · ?", desc: "Configuración · Esta ayuda"},
-				{keys: "Esc · Q", desc: "Volver/Cerrar · Salir"},
+				{keys: "A", desc: vs.HelpSysAutoplay},
+				{keys: "b / t", desc: vs.HelpSysTheme},
+				{keys: "S · ?", desc: vs.HelpSysSettings},
+				{keys: "Esc · Q", desc: vs.HelpSysQuit},
 			},
 		},
 	}
@@ -298,7 +304,7 @@ func renderHelpOverlay(s *app.State, width, height int, _ theme.Theme, pal rende
 	}
 	innerW := max(24, boxW-2)
 
-	hdrLeft := lipgloss.NewStyle().Foreground(pal.spotAccent).Bold(true).Render(" ⌨ Atajos de teclado · iutui")
+	hdrLeft := lipgloss.NewStyle().Foreground(pal.spotAccent).Bold(true).Render(vs.HelpHeader)
 	verTag := ""
 	if s != nil {
 		if ver := strings.TrimSpace(s.AppVersion); ver != "" {
@@ -317,7 +323,7 @@ func renderHelpOverlay(s *app.State, width, height int, _ theme.Theme, pal rende
 
 	divider := lipgloss.NewStyle().Foreground(pal.spotBorder).Render(" " + strings.Repeat("─", max(1, innerW-2)))
 	footer := " " + lipgloss.NewStyle().Foreground(pal.dim).Render(
-		truncatePlain("Pulsa [S] Configuración  ·  Click o [?] / [Esc] para cerrar", max(10, innerW-2)),
+		truncatePlain(vs.HelpFooter, max(10, innerW-2)),
 	)
 
 	maxH := max(10, height-2)
@@ -361,20 +367,21 @@ func renderHelpOverlay(s *app.State, width, height int, _ theme.Theme, pal rende
 	content = append(content, divider, footer)
 
 	boxH := min(maxH, len(content)+2)
-	panel := renderSpotatuiPanel("Atajos de teclado", content, boxW, boxH, true, pal)
+	panel := renderSpotatuiPanel(vs.HelpPanelTitle, content, boxW, boxH, true, pal)
 	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, panel)
 }
 
 func renderQueueOverlay(s *app.State, width, height int, th theme.Theme, pal renderPalette) string {
+	vs := s.Catalog().Views
 	start, end, boxW, _, _, _, _ := s.QueueModalWindow()
 	innerW := boxW - 4
 	title := lipgloss.NewStyle().Foreground(pal.spotAccent).Bold(true).Render(
-		fmt.Sprintf("♫ Cola de reproducción (%d)", len(s.MPVPlaylist)),
+		i18n.Format(vs.QueueTitle, map[string]string{"n": strconv.Itoa(len(s.MPVPlaylist))}),
 	)
 	rows := []string{title, ""}
 
 	if len(s.MPVPlaylist) == 0 {
-		rows = append(rows, lipgloss.NewStyle().Foreground(pal.muted).Render("  Cola vacía — añade pistas con 'q'"))
+		rows = append(rows, lipgloss.NewStyle().Foreground(pal.muted).Render(vs.QueueEmpty))
 	} else {
 		for i := start; i < end; i++ {
 			it := s.MPVPlaylist[i]
@@ -383,7 +390,7 @@ func renderQueueOverlay(s *app.State, width, height int, th theme.Theme, pal ren
 				name = strings.TrimSpace(it.Filename)
 			}
 			if name == "" {
-				name = fmt.Sprintf("Pista %d", it.Index+1)
+				name = i18n.Format(vs.QueueTrackN, map[string]string{"n": strconv.Itoa(it.Index + 1)})
 			}
 			marker := "  "
 			if it.Current {
@@ -404,18 +411,19 @@ func renderQueueOverlay(s *app.State, width, height int, th theme.Theme, pal ren
 		}
 	}
 
-	footer := "  [j/k] Navegar · [Enter] Saltar · [x/d] Quitar · [c] Vaciar · [u/Esc] Cerrar"
+	footer := vs.QueueFooter
 	rows = append(rows, "", lipgloss.NewStyle().Foreground(pal.dim).Render(truncatePlain(footer, innerW)))
 	modal := th.Toast.BorderForeground(pal.spotAccent).Width(boxW - 2).Render(strings.Join(rows, "\n"))
 	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, modal)
 }
 
 func renderQueueSidePanel(s *app.State, _ theme.Theme, tr thumbs.Renderer, width, height int, pal renderPalette) string {
+	vs := s.Catalog().Views
 	innerW := max(12, width-2)
 	bodyH := max(1, height-2)
 	start, end, _, _, _, _ := s.QueueSideWindow()
 
-	hdrTitleTxt := fmt.Sprintf(" 󰲸 Cola · Mix (%d)", len(s.MPVPlaylist))
+	hdrTitleTxt := i18n.Format(vs.QueueSideTitle, map[string]string{"n": strconv.Itoa(len(s.MPVPlaylist))})
 	closeTxt := "[✕]"
 	maxTitleW := max(6, innerW-len(closeTxt)-2)
 	hdrTitle := lipgloss.NewStyle().Foreground(pal.spotAccent).Bold(true).Render(truncatePlain(hdrTitleTxt, maxTitleW))
@@ -429,7 +437,7 @@ func renderQueueSidePanel(s *app.State, _ theme.Theme, tr thumbs.Renderer, width
 
 	itemAreaH := max(1, bodyH-3) // header + divider + footer
 	if len(s.MPVPlaylist) == 0 {
-		lines = append(lines, " "+lipgloss.NewStyle().Foreground(pal.muted).Render(truncatePlain("Cola vacía — añade pistas con 'q'", max(4, innerW-2))))
+		lines = append(lines, " "+lipgloss.NewStyle().Foreground(pal.muted).Render(truncatePlain(vs.QueueSideEmpty, max(4, innerW-2))))
 	} else {
 		showCover := tr != nil && innerW >= 24
 		const coverW = 10
@@ -453,7 +461,7 @@ func renderQueueSidePanel(s *app.State, _ theme.Theme, tr thumbs.Renderer, width
 				name = strings.TrimSpace(it.Filename)
 			}
 			if name == "" {
-				name = fmt.Sprintf("Pista %d", it.Index+1)
+				name = i18n.Format(vs.QueueTrackN, map[string]string{"n": strconv.Itoa(it.Index + 1)})
 			}
 			artist := strings.TrimSpace(it.Artist)
 			if artist == "" {
@@ -461,7 +469,7 @@ func renderQueueSidePanel(s *app.State, _ theme.Theme, tr thumbs.Renderer, width
 					artist = strings.TrimSpace(name[:idx])
 					name = strings.TrimSpace(name[idx+3:])
 				} else {
-					artist = "Mix / Cola"
+					artist = vs.QueueSideMix
 				}
 			}
 
@@ -476,9 +484,9 @@ func renderQueueSidePanel(s *app.State, _ theme.Theme, tr thumbs.Renderer, width
 			if dur == "" {
 				dur = "--:--"
 			}
-			meta := dur + " · En cola"
+			meta := dur + " · " + vs.QueueSideQueued
 			if it.Current {
-				meta = dur + " · Sonando"
+				meta = dur + " · " + vs.QueueSidePlaying
 			}
 
 			selected := i == s.QueueIdx
@@ -543,7 +551,7 @@ func renderQueueSidePanel(s *app.State, _ theme.Theme, tr thumbs.Renderer, width
 	for len(lines) < bodyH-1 {
 		lines = append(lines, "")
 	}
-	footerLeft := "↑/↓ · Click/Enter · x Quitar · c Limpiar · Esc"
+	footerLeft := vs.QueueSideFooter
 	footerRight := ""
 	if len(s.MPVPlaylist) > end-start && end > start {
 		footerRight = fmt.Sprintf("%d-%d/%d", start+1, end, len(s.MPVPlaylist))
@@ -557,11 +565,12 @@ func renderQueueSidePanel(s *app.State, _ theme.Theme, tr thumbs.Renderer, width
 	}
 	lines = append(lines[:bodyH-1], footer)
 
-	return renderSpotatuiPanel("Cola", lines, width, height, true, pal)
+	return renderSpotatuiPanel(vs.QueueSidePanel, lines, width, height, true, pal)
 }
 
 func renderChaptersOverlay(s *app.State, width, height int, th theme.Theme, pal renderPalette) string {
-	title := lipgloss.NewStyle().Foreground(pal.spotAccent).Bold(true).Render("📑 Capítulos del video")
+	vs := s.Catalog().Views
+	title := lipgloss.NewStyle().Foreground(pal.spotAccent).Bold(true).Render(vs.ChaptersTitle)
 	rows := []string{title, ""}
 
 	start, end, boxW, _, _, _, _ := s.ChaptersModalWindow()
@@ -577,15 +586,16 @@ func renderChaptersOverlay(s *app.State, width, height int, th theme.Theme, pal 
 			rows = append(rows, lipgloss.NewStyle().Foreground(pal.text).Render(truncatePlain(label, innerW)))
 		}
 	}
-	rows = append(rows, "", lipgloss.NewStyle().Foreground(pal.dim).Render("  [j/k] Navegar · [Enter/Click] Saltar · [Esc/o] Cerrar"))
+	rows = append(rows, "", lipgloss.NewStyle().Foreground(pal.dim).Render(vs.ChaptersFooter))
 	modal := th.Toast.BorderForeground(pal.spotAccent).Width(boxW - 2).Render(strings.Join(rows, "\n"))
 	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, modal)
 }
 
 func buildLyricsContent(s *app.State, innerW, bodyH int, pal renderPalette) []string {
+	vs := s.Catalog().Views
 	if s.LyricsLoading {
 		return []string{
-			" " + lipgloss.NewStyle().Foreground(pal.spotAccent).Bold(true).Render(loadingSpinner(s.AnimFrame)+" Buscando letra..."),
+			" " + lipgloss.NewStyle().Foreground(pal.spotAccent).Bold(true).Render(loadingSpinner(s.AnimFrame)+" "+vs.LyricsSearching),
 			" " + lipgloss.NewStyle().Foreground(pal.muted).Render(truncatePlain(s.LyricsTrack, max(1, innerW-2))),
 		}
 	}
@@ -593,7 +603,7 @@ func buildLyricsContent(s *app.State, innerW, bodyH int, pal renderPalette) []st
 		return []string{
 			" " + lipgloss.NewStyle().Foreground(pal.muted).Render(truncatePlain(s.LyricsErr, max(1, innerW-2))),
 			"",
-			" " + lipgloss.NewStyle().Foreground(pal.dim).Render(truncatePlain("[L] o [Esc] para cerrar", max(1, innerW-2))),
+			" " + lipgloss.NewStyle().Foreground(pal.dim).Render(truncatePlain(vs.LyricsCloseHint, max(1, innerW-2))),
 		}
 	}
 	headerText := strings.TrimSpace(s.Lyrics.TrackName)
@@ -642,7 +652,7 @@ func buildLyricsContent(s *app.State, innerW, bodyH int, pal renderPalette) []st
 			}
 		}
 		if len(displayRows) == 0 {
-			return append(lines, " "+lipgloss.NewStyle().Foreground(pal.muted).Render("Sin letra disponible"))
+			return append(lines, " "+lipgloss.NewStyle().Foreground(pal.muted).Render(vs.LyricsUnavailable))
 		}
 		maxStart := max(0, len(displayRows)-availLines)
 		start := activeStartRow - availLines/3 + s.LyricsScroll
@@ -666,7 +676,7 @@ func buildLyricsContent(s *app.State, innerW, bodyH int, pal renderPalette) []st
 			}
 		}
 		if len(displayRows) == 0 {
-			return append(lines, " "+lipgloss.NewStyle().Foreground(pal.muted).Render("Sin letra disponible"))
+			return append(lines, " "+lipgloss.NewStyle().Foreground(pal.muted).Render(vs.LyricsUnavailable))
 		}
 		maxStart := max(0, len(displayRows)-availLines)
 		start := s.LyricsScroll
@@ -690,7 +700,7 @@ func buildLyricsContent(s *app.State, innerW, bodyH int, pal renderPalette) []st
 		return append(lines, displayRows[start:end]...)
 	}
 
-	return append(lines, " "+lipgloss.NewStyle().Foreground(pal.muted).Render("Sin letra disponible"))
+	return append(lines, " "+lipgloss.NewStyle().Foreground(pal.muted).Render(vs.LyricsUnavailable))
 }
 
 func wrapLyricLine(text string, maxW int) []string {
@@ -746,14 +756,15 @@ func renderLyricsPanel(s *app.State, _ theme.Theme, width, height int, pal rende
 	innerW := max(4, width-2)
 	bodyH := max(1, height-2)
 	content := buildLyricsContent(s, innerW, bodyH, pal)
-	return renderSpotatuiPanel("♫ Letras", content, width, height, true, pal)
+	return renderSpotatuiPanel(s.Catalog().Views.LyricsPanelTitle, content, width, height, true, pal)
 }
 
 func renderLyricsOverlay(s *app.State, width, height int, th theme.Theme, pal renderPalette) string {
+	vs := s.Catalog().Views
 	boxW := min(64, max(34, width-8))
 	boxH := max(8, min(height-6, 18))
 	innerW := boxW - 4
-	content := append([]string{lipgloss.NewStyle().Foreground(pal.spotAccent).Bold(true).Render("♫ Letras")}, buildLyricsContent(s, innerW, boxH-3, pal)...)
+	content := append([]string{lipgloss.NewStyle().Foreground(pal.spotAccent).Bold(true).Render(vs.LyricsPanelTitle)}, buildLyricsContent(s, innerW, boxH-3, pal)...)
 	modal := th.Toast.BorderForeground(pal.spotAccent).Width(boxW - 2).Render(strings.Join(content, "\n"))
 	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, modal)
 }

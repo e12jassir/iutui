@@ -8,12 +8,14 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/e12jassir/iutui/internal/app"
+	"github.com/e12jassir/iutui/internal/i18n"
 	"github.com/e12jassir/iutui/internal/model"
 	"github.com/e12jassir/iutui/internal/tui/theme"
 	"github.com/mattn/go-runewidth"
 )
 
 func renderPlayerPanel(s *app.State, _ theme.Theme, width int, pal renderPalette) string {
+	vs := s.Catalog().Views
 	innerW := max(10, width-2)
 	layout := s.PlayerBarLayout()
 
@@ -24,9 +26,9 @@ func renderPlayerPanel(s *app.State, _ theme.Theme, width int, pal renderPalette
 	if s.PlayerStatus.LoopFile {
 		extra += " · 󰑖"
 	}
-	panelTitle := "Reproductor" + extra
+	panelTitle := vs.PlayerTitle + extra
 	if !s.PlayerStatus.IsRunning && s.PlayLoading {
-		panelTitle = "Reproductor · " + loadingSpinner(s.AnimFrame) + " Abriendo..."
+		panelTitle = vs.PlayerTitle + " · " + loadingSpinner(s.AnimFrame) + " " + vs.PlayerOpening
 	}
 
 	// Row 1: active track cleanly on left, toast or clickable Queue badge on right.
@@ -48,9 +50,9 @@ func renderPlayerPanel(s *app.State, _ theme.Theme, width int, pal renderPalette
 		rightStyled = lipgloss.NewStyle().Foreground(rightColor).Bold(rightBold).Render(" " + truncatePlain(rightText, max(10, innerW/3)) + " ")
 	}
 
-	trackLabel := "Sin reproducción activa"
+	trackLabel := vs.PlayerNothingPlaying
 	if s.PlayLoading && s.PlayLoadingTitle != "" {
-		trackLabel = loadingSpinner(s.AnimFrame) + " Abriendo en mpv: " + s.PlayLoadingTitle
+		trackLabel = loadingSpinner(s.AnimFrame) + " " + i18n.Format(vs.PlayerOpeningInMPV, map[string]string{"title": s.PlayLoadingTitle})
 	} else if strings.TrimSpace(s.PlayerStatus.Title) != "" {
 		title := strings.TrimSpace(s.PlayerStatus.Title)
 		trackLabel = "󰎈 " + title
@@ -58,7 +60,7 @@ func renderPlayerPanel(s *app.State, _ theme.Theme, width int, pal renderPalette
 			trackLabel += " · " + ch
 		}
 	} else if v, ok := s.SelectedVideo(); ok {
-		trackLabel = "Seleccionado: " + v.Title
+		trackLabel = i18n.Format(vs.PlayerSelected, map[string]string{"title": v.Title})
 		if ch := cleanChannelName(v.Channel); ch != "" && !strings.Contains(strings.ToLower(v.Title), strings.ToLower(ch)) {
 			trackLabel += " · " + ch
 		}

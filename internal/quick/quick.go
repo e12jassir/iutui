@@ -2,12 +2,14 @@ package quick
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/mattn/go-runewidth"
 
+	"github.com/e12jassir/iutui/internal/i18n"
 	"github.com/e12jassir/iutui/internal/model"
 )
 
@@ -165,7 +167,8 @@ func (m Model) View() string {
 	b.WriteByte('\n')
 
 	if len(m.Filtered) == 0 {
-		b.WriteString(emptyStyle.Render("  No matches"))
+		noMatches := i18n.For(i18n.Resolve("auto", os.Getenv)).Views.QuickNoMatches
+		b.WriteString(emptyStyle.Render(noMatches))
 		b.WriteByte('\n')
 		return b.String()
 	}
