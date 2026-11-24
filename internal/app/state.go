@@ -214,6 +214,8 @@ type State struct {
 	QueueIdx            int
 	QueueScroll         int
 	queueRefreshPending bool
+	lastResumeSaveID    string
+	lastResumeSavePos   float64
 	MPVPlaylist         []player.PlaylistItem
 	SearchSuggestions   []string
 	SuggestIdx          int
@@ -501,6 +503,28 @@ func (s *State) saveCurrentResumePosition() {
 		return
 	}
 	_ = s.Deps.ResumeStore.SavePosition(s.CurrentPlaying.ID, s.PlayerStatus.TimePos, s.PlayerStatus.Duration)
+}
+
+// VideoProgress returns the watched fraction (0..1) for videoID, combining live
+// playback position for the active video with persisted ResumeStore progress.
+func (s *State) VideoProgress(videoID string) float64 {
+	if s == nil || videoID == "" {
+		return 0
+	}
+	if s.CurrentPlaying.ID == videoID && s.PlayerStatus.Duration > 0 && s.PlayerStatus.TimePos >= 5 {
+		ratio := s.PlayerStatus.TimePos / s.PlayerStatus.Duration
+		if ratio >= 0.95 {
+			return 0
+		}
+		if ratio > 1 {
+			return 1
+		}
+		return ratio
+	}
+	if pr, ok := s.Deps.ResumeStore.(interface{ ProgressRatio(string) float64 }); ok {
+		return pr.ProgressRatio(videoID)
+	}
+	return 0
 }
 
 var shortsTagRe = regexp.MustCompile(`(?i)(?:^|[^a-z0-9_])#shorts?(?:[^a-z0-9_]|$)`)

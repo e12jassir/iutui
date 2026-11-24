@@ -67,7 +67,7 @@ func renderHomeGrid(s *app.State, th theme.Theme, tr thumbs.Renderer, width, hei
 			liked := s.LikedIDs[v.ID]
 			playing := isVideoPlaying(s, v)
 			dlBadge := downloadProgressBadge(s, v.ID)
-			card := renderCard(v, selected, saved, liked, playing, dlBadge, th, tr, actualCardW, pal, vs)
+			card := renderCard(v, selected, saved, liked, playing, dlBadge, s.VideoProgress(v.ID), th, tr, actualCardW, pal, vs)
 			if c > 0 {
 				rowCards = append(rowCards, gapStr)
 			}
@@ -81,7 +81,7 @@ func renderHomeGrid(s *app.State, th theme.Theme, tr thumbs.Renderer, width, hei
 	return fitBlock(strings.Join(gridRows, "\n"), width, height)
 }
 
-func renderCard(v model.Video, selected, saved, liked, playing bool, dlBadge string, th theme.Theme, tr thumbs.Renderer, cardW int, pal renderPalette, vs i18n.ViewStrings) string {
+func renderCard(v model.Video, selected, saved, liked, playing bool, dlBadge string, progress float64, th theme.Theme, tr thumbs.Renderer, cardW int, pal renderPalette, vs i18n.ViewStrings) string {
 	innerW := max(4, cardW-4) // border(2) + padding(2)
 	thumbH := max(homeThumbH, min(11, innerW*9/32))
 
@@ -111,7 +111,24 @@ func renderCard(v model.Video, selected, saved, liked, playing bool, dlBadge str
 	if dlBadge != "" {
 		badgeParts = append(badgeParts, lipgloss.NewStyle().Foreground(pal.spotAccent).Bold(true).Render(dlBadge))
 	}
-	metaRow := truncateStyledLine(strings.Join(badgeParts, " "), innerW)
+	joinedBadges := strings.Join(badgeParts, " ")
+	if progress > 0 && !v.IsLive {
+		usedW := lipgloss.Width(joinedBadges)
+		barW := innerW - usedW - 1
+		if barW >= 4 {
+			filled := int(float64(barW)*progress + 0.5)
+			if filled < 1 {
+				filled = 1
+			}
+			if filled > barW {
+				filled = barW
+			}
+			redBar := lipgloss.NewStyle().Foreground(lipgloss.Color("#FF0000")).Render(strings.Repeat("━", filled))
+			dimBar := lipgloss.NewStyle().Foreground(lipgloss.Color("#3A3A3A")).Render(strings.Repeat("━", barW-filled))
+			joinedBadges = joinedBadges + " " + redBar + dimBar
+		}
+	}
+	metaRow := truncateStyledLine(joinedBadges, innerW)
 
 	// 3. Symmetric 2-line title + clean channel + views (no avatar box).
 	titleLines := wrapTwoLines(v.Title, innerW)

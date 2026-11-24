@@ -31,11 +31,13 @@ type ResumeEntry struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
-// ResumeStore persists playback positions for long videos in resume.json capped at MaxEntries.
+// ResumeStore persists playback positions for videos in resume.json capped at MaxEntries.
 type ResumeStore struct {
 	StateDir   string
 	MaxEntries int
 	mu         sync.Mutex
+	loaded     bool
+	cache      map[string]ResumeEntry
 }
 
 // NewResumeStore constructs a ResumeStore rooted at stateDir (default cap 200 entries).
@@ -60,7 +62,23 @@ func (r *ResumeStore) maxEntries() int {
 	return defaultMaxResume
 }
 
-// GetPosition returns the saved timestamp for videoID if present and positive.
+func (r *ResumeStore) loadLocked(p string) (map[string]ResumeEntry, error) {
+	if r.loaded {
+		return r.cache, nil
+	}
+	entries, err := readResumeFile(p)
+	if err != nil {
+		return nil, err
+	}
+	if entries == nil {
+		entries = make(map[string]ResumeEntry)
+	}
+	r.cache = entries
+	r.loaded = true
+	return r.cache, nil
+}
+
+// GetPosition returns the saved timestamp for videoID if present and >= 5s.
 func (r *ResumeStore) GetPosition(videoID string) (float64, bool) {
 	id := strings.TrimSpace(videoID)
 	p := r.path()
@@ -71,19 +89,48 @@ func (r *ResumeStore) GetPosition(videoID string) (float64, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	entries, err := readResumeFile(p)
+	entries, err := r.loadLocked(p)
 	if err != nil {
 		return 0, false
 	}
 	e, ok := entries[id]
-	if !ok || e.Position < 30 {
+	if !ok || e.Position < 5 {
 		return 0, false
 	}
 	return e.Position, true
 }
 
-// SavePosition records position for long videos (>= 15 min) when within
-// [30s, duration-30s); short videos or finished tracks remove any prior entry.
+// ProgressRatio returns the watched fraction (0..1) for videoID, or 0 if not tracked.
+func (r *ResumeStore) ProgressRatio(videoID string) float64 {
+	id := strings.TrimSpace(videoID)
+	p := r.path()
+	if id == "" || p == "" {
+		return 0
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	entries, err := r.loadLocked(p)
+	if err != nil {
+		return 0
+	}
+	e, ok := entries[id]
+	if !ok || e.Duration <= 0 || e.Position < 5 {
+		return 0
+	}
+	ratio := e.Position / e.Duration
+	if ratio < 0 {
+		return 0
+	}
+	if ratio > 1 {
+		return 1
+	}
+	return ratio
+}
+
+// SavePosition records position for any video (regardless of duration) when within
+// [5s, duration-5s) and under 95% watched; finished or unstarted tracks clear any prior entry.
 func (r *ResumeStore) SavePosition(videoID string, position, duration float64) error {
 	id := strings.TrimSpace(videoID)
 	p := r.path()
@@ -94,15 +141,16 @@ func (r *ResumeStore) SavePosition(videoID string, position, duration float64) e
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	entries, err := readResumeFile(p)
+	entries, err := r.loadLocked(p)
 	if err != nil {
 		return err
 	}
 	if entries == nil {
 		entries = make(map[string]ResumeEntry)
+		r.cache = entries
 	}
 
-	if duration < LongVideoThresholdSeconds || position < 30 || position >= duration-30 {
+	if duration <= 0 || position < 5 || position >= duration-5 || (position/duration) >= 0.95 {
 		if _, exists := entries[id]; !exists {
 			return nil
 		}

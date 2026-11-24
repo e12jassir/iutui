@@ -660,6 +660,17 @@ func (s *State) Update(msg tea.Msg) (*State, tea.Cmd) {
 			s.PlayLoading = false
 			s.playInFlight = false
 		}
+		if !isStaleTitle && msg.Status.IsRunning && s.CurrentPlaying.ID != "" && msg.Status.Duration > 0 && msg.Status.TimePos >= 5 && s.Deps.ResumeStore != nil {
+			diff := msg.Status.TimePos - s.lastResumeSavePos
+			if diff < 0 {
+				diff = -diff
+			}
+			if s.CurrentPlaying.ID != s.lastResumeSaveID || diff >= 10 {
+				_ = s.Deps.ResumeStore.SavePosition(s.CurrentPlaying.ID, msg.Status.TimePos, msg.Status.Duration)
+				s.lastResumeSaveID = s.CurrentPlaying.ID
+				s.lastResumeSavePos = msg.Status.TimePos
+			}
+		}
 		var historyCmd tea.Cmd
 		if !msg.Status.IsRunning {
 			s.lastPlaylistPos = -1

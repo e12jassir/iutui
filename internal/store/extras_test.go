@@ -12,15 +12,18 @@ func TestResumeStore_LongVideosOnlyAndCap(t *testing.T) {
 	rs := NewResumeStore(dir)
 	rs.MaxEntries = 3
 
-	// Short song (< 900s) is never stored.
+	// Any video duration is stored when position is within [5s, duration-5s) and < 95%.
 	if err := rs.SavePosition("short1", 120, 240); err != nil {
 		t.Fatalf("SavePosition short error: %v", err)
 	}
-	if pos, ok := rs.GetPosition("short1"); ok || pos != 0 {
-		t.Fatalf("expected short video not saved, got (%v, %v)", pos, ok)
+	if pos, ok := rs.GetPosition("short1"); !ok || pos != 120 {
+		t.Fatalf("expected short video saved at 120, got (%v, %v)", pos, ok)
+	}
+	if ratio := rs.ProgressRatio("short1"); ratio < 0.49 || ratio > 0.51 {
+		t.Fatalf("ProgressRatio(short1) = %v, want ~0.5", ratio)
 	}
 
-	// Below 30s start or near EOF (>= duration-30) clears saved state.
+	// Below 5s start or near EOF (>= duration-5 or >= 95%) clears saved state.
 	if err := rs.SavePosition("long1", 400, 1800); err != nil {
 		t.Fatalf("SavePosition long1 error: %v", err)
 	}

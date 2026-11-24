@@ -222,7 +222,7 @@ func (s *State) playVideo(v model.Video, mode string) (*State, tea.Cmd) {
 
 	var resumePos float64
 	if !isMixTarget(v.ID, mode) && s.Deps.ResumeStore != nil {
-		if pos, ok := s.Deps.ResumeStore.GetPosition(v.ID); ok && pos >= 30 {
+		if pos, ok := s.Deps.ResumeStore.GetPosition(v.ID); ok && pos >= 5 {
 			resumePos = pos
 		}
 	}

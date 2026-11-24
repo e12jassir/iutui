@@ -2324,15 +2324,15 @@ func TestPhase2_SmartResumeLongVsShort(t *testing.T) {
 	s1.SetSelection(1)
 	s1, _ = s1.Update(tea.KeyMsg{Type: tea.KeyEnter})
 
-	// Simulate playing short video (300s < 900s) then Close() -> short must NOT be saved.
+	// Simulate playing short video (300s) then Close() -> short video MUST also be saved.
 	s1.PlayerStatus = player.Status{IsRunning: true, Title: shortVid.Title, TimePos: 150, Duration: 300, Speed: 1.0}
 	s1.Close()
 
 	if pos, ok := res.GetPosition("long0001"); !ok || pos != 420 {
 		t.Fatalf("expected saved resume 420s for long0001, got ok=%v pos=%v", ok, pos)
 	}
-	if _, ok := res.GetPosition("short001"); ok {
-		t.Fatal("did not expect short video (< 900s) to save resume position")
+	if pos, ok := res.GetPosition("short001"); !ok || pos != 150 {
+		t.Fatalf("expected saved resume 150s for short001, got ok=%v pos=%v", ok, pos)
 	}
 
 	// Fresh session opening long0001 should invoke PlayFrom at 420s with toast.
