@@ -81,6 +81,27 @@ var SearchChips = []Chip{
 	{Label: "No vistos", Match: func(v model.Video, s *State) bool { return !s.HistoryIDs[v.ID] }},
 }
 
+// ChipLabel returns the localized label for a chip's canonical label.
+func (s *State) ChipLabel(raw string) string {
+	as := s.Catalog().App
+	switch raw {
+	case "Todo":
+		return as.ChipAll
+	case "En vivo":
+		return as.ChipLive
+	case "Guardados":
+		return as.ChipSaved
+	case "Vistos":
+		return as.ChipWatched
+	case "Videos":
+		return as.ChipVideos
+	case "No vistos":
+		return as.ChipUnwatched
+	default:
+		return raw
+	}
+}
+
 // Downloader defines the video/audio download port.
 type Downloader interface {
 	Enqueue(ctx context.Context, v model.Video, audioOnly bool) error

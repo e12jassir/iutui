@@ -10,6 +10,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/e12jassir/iutui/internal/catalog"
 	"github.com/e12jassir/iutui/internal/download"
+	"github.com/e12jassir/iutui/internal/i18n"
 	"github.com/e12jassir/iutui/internal/lyrics"
 	"github.com/e12jassir/iutui/internal/model"
 	"github.com/e12jassir/iutui/internal/player"
@@ -60,7 +61,7 @@ func (s *State) DownloadSelected(audioOnly bool) (*State, tea.Cmd) {
 		return s, nil
 	}
 	if s.Deps.Downloader == nil {
-		return s, s.toastCmd("Descargas no configuradas")
+		return s, s.toastCmd(s.Catalog().App.ToastDownloadsUnconfigured)
 	}
 	if s.DownloadProgress == nil {
 		s.DownloadProgress = make(map[string]download.Item)
@@ -70,7 +71,7 @@ func (s *State) DownloadSelected(audioOnly bool) (*State, tea.Cmd) {
 		AudioOnly: audioOnly,
 		Status:    download.StatusPending,
 	}
-	toastCmd := s.toastCmd("⬇ Descargando: " + v.Title)
+	toastCmd := s.toastCmd(i18n.Format(s.Catalog().App.ToastDownloading, map[string]string{"title": v.Title}))
 	dlCmd := func() tea.Msg {
 		err := s.Deps.Downloader.Enqueue(s.appCtx, v, audioOnly)
 		return DownloadDoneMsg{Video: v, Err: err}
@@ -139,7 +140,7 @@ func (s *State) ToggleLikeVideo(v model.Video) (*State, tea.Cmd) {
 	}
 	lt, ok := s.Deps.Store.(likedToggler)
 	if !ok {
-		return s, s.toastCmd("Me gusta no disponible")
+		return s, s.toastCmd(s.Catalog().App.ToastLikeUnavailable)
 	}
 	return s, func() tea.Msg {
 		liked, err := lt.ToggleLiked(s.appCtx, v)
@@ -303,7 +304,7 @@ func (s *State) CycleTheme() (*State, tea.Cmd) {
 			return nil
 		}
 	}
-	return s, tea.Batch(s.toastCmd("🎨 Tema: "+next), saveCmd)
+	return s, tea.Batch(s.toastCmd(i18n.Format(s.Catalog().App.ToastTheme, map[string]string{"theme": next})), saveCmd)
 }
 
 // OpenSelectedChannel navigates into the highlighted video's creator channel view.
@@ -313,7 +314,7 @@ func (s *State) OpenSelectedChannel() (*State, tea.Cmd) {
 		return s, nil
 	}
 	if strings.TrimSpace(v.Channel) == "" && strings.TrimSpace(v.ChannelID) == "" {
-		return s, s.toastCmd("Este video no tiene canal visible")
+		return s, s.toastCmd(s.Catalog().App.ToastNoVisibleChannel)
 	}
 	return s.openChannelVideo(v)
 }
@@ -324,11 +325,11 @@ func (s *State) openChannelVideo(v model.Video) (*State, tea.Cmd) {
 		chName = strings.TrimSpace(v.ChannelID)
 	}
 	if chName == "" {
-		return s, s.toastCmd("Este video no tiene canal visible")
+		return s, s.toastCmd(s.Catalog().App.ToastNoVisibleChannel)
 	}
 	cc, ok := s.Deps.Catalog.(channelCatalog)
 	if !ok {
-		return s, s.toastCmd("Vista de canal no disponible")
+		return s, s.toastCmd(s.Catalog().App.ToastChannelViewUnavail)
 	}
 	if s.channelCancel != nil {
 		s.channelCancel()
@@ -530,7 +531,7 @@ func (s *State) toggleSubscribeVideo(v model.Video) (*State, tea.Cmd) {
 	}
 	subRef, label := resolveVideoChannel(v)
 	if subRef == "" {
-		return s, s.toastCmd("Este video no tiene canal para suscribirse")
+		return s, s.toastCmd(s.Catalog().App.ToastNoChannelToSub)
 	}
 	directMatch := false
 	for _, existing := range s.Subscriptions {
@@ -553,7 +554,7 @@ func (s *State) toggleSubscribeVideo(v model.Video) (*State, tea.Cmd) {
 	lst, hasLabeled := s.Deps.Store.(labeledSubscriptionToggler)
 	st, hasBasic := s.Deps.Store.(subscriptionToggler)
 	if !hasLabeled && !hasBasic {
-		return s, s.toastCmd("Suscripciones rápidas no disponibles")
+		return s, s.toastCmd(s.Catalog().App.ToastQuickSubUnavailable)
 	}
 	return s, func() tea.Msg {
 		var (
@@ -577,7 +578,7 @@ func (s *State) toggleSubscribeVideo(v model.Video) (*State, tea.Cmd) {
 func (s *State) OpenChapters() (*State, tea.Cmd) {
 	cp, ok := s.Deps.Engine.(chaptersProvider)
 	if !ok {
-		return s, s.toastCmd("Sin capítulos disponibles")
+		return s, s.toastCmd(s.Catalog().App.ToastNoChapters)
 	}
 	return s, func() tea.Msg {
 		ctx, cancel := context.WithTimeout(s.appCtx, 3*time.Second)
@@ -628,7 +629,7 @@ func (s *State) ToggleLyrics() (*State, tea.Cmd) {
 		durStr = v.Duration
 	}
 	if title == "" {
-		return s, s.toastCmd("Selecciona o reproduce un tema primero")
+		return s, s.toastCmd(s.Catalog().App.ToastSelectTrackFirst)
 	}
 	s.ShowQueue = false
 	s.ShowLyrics = true
@@ -728,7 +729,7 @@ func (s *State) ResetLyricsOffset() (*State, tea.Cmd) {
 	if s.Deps.LyricsClient != nil && s.LyricsVideoID != "" {
 		_ = s.Deps.LyricsClient.SetOffset(s.LyricsVideoID, 0)
 	}
-	return s, s.toastCmd("⏱ Sync letra: 0.0s")
+	return s, s.toastCmd(s.Catalog().App.ToastLyricsSyncReset)
 }
 
 // CycleLyricsSource toggles preferred lyrics source between YouTube captions and LRCLib and refetches.

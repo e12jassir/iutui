@@ -62,11 +62,14 @@ type SettingsDisplayLine struct {
 
 // SettingsRows returns the ordered interactive configuration rows reflecting current state.
 func (s *State) SettingsRows() []SettingRow {
+	cat := s.Catalog()
+	as := cat.App
+
 	onOff := func(b bool) string {
 		if b {
-			return "ACTIVADO"
+			return as.On
 		}
-		return "DESACTIVADO"
+		return as.Off
 	}
 
 	themeVal := s.ThemeName
@@ -74,30 +77,30 @@ func (s *State) SettingsRows() []SettingRow {
 	case "", "youtube-dark":
 		themeVal = "youtube-dark"
 	case "terminal":
-		themeVal = "terminal (Nativo)"
+		themeVal = as.ValThemeTerminal
 	}
 
 	previewVal := s.PreviewMode
 	switch previewVal {
 	case "kitty":
-		previewVal = "kitty (HD píxeles)"
+		previewVal = as.ValPreviewKitty
 	case "chafa":
-		previewVal = "chafa (Bloques ANSI nativos)"
+		previewVal = as.ValPreviewChafa
 	case "none":
-		previewVal = "none (Solo texto)"
+		previewVal = as.ValPreviewNone
 	default:
-		previewVal = "auto (Kitty HD / Bloques ANSI)"
+		previewVal = as.ValPreviewAuto
 	}
 
-	thumbQualVal := "max (Máxima HD)"
+	thumbQualVal := as.ValThumbMax
 	switch normalizeThumbQuality(s.ThumbQuality) {
 	case "hq":
-		thumbQualVal = "hq (Alta 480p)"
+		thumbQualVal = as.ValThumbHQ
 	case "mq":
-		thumbQualVal = "mq (Ligera)"
+		thumbQualVal = as.ValThumbMQ
 	}
 
-	qualVal := "MAX (4K/Best)"
+	qualVal := as.ValQualMax
 	switch s.Quality {
 	case 1080:
 		qualVal = "1080p Full HD"
@@ -106,20 +109,20 @@ func (s *State) SettingsRows() []SettingRow {
 	case 480:
 		qualVal = "480p SD"
 	case 360:
-		qualVal = "360p Ahorro"
+		qualVal = as.ValQual360
 	default:
 		if s.Quality > 0 {
 			qualVal = fmt.Sprintf("%dp", s.Quality)
 		}
 	}
 
-	modeVal := "Ventana (video)"
+	modeVal := as.ValModeWindow
 	if s.AudioOnly || s.DefaultMode == "audio" {
-		modeVal = "Solo Audio (sin ventana)"
+		modeVal = as.ValModeAudio
 	} else if s.DefaultMode == "pip" {
-		modeVal = "PiP (flotante)"
+		modeVal = as.ValModePiP
 	} else if s.DefaultMode == "fs" {
-		modeVal = "Pantalla completa"
+		modeVal = as.ValModeFS
 	}
 
 	speed := s.PlayerStatus.Speed
@@ -138,12 +141,11 @@ func (s *State) SettingsRows() []SettingRow {
 		searchSize = 40
 	}
 
-	cookiesVal := "auto (Zen / Firefox)"
+	cookiesVal := as.ValCookiesAuto
 	if s.CookiesMode == "off" {
-		cookiesVal = "off (Solo invitado RSS)"
+		cookiesVal = as.ValCookiesOff
 	}
 
-	cat := s.Catalog()
 	langVal := cat.Common.LangAuto + " (" + s.Lang + ")"
 	switch s.LangPref {
 	case i18n.LangES:
@@ -155,156 +157,156 @@ func (s *State) SettingsRows() []SettingRow {
 	return []SettingRow{
 		{
 			Index:    SettingIdxTheme,
-			Section:  "APARIENCIA & TERMINAL",
-			Label:    "Tema interfaz",
+			Section:  as.SecAppearance,
+			Label:    as.LblTheme,
 			Value:    themeVal,
-			Desc:     "Paleta visual de colores y bordes en toda la TUI",
+			Desc:     as.DescTheme,
 			Shortcut: "t",
 		},
 		{
 			Index:   SettingIdxLang,
-			Section: "APARIENCIA & TERMINAL",
+			Section: as.SecAppearance,
 			Label:   cat.Common.LangLabel,
 			Value:   langVal,
 			Desc:    cat.Common.LangDesc,
 		},
 		{
 			Index:   SettingIdxPreview,
-			Section: "APARIENCIA & TERMINAL",
-			Label:   "Miniaturas",
+			Section: as.SecAppearance,
+			Label:   as.LblPreview,
 			Value:   previewVal,
-			Desc:    "Backend gráfico para portadas (Kitty/Ghostty, Chafa o solo texto)",
+			Desc:    as.DescPreview,
 		},
 		{
 			Index:   SettingIdxThumbQuality,
-			Section: "APARIENCIA & TERMINAL",
-			Label:   "Calidad miniaturas",
+			Section: as.SecAppearance,
+			Label:   as.LblThumbQuality,
 			Value:   thumbQualVal,
-			Desc:    "Resolución descargada para carátulas (max, hq, mq)",
+			Desc:    as.DescThumbQuality,
 		},
 		{
 			Index:    SettingIdxQuality,
-			Section:  "REPRODUCCIÓN & CONSUMO",
-			Label:    "Resolución máxima",
+			Section:  as.SecPlayback,
+			Label:    as.LblQuality,
 			Value:    qualVal,
-			Desc:     "Tope de resolución al reproducir y precargar streams en mpv",
+			Desc:     as.DescQuality,
 			Shortcut: "f/c",
 		},
 		{
 			Index:    SettingIdxDefaultMode,
-			Section:  "REPRODUCCIÓN & CONSUMO",
-			Label:    "Modo reproducción",
+			Section:  as.SecPlayback,
+			Label:    as.LblDefaultMode,
 			Value:    modeVal,
-			Desc:     "Ventana normal, solo audio sin video, PiP flotante o pantalla completa",
+			Desc:     as.DescDefaultMode,
 			Shortcut: "x",
 		},
 		{
 			Index:    SettingIdxVolume,
-			Section:  "REPRODUCCIÓN & CONSUMO",
-			Label:    "Volumen mpv",
+			Section:  as.SecPlayback,
+			Label:    as.LblVolume,
 			Value:    fmt.Sprintf("%d%%", s.AudioVolume),
-			Desc:     "Volumen inicial y en vivo de mpv (5% a 100%)",
+			Desc:     as.DescVolume,
 			Shortcut: "-/+",
 		},
 		{
 			Index:    SettingIdxSpeed,
-			Section:  "REPRODUCCIÓN & CONSUMO",
-			Label:    "Velocidad mpv",
+			Section:  as.SecPlayback,
+			Label:    as.LblSpeed,
 			Value:    speedVal,
-			Desc:     "Velocidad de reproducción aplicada al instante (0.5x a 2x)",
+			Desc:     as.DescSpeed,
 			Shortcut: "{/}/0",
 		},
 		{
 			Index:    SettingIdxAutoplay,
-			Section:  "REPRODUCCIÓN & CONSUMO",
-			Label:    "Autoplay [A]:",
+			Section:  as.SecPlayback,
+			Label:    as.LblAutoplay,
 			Value:    onOff(s.Autoplay),
-			Desc:     "Avanza automáticamente al siguiente video al terminar",
+			Desc:     as.DescAutoplay,
 			Shortcut: "A",
 			IsBool:   true,
 			Enabled:  s.Autoplay,
 		},
 		{
 			Index:    SettingIdxSponsorBlock,
-			Section:  "REPRODUCCIÓN & CONSUMO",
-			Label:    "SponsorBlock",
+			Section:  as.SecPlayback,
+			Label:    as.LblSponsorBlock,
 			Value:    onOff(s.SponsorBlock),
-			Desc:     "Omite patrocinadores e intros automáticamente en mpv",
+			Desc:     as.DescSponsorBlock,
 			Shortcut: "b",
 			IsBool:   true,
 			Enabled:  s.SponsorBlock,
 		},
 		{
 			Index:   SettingIdxHideShorts,
-			Section: "CATÁLOGO & FILTROS",
-			Label:   "Ocultar Shorts",
+			Section: as.SecCatalog,
+			Label:   as.LblHideShorts,
 			Value:   onOff(s.HideShorts),
-			Desc:    "Filtra videos verticales cortos (<= 60s o #shorts) de los feeds",
+			Desc:    as.DescHideShorts,
 			IsBool:  true,
 			Enabled: s.HideShorts,
 		},
 		{
 			Index:   SettingIdxInterleave,
-			Section: "CATÁLOGO & FILTROS",
-			Label:   "Mezclar canales",
+			Section: as.SecCatalog,
+			Label:   as.LblInterleave,
 			Value:   onOff(s.Interleave),
-			Desc:    "Intercala canales en Inicio, Música y Suscripciones para variar",
+			Desc:    as.DescInterleave,
 			IsBool:  true,
 			Enabled: s.Interleave,
 		},
 		{
 			Index:   SettingIdxFeedSize,
-			Section: "CATÁLOGO & FILTROS",
-			Label:   "Tamaño del feed",
-			Value:   fmt.Sprintf("%d videos", feedSize),
-			Desc:    "Cantidad máxima de videos cargados por pestaña de catálogo",
+			Section: as.SecCatalog,
+			Label:   as.LblFeedSize,
+			Value:   i18n.Format(as.ValFeedSize, map[string]string{"n": strconv.Itoa(feedSize)}),
+			Desc:    as.DescFeedSize,
 		},
 		{
 			Index:   SettingIdxSearchSize,
-			Section: "CATÁLOGO & FILTROS",
-			Label:   "Resultados búsqueda",
-			Value:   fmt.Sprintf("%d resultados", searchSize),
-			Desc:    "Número máximo de resultados por búsqueda ejecutada",
+			Section: as.SecCatalog,
+			Label:   as.LblSearchSize,
+			Value:   i18n.Format(as.ValSearchSize, map[string]string{"n": strconv.Itoa(searchSize)}),
+			Desc:    as.DescSearchSize,
 		},
 		{
 			Index:   SettingIdxCacheTTL,
-			Section: "CATÁLOGO & FILTROS",
-			Label:   "Caché del catálogo",
-			Value:   formatCacheTTLValue(s.CacheTTL),
-			Desc:    "Tiempo de vida de caché local en disco para feeds y búsquedas",
+			Section: as.SecCatalog,
+			Label:   as.LblCacheTTL,
+			Value:   formatCacheTTLValue(s.CacheTTL, as),
+			Desc:    as.DescCacheTTL,
 		},
 		{
 			Index:    SettingIdxDownloadAudio,
-			Section:  "DESCARGAS & PRIVACIDAD",
-			Label:    "Descarga solo audio",
+			Section:  as.SecDownloads,
+			Label:    as.LblDownloadAudio,
 			Value:    onOff(s.DownloadAudio),
-			Desc:     "Al pulsar 'd', descarga únicamente pista de audio (MP3/M4A)",
+			Desc:     as.DescDownloadAudio,
 			Shortcut: "d",
 			IsBool:   true,
 			Enabled:  s.DownloadAudio,
 		},
 		{
 			Index:   SettingIdxCookies,
-			Section: "DESCARGAS & PRIVACIDAD",
-			Label:   "Cookies navegador",
+			Section: as.SecDownloads,
+			Label:   as.LblCookies,
 			Value:   cookiesVal,
-			Desc:    "Usa cookies de Zen/Firefox para feed personalizado o modo invitado",
+			Desc:    as.DescCookies,
 		},
 	}
 }
 
-func formatCacheTTLValue(ttl int) string {
+func formatCacheTTLValue(ttl int, as i18n.AppStrings) string {
 	switch ttl {
 	case 0:
-		return "Desactivada (0s)"
+		return as.ValCacheDisabled
 	case 300:
-		return "5 min (300s)"
+		return as.ValCache5m
 	case 900:
-		return "15 min (900s)"
+		return as.ValCache15m
 	case 1800:
-		return "30 min (1800s)"
+		return as.ValCache30m
 	case 3600:
-		return "1 hora (3600s)"
+		return as.ValCache1h
 	default:
 		return fmt.Sprintf("%ds", ttl)
 	}
@@ -415,7 +417,7 @@ func (s *State) AdjustSetting(idx, delta int) (*State, tea.Cmd) {
 		n := len(palettes)
 		next := palettes[((cur+delta)%n+n)%n]
 		s.ThemeName = next
-		return s, tea.Batch(s.toastCmd("🎨 Tema: "+next), s.saveThemeCmd(next))
+		return s, tea.Batch(s.toastCmd(i18n.Format(s.Catalog().App.ToastTheme, map[string]string{"theme": next})), s.saveThemeCmd(next))
 
 	case SettingIdxLang:
 		langs := []string{"auto", i18n.LangES, i18n.LangEN}
@@ -444,7 +446,7 @@ func (s *State) AdjustSetting(idx, delta int) (*State, tea.Cmd) {
 		n := len(modes)
 		next := modes[((cur+delta)%n+n)%n]
 		s.PreviewMode = next
-		return s, tea.Batch(s.toastCmd("🖼 Miniaturas: "+next), s.saveConfigCmd("YT_PREVIEW", next))
+		return s, tea.Batch(s.toastCmd(i18n.Format(s.Catalog().App.ToastPreview, map[string]string{"mode": next})), s.saveConfigCmd("YT_PREVIEW", next))
 
 	case SettingIdxThumbQuality:
 		qualities := []string{"max", "hq", "mq"}
@@ -459,7 +461,7 @@ func (s *State) AdjustSetting(idx, delta int) (*State, tea.Cmd) {
 		n := len(qualities)
 		next := qualities[((cur+delta)%n+n)%n]
 		s.ThumbQuality = next
-		return s, tea.Batch(s.toastCmd("🖼 Calidad miniaturas: "+next), s.saveConfigCmd("YT_THUMB_QUALITY", next))
+		return s, tea.Batch(s.toastCmd(i18n.Format(s.Catalog().App.ToastThumbQuality, map[string]string{"quality": next})), s.saveConfigCmd("YT_THUMB_QUALITY", next))
 
 	case SettingIdxQuality:
 		cur := 0
@@ -471,7 +473,7 @@ func (s *State) AdjustSetting(idx, delta int) (*State, tea.Cmd) {
 		}
 		n := len(qualityPresets)
 		nextQ := qualityPresets[((cur+delta)%n+n)%n]
-		lbl := "Máxima (best)"
+		lbl := s.Catalog().App.ValQualBestToast
 		if nextQ > 0 {
 			lbl = fmt.Sprintf("%dp", nextQ)
 		}
@@ -497,16 +499,17 @@ func (s *State) AdjustSetting(idx, delta int) (*State, tea.Cmd) {
 		if lms, ok := s.Deps.Engine.(launchModeSetter); ok && s.Deps.Engine != nil {
 			s.AudioOnly = audioOnly
 			var cmds []tea.Cmd
-			modeLabel := "Ventana (video)"
+			as := s.Catalog().App
+			modeLabel := as.ValModeWindow
 			switch nextMode {
 			case "audio":
-				modeLabel = "Solo Audio (sin ventana)"
+				modeLabel = as.ValModeAudio
 			case "pip":
-				modeLabel = "PiP (flotante)"
+				modeLabel = as.ValModePiP
 			case "fs":
-				modeLabel = "Pantalla completa"
+				modeLabel = as.ValModeFS
 			}
-			cmds = append(cmds, s.toastCmd("🎬 Modo: "+modeLabel))
+			cmds = append(cmds, s.toastCmd(i18n.Format(as.ToastMode, map[string]string{"mode": modeLabel})))
 			selVid, hasSel := s.SelectedVideo()
 			prefetcher, hasPrefetch := s.Deps.Engine.(streamPrefetcher)
 			m := nextMode
@@ -566,7 +569,7 @@ func (s *State) AdjustSetting(idx, delta int) (*State, tea.Cmd) {
 				}, ""))
 			}
 		}
-		cmds = append(cmds, s.toastCmd(fmt.Sprintf("🔊 Volumen: %d%%", nextVol)))
+		cmds = append(cmds, s.toastCmd(i18n.Format(s.Catalog().App.ToastVolume, map[string]string{"vol": fmt.Sprintf("%d%%", nextVol)})))
 		return s, tea.Batch(cmds...)
 
 	case SettingIdxSpeed:
@@ -597,14 +600,14 @@ func (s *State) AdjustSetting(idx, delta int) (*State, tea.Cmd) {
 		if s.View == ViewHome {
 			s.SetSelection(s.SelectedIdx)
 		}
-		return s, tea.Batch(s.boolToast("Ocultar Shorts", s.HideShorts), s.saveBoolConfigCmd("YT_HIDE_SHORTS", s.HideShorts))
+		return s, tea.Batch(s.boolToast(s.Catalog().App.LblHideShorts, s.HideShorts), s.saveBoolConfigCmd("YT_HIDE_SHORTS", s.HideShorts))
 
 	case SettingIdxInterleave:
 		s.Interleave = !s.Interleave
 		if s.View == ViewHome {
 			s.SetSelection(s.SelectedIdx)
 		}
-		return s, tea.Batch(s.boolToast("Mezclar canales", s.Interleave), s.saveBoolConfigCmd("YT_INTERLEAVE", s.Interleave))
+		return s, tea.Batch(s.boolToast(s.Catalog().App.LblInterleave, s.Interleave), s.saveBoolConfigCmd("YT_INTERLEAVE", s.Interleave))
 
 	case SettingIdxFeedSize:
 		cur := closestIntPresetIdx(feedSizePresets, s.FeedSize, 3)
@@ -612,7 +615,7 @@ func (s *State) AdjustSetting(idx, delta int) (*State, tea.Cmd) {
 		next := feedSizePresets[((cur+delta)%n+n)%n]
 		s.FeedSize = next
 		return s, tea.Batch(
-			s.toastCmd(fmt.Sprintf("📺 Tamaño del feed: %d videos", next)),
+			s.toastCmd(i18n.Format(s.Catalog().App.ToastFeedSize, map[string]string{"n": strconv.Itoa(next)})),
 			s.saveConfigCmd("YT_FEED_SIZE", strconv.Itoa(next)),
 		)
 
@@ -622,7 +625,7 @@ func (s *State) AdjustSetting(idx, delta int) (*State, tea.Cmd) {
 		next := searchSizePresets[((cur+delta)%n+n)%n]
 		s.SearchSize = next
 		return s, tea.Batch(
-			s.toastCmd(fmt.Sprintf("🔍 Resultados búsqueda: %d", next)),
+			s.toastCmd(i18n.Format(s.Catalog().App.ToastSearchSize, map[string]string{"n": strconv.Itoa(next)})),
 			s.saveConfigCmd("YT_SEARCH_SIZE", strconv.Itoa(next)),
 		)
 
@@ -642,15 +645,16 @@ func (s *State) AdjustSetting(idx, delta int) (*State, tea.Cmd) {
 		n := len(cacheTTLPresets)
 		next := cacheTTLPresets[((cur+delta)%n+n)%n]
 		s.CacheTTL = next
+		as := s.Catalog().App
 		return s, tea.Batch(
-			s.toastCmd("💾 Caché del catálogo: "+formatCacheTTLValue(next)),
+			s.toastCmd(i18n.Format(as.ToastCacheTTL, map[string]string{"val": formatCacheTTLValue(next, as)})),
 			s.saveConfigCmd("YT_CACHE_TTL", strconv.Itoa(next)),
 		)
 
 	case SettingIdxDownloadAudio:
 		s.DownloadAudio = !s.DownloadAudio
 		return s, tea.Batch(
-			s.boolToast("Descarga solo audio", s.DownloadAudio),
+			s.boolToast(s.Catalog().App.LblDownloadAudio, s.DownloadAudio),
 			s.saveBoolConfigCmd("YT_DOWNLOAD_AUDIO", s.DownloadAudio),
 		)
 
@@ -660,7 +664,7 @@ func (s *State) AdjustSetting(idx, delta int) (*State, tea.Cmd) {
 		} else {
 			s.CookiesMode = "off"
 		}
-		return s, tea.Batch(s.toastCmd("🍪 Cookies: "+s.CookiesMode), s.saveConfigCmd("YT_COOKIES", s.CookiesMode))
+		return s, tea.Batch(s.toastCmd(i18n.Format(s.Catalog().App.ToastCookies, map[string]string{"mode": s.CookiesMode})), s.saveConfigCmd("YT_COOKIES", s.CookiesMode))
 	}
 	return s, nil
 }
@@ -690,11 +694,12 @@ func closestIntPresetIdx(presets []int, current, fallback int) int {
 }
 
 func (s *State) boolToast(label string, enabled bool) tea.Cmd {
-	state := "OFF"
+	as := s.Catalog().App
+	state := as.Off
 	if enabled {
-		state = "ON"
+		state = as.On
 	}
-	return s.toastCmd(fmt.Sprintf("%s: %s", label, state))
+	return s.toastCmd(i18n.Format(as.ToastBoolFmt, map[string]string{"label": label, "state": state}))
 }
 
 func (s *State) saveThemeCmd(name string) tea.Cmd {

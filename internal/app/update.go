@@ -10,6 +10,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/e12jassir/iutui/internal/catalog"
 	"github.com/e12jassir/iutui/internal/download"
+	"github.com/e12jassir/iutui/internal/i18n"
 	"github.com/e12jassir/iutui/internal/lyrics"
 	"github.com/e12jassir/iutui/internal/model"
 	"github.com/e12jassir/iutui/internal/player"
@@ -222,7 +223,7 @@ func (s *State) Update(msg tea.Msg) (*State, tea.Cmd) {
 	case FeedLoadedMsg:
 		s.Syncing = false
 		if msg.Err != nil {
-			return s, s.toastCmd(fmt.Sprintf("Error cargando %s: %v", msg.Tab.String(), msg.Err))
+			return s, s.toastCmd(i18n.Format(s.Catalog().App.ErrLoadTab, map[string]string{"tab": msg.Tab.String(), "err": msg.Err.Error()}))
 		}
 		s.Feeds[msg.Tab] = msg.Videos
 		labelCmd := s.hydrateSubscriptionLabelsCmd(msg.Videos)
@@ -242,7 +243,7 @@ func (s *State) Update(msg tea.Msg) (*State, tea.Cmd) {
 			if errors.Is(msg.Err, context.Canceled) {
 				return s, nil
 			}
-			return s, s.toastCmd(fmt.Sprintf("Error buscando: %v", msg.Err))
+			return s, s.toastCmd(i18n.Format(s.Catalog().App.ErrSearch, map[string]string{"err": msg.Err.Error()}))
 		}
 		s.SearchResults = msg.Videos
 		s.ResultIdx = 0
@@ -305,35 +306,35 @@ func (s *State) Update(msg tea.Msg) (*State, tea.Cmd) {
 
 	case ToggledSaveMsg:
 		if msg.Err != nil {
-			return s, s.toastCmd(fmt.Sprintf("Error al guardar: %v", msg.Err))
+			return s, s.toastCmd(i18n.Format(s.Catalog().App.ErrSave, map[string]string{"err": msg.Err.Error()}))
 		}
 		if msg.Saved {
 			s.SavedIDs[msg.Video.ID] = true
 			s.Feeds[model.TabWatchLater] = prependUniqueVideo(s.Feeds[model.TabWatchLater], msg.Video)
 			s.SetSelection(s.SelectedIdx)
-			return s, s.toastCmd("★ Guardado: " + msg.Video.Title)
+			return s, s.toastCmd(i18n.Format(s.Catalog().App.ToastSaved, map[string]string{"title": msg.Video.Title}))
 		}
 		delete(s.SavedIDs, msg.Video.ID)
 		s.Feeds[model.TabWatchLater] = removeVideoByID(s.Feeds[model.TabWatchLater], msg.Video.ID)
 		s.SetSelection(s.SelectedIdx)
-		return s, s.toastCmd("Quitado de guardados")
+		return s, s.toastCmd(s.Catalog().App.ToastUnsaved)
 
 	case ToggledLikeMsg:
 		if msg.Err != nil {
-			return s, s.toastCmd(fmt.Sprintf("Error en Me gusta: %v", msg.Err))
+			return s, s.toastCmd(i18n.Format(s.Catalog().App.ErrLike, map[string]string{"err": msg.Err.Error()}))
 		}
 		if msg.Liked {
 			s.LikedIDs[msg.Video.ID] = true
 			s.Feeds[model.TabLiked] = prependUniqueVideo(s.Feeds[model.TabLiked], msg.Video)
 			s.syncRadioTaste()
 			s.SetSelection(s.SelectedIdx)
-			return s, s.toastCmd("♥ Me gusta: " + msg.Video.Title)
+			return s, s.toastCmd(i18n.Format(s.Catalog().App.ToastLiked, map[string]string{"title": msg.Video.Title}))
 		}
 		delete(s.LikedIDs, msg.Video.ID)
 		s.Feeds[model.TabLiked] = removeVideoByID(s.Feeds[model.TabLiked], msg.Video.ID)
 		s.syncRadioTaste()
 		s.SetSelection(s.SelectedIdx)
-		return s, s.toastCmd("Quitado de Me gusta")
+		return s, s.toastCmd(s.Catalog().App.ToastUnliked)
 
 	case ThumbReadyMsg:
 		return s, nil
@@ -351,17 +352,17 @@ func (s *State) Update(msg tea.Msg) (*State, tea.Cmd) {
 		if s.View == ViewHome && (s.ActiveTab == model.TabHome || s.ActiveTab == model.TabMusic || s.ActiveTab == model.TabSubscriptions) {
 			s.Syncing = true
 			return s, tea.Batch(
-				s.toastCmd("🍪 Sesión detectada · cargando tu feed..."),
+				s.toastCmd(s.Catalog().App.ToastSessionFeed),
 				s.loadFeedCmd(s.ActiveTab, true),
 				s.ensureAnimTick(),
 			)
 		}
-		return s, s.toastCmd("🍪 Sesión de navegador detectada")
+		return s, s.toastCmd(s.Catalog().App.ToastSessionFound)
 
 	case ActionResultMsg:
 		if msg.Err != nil {
 			s.PlayLoading = false
-			return s, s.toastCmd(fmt.Sprintf("Error: %v", msg.Err))
+			return s, s.toastCmd(i18n.Format(s.Catalog().App.ErrGeneric, map[string]string{"err": msg.Err.Error()}))
 		}
 		if msg.Info != "" {
 			return s, s.toastCmd(msg.Info)
@@ -371,10 +372,10 @@ func (s *State) Update(msg tea.Msg) (*State, tea.Cmd) {
 	case LiveLoadedMsg:
 		delete(s.LiveLoading, msg.Tab)
 		if msg.Err != nil {
-			return s, s.toastCmd(fmt.Sprintf("Error buscando directos: %v", msg.Err))
+			return s, s.toastCmd(i18n.Format(s.Catalog().App.ErrLiveSearch, map[string]string{"err": msg.Err.Error()}))
 		}
 		if len(msg.Videos) == 0 {
-			return s, s.toastCmd("Sin directos en vivo ahora mismo")
+			return s, s.toastCmd(s.Catalog().App.ToastNoLiveNow)
 		}
 		existing := s.Feeds[msg.Tab]
 		seen := make(map[string]bool, len(existing))
@@ -405,7 +406,7 @@ func (s *State) Update(msg tea.Msg) (*State, tea.Cmd) {
 		s.playInFlight = false
 		if msg.Err != nil {
 			s.PlayLoading = false
-			return s, s.toastCmd(fmt.Sprintf("Error: %v", msg.Err))
+			return s, s.toastCmd(i18n.Format(s.Catalog().App.ErrGeneric, map[string]string{"err": msg.Err.Error()}))
 		}
 		if s.PlayerStatus.IsRunning {
 			s.PlayLoading = false
@@ -424,14 +425,14 @@ func (s *State) Update(msg tea.Msg) (*State, tea.Cmd) {
 	case DownloadDoneMsg:
 		delete(s.DownloadProgress, msg.Video.ID)
 		if msg.Err != nil {
-			return s, s.toastCmd(fmt.Sprintf("Error descargando: %v", msg.Err))
+			return s, s.toastCmd(i18n.Format(s.Catalog().App.ErrDownload, map[string]string{"err": msg.Err.Error()}))
 		}
 		delete(s.Feeds, model.TabDownloads)
 		var reload tea.Cmd
 		if s.ActiveTab == model.TabDownloads {
 			reload = s.loadFeedCmd(model.TabDownloads, true)
 		}
-		return s, tea.Batch(s.toastCmd("✓ Descargado: "+msg.Video.Title), reload)
+		return s, tea.Batch(s.toastCmd(i18n.Format(s.Catalog().App.ToastDownloaded, map[string]string{"title": msg.Video.Title})), reload)
 
 	case DownloadProgressMsg:
 		if s.DownloadProgress == nil {
@@ -444,7 +445,7 @@ func (s *State) Update(msg tea.Msg) (*State, tea.Cmd) {
 
 	case VideoModeToggledMsg:
 		if msg.Err != nil {
-			return s, s.toastCmd(fmt.Sprintf("Error alternando video: %v", msg.Err))
+			return s, s.toastCmd(i18n.Format(s.Catalog().App.ErrToggleVideo, map[string]string{"err": msg.Err.Error()}))
 		}
 		s.AudioOnly = !msg.VideoOn
 		if s.AudioOnly {
@@ -464,9 +465,9 @@ func (s *State) Update(msg tea.Msg) (*State, tea.Cmd) {
 			}
 		}
 		if msg.VideoOn {
-			return s, tea.Batch(s.toastCmd("🎬 Video activado"), saveCmd)
+			return s, tea.Batch(s.toastCmd(s.Catalog().App.ToastVideoEnabled), saveCmd)
 		}
-		return s, tea.Batch(s.toastCmd("🎧 Solo audio (sin ventana)"), saveCmd)
+		return s, tea.Batch(s.toastCmd(s.Catalog().App.ToastAudioOnly), saveCmd)
 
 	case ChannelLoadedMsg:
 		if msg.Seq != 0 && msg.Seq != s.channelSeq {
@@ -477,7 +478,7 @@ func (s *State) Update(msg tea.Msg) (*State, tea.Cmd) {
 			if errors.Is(msg.Err, context.Canceled) {
 				return s, nil
 			}
-			return s, s.toastCmd(fmt.Sprintf("Error cargando canal: %v", msg.Err))
+			return s, s.toastCmd(i18n.Format(s.Catalog().App.ErrLoadChannel, map[string]string{"err": msg.Err.Error()}))
 		}
 		s.ChannelVideos = msg.Videos
 		s.ChannelIdx = 0
@@ -488,7 +489,7 @@ func (s *State) Update(msg tea.Msg) (*State, tea.Cmd) {
 
 	case SubscriptionToggledMsg:
 		if msg.Err != nil {
-			return s, s.toastCmd(fmt.Sprintf("Error de suscripción: %v", msg.Err))
+			return s, s.toastCmd(i18n.Format(s.Catalog().App.ErrSubscribe, map[string]string{"err": msg.Err.Error()}))
 		}
 		if msg.Subs != nil {
 			s.Subscriptions = msg.Subs
@@ -516,16 +517,16 @@ func (s *State) Update(msg tea.Msg) (*State, tea.Cmd) {
 			reload = tea.Batch(s.loadFeedCmd(model.TabSubscriptions, true), s.ensureAnimTick())
 		}
 		if msg.Subscribed {
-			return s, tea.Batch(s.toastCmd("★ Suscrito: "+msg.Channel), reload)
+			return s, tea.Batch(s.toastCmd(i18n.Format(s.Catalog().App.ToastSubscribed, map[string]string{"channel": msg.Channel})), reload)
 		}
-		return s, tea.Batch(s.toastCmd("Suscripción quitada: "+msg.Channel), reload)
+		return s, tea.Batch(s.toastCmd(i18n.Format(s.Catalog().App.ToastUnsubscribed, map[string]string{"channel": msg.Channel})), reload)
 
 	case ChaptersLoadedMsg:
 		if msg.Err != nil {
-			return s, s.toastCmd(fmt.Sprintf("Error leyendo capítulos: %v", msg.Err))
+			return s, s.toastCmd(i18n.Format(s.Catalog().App.ErrReadChapters, map[string]string{"err": msg.Err.Error()}))
 		}
 		if len(msg.Chapters) == 0 {
-			return s, s.toastCmd("Sin capítulos disponibles")
+			return s, s.toastCmd(s.Catalog().App.ToastNoChapters)
 		}
 		s.Chapters = msg.Chapters
 		s.ChapterIdx = activeChapterIndex(msg.Chapters, s.PlayerStatus.TimePos)
@@ -632,13 +633,13 @@ func (s *State) Update(msg tea.Msg) (*State, tea.Cmd) {
 
 	case LoopToggledMsg:
 		if msg.Err != nil {
-			return s, s.toastCmd(fmt.Sprintf("Error en repetir: %v", msg.Err))
+			return s, s.toastCmd(i18n.Format(s.Catalog().App.ErrRepeat, map[string]string{"err": msg.Err.Error()}))
 		}
 		s.PlayerStatus.LoopFile = msg.Enabled
 		if msg.Enabled {
-			return s, s.toastCmd("🔁 Repetir: ACTIVADO")
+			return s, s.toastCmd(s.Catalog().App.ToastRepeatOn)
 		}
-		return s, s.toastCmd("🔁 Repetir: DESACTIVADO")
+		return s, s.toastCmd(s.Catalog().App.ToastRepeatOff)
 
 	case PlayerStatusMsg:
 		wasPlaying := s.PlayerStatus.IsRunning && !s.PlayerStatus.Paused

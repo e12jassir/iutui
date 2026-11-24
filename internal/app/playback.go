@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/e12jassir/iutui/internal/i18n"
 	"github.com/e12jassir/iutui/internal/model"
 	"github.com/e12jassir/iutui/internal/player"
 )
@@ -139,7 +140,7 @@ func (s *State) resumeStillWatching() (*State, tea.Cmd) {
 	if s.Deps.Engine != nil {
 		resumeCmd = s.engineCmd(func(ctx context.Context) error { return s.Deps.Engine.TogglePause(ctx) }, "")
 	}
-	return s, tea.Batch(resumeCmd, s.toastCmd("▶ Continuando reproducción"))
+	return s, tea.Batch(resumeCmd, s.toastCmd(s.Catalog().App.ToastResumePlayback))
 }
 
 func (s *State) handleStillWatchingKey(key string) (*State, tea.Cmd) {
@@ -152,7 +153,7 @@ func (s *State) handleStillWatchingKey(key string) (*State, tea.Cmd) {
 	case "esc", "q", "n":
 		s.ShowStillWatching = false
 		s.RegisterUserActivity()
-		return s, s.toastCmd("⏸ Reproducción en pausa")
+		return s, s.toastCmd(s.Catalog().App.ToastPausePlayback)
 	}
 	return s, nil
 }
@@ -519,7 +520,7 @@ func (s *State) EnqueueSelected() (*State, tea.Cmd) {
 		p.Prefetch(v)
 	}
 	s.Queue = append(s.Queue, v)
-	toastCmd := s.toastCmd(fmt.Sprintf("En cola (%d): %s", len(s.Queue), v.Title))
+	toastCmd := s.toastCmd(i18n.Format(s.Catalog().App.ToastQueued, map[string]string{"count": strconv.Itoa(len(s.Queue)), "title": v.Title}))
 	enqCmd := func() tea.Msg {
 		if err := s.Deps.Engine.Enqueue(s.appCtx, v); err != nil {
 			return ActionResultMsg{Err: err}
@@ -688,7 +689,7 @@ func (s *State) RemoveQueueSelected() (*State, tea.Cmd) {
 	}
 	if pc, ok := s.Deps.Engine.(playlistController); ok && s.PlayerStatus.IsRunning {
 		idx := removed.Index
-		toast := s.toastCmd("✕ Quitado de la cola")
+		toast := s.toastCmd(s.Catalog().App.ToastRemovedFromQueue)
 		rmCmd := func() tea.Msg {
 			if err := pc.RemovePlaylistIndex(s.appCtx, idx); err != nil {
 				return ActionResultMsg{Err: err}
@@ -698,7 +699,7 @@ func (s *State) RemoveQueueSelected() (*State, tea.Cmd) {
 		}
 		return s, tea.Batch(toast, rmCmd)
 	}
-	return s, s.toastCmd("✕ Quitado de la cola")
+	return s, s.toastCmd(s.Catalog().App.ToastRemovedFromQueue)
 }
 
 // ClearQueue clears queued tracks in state and in the active mpv playlist.
@@ -712,7 +713,7 @@ func (s *State) ClearQueue() (*State, tea.Cmd) {
 			return pc.ClearPlaylist(ctx)
 		}, "🗑 Cola vaciada")
 	}
-	return s, s.toastCmd("🗑 Cola vaciada")
+	return s, s.toastCmd(s.Catalog().App.ToastQueueCleared)
 }
 
 // AdjustSpeed steps playback speed within [0.5x, 2.0x].
@@ -746,7 +747,7 @@ func (s *State) ToggleLoop() (*State, tea.Cmd) {
 	}
 	lt, ok := s.Deps.Engine.(loopToggler)
 	if !ok {
-		return s, s.toastCmd("Repetir no soportado")
+		return s, s.toastCmd(s.Catalog().App.ToastRepeatUnsupported)
 	}
 	next := !s.PlayerStatus.LoopFile
 	s.PlayerStatus.LoopFile = next
@@ -905,7 +906,7 @@ func (s *State) CycleQuality() (*State, tea.Cmd) {
 func (s *State) ToggleVideoMode() (*State, tea.Cmd) {
 	vt, ok := s.Deps.Engine.(videoModeToggler)
 	if !ok {
-		return s, s.toastCmd("Cambio de video en caliente no disponible")
+		return s, s.toastCmd(s.Catalog().App.ToastHotSwapUnavailable)
 	}
 	return s, func() tea.Msg {
 		videoOn, err := vt.ToggleVideoMode(s.appCtx)

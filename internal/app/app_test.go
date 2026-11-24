@@ -677,7 +677,7 @@ func TestStaleAndCanceledSearchIgnoredBySeq(t *testing.T) {
 		Seq:   s.searchSeq,
 		Err:   errors.New("network failure"),
 	})
-	if s.Toast == "" || !strings.Contains(s.Toast, "Error buscando") {
+	if s.Toast == "" || !strings.Contains(s.Toast, "network failure") {
 		t.Fatalf("expected error toast for non-cancel error, got %q", s.Toast)
 	}
 }
@@ -1177,8 +1177,8 @@ func TestStillWatchingTriggersAfterAutoplayLimitAndResumes(t *testing.T) {
 	if s.AutoplayTracksSinceInput != 0 {
 		t.Fatalf("expected AutoplayTracksSinceInput=0 after resume, got %d", s.AutoplayTracksSinceInput)
 	}
-	if s.Toast != "▶ Continuando reproducción" {
-		t.Fatalf("Toast = %q, want %q", s.Toast, "▶ Continuando reproducción")
+	if s.Toast != s.Catalog().App.ToastResumePlayback {
+		t.Fatalf("Toast = %q, want %q", s.Toast, s.Catalog().App.ToastResumePlayback)
 	}
 	_ = collectNonTickMsgs(cmd, 150*time.Millisecond)
 	resumed := false
@@ -1202,7 +1202,7 @@ func TestStillWatchingTriggersAfterAutoplayLimitAndResumes(t *testing.T) {
 		t.Fatal("expected ShowStillWatching=true after >=60m idle autoplay transition")
 	}
 	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyEsc})
-	if s.ShowStillWatching || s.Toast != "⏸ Reproducción en pausa" || s.AutoplayTracksSinceInput != 0 {
+	if s.ShowStillWatching || s.Toast != s.Catalog().App.ToastPausePlayback || s.AutoplayTracksSinceInput != 0 {
 		t.Fatalf("unexpected state after Esc on StillWatching: show=%v toast=%q count=%d",
 			s.ShowStillWatching, s.Toast, s.AutoplayTracksSinceInput)
 	}
@@ -1228,7 +1228,7 @@ func TestStillWatchingTriggersAfterAutoplayLimitAndResumes(t *testing.T) {
 		t.Fatal("expected ShowStillWatching=true before mouse dismiss")
 	}
 	s, cmd = s.Update(tea.MouseMsg{X: 10, Y: 10, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
-	if s.ShowStillWatching || s.Toast != "▶ Continuando reproducción" || s.AutoplayTracksSinceInput != 0 {
+	if s.ShowStillWatching || s.Toast != s.Catalog().App.ToastResumePlayback || s.AutoplayTracksSinceInput != 0 {
 		t.Fatalf("unexpected state after mouse dismiss: show=%v toast=%q count=%d",
 			s.ShowStillWatching, s.Toast, s.AutoplayTracksSinceInput)
 	}
@@ -1336,15 +1336,15 @@ func TestV040ShortcutsVideoSponsorThemeChannelSubsChaptersLyrics(t *testing.T) {
 	for _, msg := range collectNonTickMsgs(cmd, 150*time.Millisecond) {
 		s, _ = s.Update(msg)
 	}
-	if !strings.Contains(s.Toast, "Solo audio") {
-		t.Fatalf("expected Solo audio toast after V, got %q", s.Toast)
+	if s.Toast != s.Catalog().App.ToastAudioOnly {
+		t.Fatalf("expected %q toast after V, got %q", s.Catalog().App.ToastAudioOnly, s.Toast)
 	}
 	s, cmd = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'V'}})
 	for _, msg := range collectNonTickMsgs(cmd, 150*time.Millisecond) {
 		s, _ = s.Update(msg)
 	}
-	if !strings.Contains(s.Toast, "Video activado") {
-		t.Fatalf("expected Video activado toast after second V, got %q", s.Toast)
+	if s.Toast != s.Catalog().App.ToastVideoEnabled {
+		t.Fatalf("expected %q toast after second V, got %q", s.Catalog().App.ToastVideoEnabled, s.Toast)
 	}
 
 	// 2. SponsorBlock toggle via 'B'
@@ -2964,7 +2964,7 @@ func TestCookiesReadyMsgReloadsFeeds(t *testing.T) {
 			if _, ok := s.Feeds[model.TabDownloads]; !ok {
 				t.Fatalf("tab=%v: expected TabDownloads cache to remain untouched", activeTab)
 			}
-			if !strings.Contains(s.Toast, "cargando tu feed") {
+			if s.Toast != s.Catalog().App.ToastSessionFeed {
 				t.Fatalf("tab=%v: unexpected toast %q", activeTab, s.Toast)
 			}
 
@@ -3086,7 +3086,7 @@ func TestCookiesReadyMsgReloadsFeeds(t *testing.T) {
 				if _, ok := s.Feeds[model.TabDownloads]; !ok {
 					t.Fatal("expected TabDownloads cache to stay intact")
 				}
-				if !strings.Contains(s.Toast, "Sesión de navegador detectada") {
+				if s.Toast != s.Catalog().App.ToastSessionFound {
 					t.Fatalf("unexpected toast: %q", s.Toast)
 				}
 				_ = collectNonTickMsgs(cmd, 150*time.Millisecond)
@@ -4061,5 +4061,29 @@ func TestApp_AdjustSettingLangLiveToggle(t *testing.T) {
 	}
 	if savedKey != "YT_LANG" || savedVal != "en" {
 		t.Fatalf("saved config = (%q, %q), want (YT_LANG, en)", savedKey, savedVal)
+	}
+}
+
+func TestSetLangPrefEnglishSettingsAndToast(t *testing.T) {
+	s := NewState(Dependencies{})
+	s.SetLangPref("en")
+
+	rows := s.SettingsRows()
+	if len(rows) == 0 {
+		t.Fatal("expected non-empty SettingsRows()")
+	}
+	if rows[SettingIdxTheme].Section != "APPEARANCE & TERMINAL" {
+		t.Fatalf("Section = %q, want %q", rows[SettingIdxTheme].Section, "APPEARANCE & TERMINAL")
+	}
+	if rows[SettingIdxTheme].Label != "Interface theme" {
+		t.Fatalf("Label = %q, want %q", rows[SettingIdxTheme].Label, "Interface theme")
+	}
+	if rows[SettingIdxHideShorts].Value != "ON" && rows[SettingIdxHideShorts].Value != "OFF" {
+		t.Fatalf("HideShorts Value = %q, want ON or OFF", rows[SettingIdxHideShorts].Value)
+	}
+
+	s, _ = s.AdjustSetting(SettingIdxHideShorts, 1)
+	if !strings.HasPrefix(s.Toast, "Hide Shorts: ") {
+		t.Fatalf("Toast = %q, want prefix %q", s.Toast, "Hide Shorts: ")
 	}
 }
