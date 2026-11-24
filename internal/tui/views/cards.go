@@ -252,7 +252,7 @@ func renderSearchRow(v model.Video, selected, saved, liked, playing bool, dlBadg
 }
 
 func formatViewsLine(v model.Video, vs i18n.ViewStrings) string {
-	views := strings.TrimSpace(v.Views)
+	views := localizeViews(strings.TrimSpace(v.Views), vs)
 	pub := formatRelativeDate(strings.TrimSpace(v.Published), vs)
 	switch {
 	case views != "" && pub != "":
@@ -264,6 +264,19 @@ func formatViewsLine(v model.Video, vs i18n.ViewStrings) string {
 	default:
 		return ""
 	}
+}
+
+func localizeViews(raw string, vs i18n.ViewStrings) string {
+	if raw == "" {
+		return ""
+	}
+	if strings.HasSuffix(raw, " vistas") {
+		return strings.TrimSuffix(raw, " vistas") + " " + vs.ViewsSuffix
+	}
+	if strings.HasSuffix(raw, " viendo") {
+		return strings.TrimSuffix(raw, " viendo") + " " + vs.WatchingSuffix
+	}
+	return raw
 }
 
 func formatRelativeDate(raw string, vs i18n.ViewStrings) string {

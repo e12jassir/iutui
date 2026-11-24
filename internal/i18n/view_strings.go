@@ -34,6 +34,21 @@ type ViewStrings struct {
 	RelMonthsAgo       string
 	RelYearsAgo        string
 	DownloadQueued     string
+	ViewsSuffix        string
+	WatchingSuffix     string
+
+	// Sidebar & mini-guide tabs
+	TabHome           string
+	TabMusic          string
+	TabSubscriptions  string
+	TabHistory        string
+	TabWatchLater     string
+	TabPlaylists      string
+	TabLiked          string
+	TabDownloads      string
+	ShortTabSubs      string
+	ShortTabDownloads string
+	ShortTabHistory   string
 
 	// Render & navigation
 	SuggestionsTitle     string
@@ -227,6 +242,19 @@ func esViewStrings() ViewStrings {
 
 		LyricsSearching:   "Buscando letra...",
 		LyricsCloseHint:   "[L] o [Esc] para cerrar",
+		ViewsSuffix:       "vistas",
+		WatchingSuffix:    "viendo",
+		TabHome:           "Inicio",
+		TabMusic:          "Música",
+		TabSubscriptions:  "Suscripciones",
+		TabHistory:        "Historial",
+		TabWatchLater:     "Ver más tarde",
+		TabPlaylists:      "Playlists",
+		TabLiked:          "Me gusta",
+		TabDownloads:      "Descargas",
+		ShortTabSubs:      "Subs",
+		ShortTabDownloads: "Desc",
+		ShortTabHistory:   "Hist",
 		LyricsUnavailable: "Sin letra disponible",
 		LyricsPanelTitle:  "♫ Letras",
 	}
@@ -340,5 +368,18 @@ func enViewStrings() ViewStrings {
 		LyricsCloseHint:   "[L] or [Esc] to close",
 		LyricsUnavailable: "No lyrics available",
 		LyricsPanelTitle:  "♫ Lyrics",
+		ViewsSuffix:       "views",
+		WatchingSuffix:    "watching",
+		TabHome:           "Home",
+		TabMusic:          "Music",
+		TabSubscriptions:  "Subscriptions",
+		TabHistory:        "History",
+		TabWatchLater:     "Watch later",
+		TabPlaylists:      "Playlists",
+		TabLiked:          "Liked",
+		TabDownloads:      "Downloads",
+		ShortTabSubs:      "Subs",
+		ShortTabDownloads: "Dls",
+		ShortTabHistory:   "Hist",
 	}
 }

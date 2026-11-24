@@ -620,10 +620,11 @@ func renderChips(s *app.State, th theme.Theme, width int, pal renderPalette) str
 
 		parts := make([]string, 0, len(chips))
 		for i, c := range chips {
+			lbl := s.ChipLabel(c.Label)
 			if i == active {
-				parts = append(parts, th.ChipActive.Render(c.Label))
+				parts = append(parts, th.ChipActive.Render(lbl))
 			} else {
-				parts = append(parts, th.Chip.Render(c.Label))
+				parts = append(parts, th.Chip.Render(lbl))
 			}
 		}
 		line = " " + strings.Join(parts, " ")
@@ -651,13 +652,13 @@ func renderSidebarFull(s *app.State, th theme.Theme, width, height int, pal rend
 	var lines []string
 	lines = append(lines, sectionStyle.Render(vs.SidebarMain))
 	for _, t := range []model.Tab{model.TabHome, model.TabMusic, model.TabSubscriptions} {
-		lines = append(lines, renderSidebarTabLine(t, t == s.ActiveTab, s.Focus == app.FocusSidebar, "", th, innerW, pal))
+		lines = append(lines, renderSidebarTabLine(t, tabLabel(t, vs), t == s.ActiveTab, s.Focus == app.FocusSidebar, "", th, innerW, pal))
 	}
 
 	lines = append(lines, divider)
 	lines = append(lines, sectionStyle.Render(vs.SidebarLibrary))
 	for _, t := range []model.Tab{model.TabHistory, model.TabWatchLater, model.TabPlaylists, model.TabLiked, model.TabDownloads} {
-		lines = append(lines, renderSidebarTabLine(t, t == s.ActiveTab, s.Focus == app.FocusSidebar, "", th, innerW, pal))
+		lines = append(lines, renderSidebarTabLine(t, tabLabel(t, vs), t == s.ActiveTab, s.Focus == app.FocusSidebar, "", th, innerW, pal))
 	}
 
 	lines = append(lines, divider)
@@ -706,7 +707,7 @@ func monoTabIcon(t model.Tab) string {
 	}
 }
 
-func renderSidebarTabLine(t model.Tab, active, focused bool, badge string, th theme.Theme, width int, pal renderPalette) string {
+func renderSidebarTabLine(t model.Tab, name string, active, focused bool, badge string, th theme.Theme, width int, pal renderPalette) string {
 	if active {
 		rail := lipgloss.NewStyle().Foreground(pal.spotAccent).Background(pal.surf).Bold(true).Render("▎")
 		lblCol := pal.white
@@ -722,7 +723,7 @@ func renderSidebarTabLine(t model.Tab, active, focused bool, badge string, th th
 		} else {
 			badge = ""
 		}
-		lbl := truncatePlain(" "+monoTabIcon(t)+"  "+t.String(), maxLabel)
+		lbl := truncatePlain(" "+monoTabIcon(t)+"  "+name, maxLabel)
 		row := rail + textSt.Render(lbl)
 		used := 1 + runewidth.StringWidth(lbl)
 		if badge != "" {
@@ -737,26 +738,27 @@ func renderSidebarTabLine(t model.Tab, active, focused bool, badge string, th th
 	}
 	if badge != "" && width > 14 {
 		bw := runewidth.StringWidth(badge) + 1
-		lbl := truncatePlain("  "+monoTabIcon(t)+"  "+t.String(), max(1, width-bw-2))
+		lbl := truncatePlain("  "+monoTabIcon(t)+"  "+name, max(1, width-bw-2))
 		pad := max(1, width-runewidth.StringWidth(lbl)-runewidth.StringWidth(badge)-1)
 		return lipgloss.NewStyle().Foreground(pal.muted).Render(lbl) +
 			strings.Repeat(" ", pad) +
 			lipgloss.NewStyle().Foreground(pal.dim).Render(badge+" ")
 	}
-	lbl := truncatePlain("  "+monoTabIcon(t)+"  "+t.String(), max(1, width-1))
+	lbl := truncatePlain("  "+monoTabIcon(t)+"  "+name, max(1, width-1))
 	pad := max(0, width-runewidth.StringWidth(lbl))
 	return lipgloss.NewStyle().Foreground(pal.muted).Render(lbl) + strings.Repeat(" ", pad)
 }
 
 func renderMiniGuide(s *app.State, _ theme.Theme, width, height int, pal renderPalette) string {
 	innerW := max(4, width-2)
+	vs := s.Catalog().Views
 
 	tabs := []model.Tab{model.TabHome, model.TabMusic, model.TabSubscriptions, model.TabHistory, model.TabDownloads}
 	lines := make([]string, 0, len(tabs)*3)
 	// Row 0 (y=3) is the rounded panel top border so slot 0 starts at y=4 (exact mouse.go slot := (y-4)/3).
 	for _, t := range tabs {
 		icon := monoTabIcon(t)
-		lbl := shortTabLabel(t)
+		lbl := shortTabLabel(t, vs)
 		icStyle := lipgloss.NewStyle().Foreground(pal.muted).Width(innerW).Align(lipgloss.Center)
 		lbStyle := lipgloss.NewStyle().Foreground(pal.dim).Width(innerW).Align(lipgloss.Center)
 		if t == s.ActiveTab && s.View == app.ViewHome {
@@ -938,20 +940,43 @@ func truncateStyledLine(s string, maxW int) string {
 	return lipgloss.NewStyle().MaxWidth(maxW).Render(s)
 }
 
-func shortTabLabel(t model.Tab) string {
+func tabLabel(t model.Tab, vs i18n.ViewStrings) string {
 	switch t {
 	case model.TabHome:
-		return "Inicio"
+		return vs.TabHome
 	case model.TabMusic:
-		return "Música"
+		return vs.TabMusic
 	case model.TabSubscriptions:
-		return "Subs"
-	case model.TabDownloads:
-		return "Desc"
+		return vs.TabSubscriptions
 	case model.TabHistory:
-		return "Hist"
+		return vs.TabHistory
+	case model.TabWatchLater:
+		return vs.TabWatchLater
+	case model.TabPlaylists:
+		return vs.TabPlaylists
+	case model.TabLiked:
+		return vs.TabLiked
+	case model.TabDownloads:
+		return vs.TabDownloads
 	default:
 		return t.String()
+	}
+}
+
+func shortTabLabel(t model.Tab, vs i18n.ViewStrings) string {
+	switch t {
+	case model.TabHome:
+		return vs.TabHome
+	case model.TabMusic:
+		return vs.TabMusic
+	case model.TabSubscriptions:
+		return vs.ShortTabSubs
+	case model.TabDownloads:
+		return vs.ShortTabDownloads
+	case model.TabHistory:
+		return vs.ShortTabHistory
+	default:
+		return tabLabel(t, vs)
 	}
 }
 
