@@ -107,12 +107,12 @@ func BuildMPVArgs(opts LaunchOpts) []string {
 		playlistOpt = "yes-playlist="
 	}
 	if opts.FastPlayback && !opts.AllowPlaylist {
-		// Skip cookies on fast single-video launches to avoid yt-dlp's slow web JS solver.
-		args = append(args, "--ytdl-raw-options=no-playlist=,extractor-args=youtube:player_client=android")
+		// Skip cookies on fast single-video launches without capping quality via android client.
+		args = append(args, "--ytdl-raw-options=no-playlist=")
 	} else if opts.CookieJarPath != "" {
 		args = append(args, "--ytdl-raw-options=cookies="+opts.CookieJarPath+","+playlistOpt)
 	} else if opts.FastPlayback {
-		args = append(args, "--ytdl-raw-options="+playlistOpt+",extractor-args=youtube:player_client=android,web")
+		args = append(args, "--ytdl-raw-options="+playlistOpt)
 	} else if opts.AllowPlaylist {
 		args = append(args, "--ytdl-raw-options=yes-playlist=")
 	}

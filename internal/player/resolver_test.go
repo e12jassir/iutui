@@ -435,8 +435,8 @@ printf 'https://cdn.example.com/android-fast.mp4\n'
 		if strings.Contains(got, "--cookies") {
 			t.Errorf("did not expect --cookies on fast android success:\n%s", got)
 		}
-		if !strings.Contains(got, "--extractor-args\nyoutube:player_client=android\n") {
-			t.Errorf("expected youtube:player_client=android extractor-args:\n%s", got)
+		if strings.Contains(got, "player_client=android") {
+			t.Errorf("should not force player_client=android:\n%s", got)
 		}
 		if strings.Contains(got, "player_client=android,web") {
 			t.Errorf("did not expect web client on fast android primary path:\n%s", got)
@@ -495,8 +495,8 @@ done
 				if len(calls) != 2 {
 					t.Fatalf("yt-dlp invocations = %d, want 2:\n%s", len(calls), string(raw))
 				}
-				if strings.Contains(calls[0], "--cookies") || !strings.Contains(calls[0], "--extractor-args\nyoutube:player_client=android\n") {
-					t.Errorf("attempt 1 should use cookieless android:\n%s", calls[0])
+				if strings.Contains(calls[0], "--cookies") || strings.Contains(calls[0], "player_client=android") {
+					t.Errorf("attempt 1 should be cookieless without player_client=android:\n%s", calls[0])
 				}
 				if !strings.Contains(calls[1], "--cookies\n"+cookieFile+"\n") || strings.Contains(calls[1], "player_client=android") {
 					t.Errorf("attempt 2 should use --cookies without player_client=android:\n%s", calls[1])
@@ -548,8 +548,8 @@ exit 1
 				if strings.Contains(got, "--cookies") {
 					t.Errorf("did not expect --cookies retry:\n%s", got)
 				}
-				if !strings.Contains(got, "--extractor-args\nyoutube:player_client=android\n") {
-					t.Errorf("expected android extractor-args on single attempt:\n%s", got)
+				if strings.Contains(got, "player_client=android") {
+					t.Errorf("should not force player_client=android on single attempt:\n%s", got)
 				}
 			})
 		}

@@ -1707,7 +1707,7 @@ case "$*" in
     ;;
   *)
     touch %q
-    sleep 1.15
+    sleep 0.35
     printf 'https://cdn.example.com/coalesced-2200.mp4\n'
     ;;
 esac

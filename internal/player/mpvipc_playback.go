@@ -11,7 +11,7 @@ import (
 	"github.com/e12jassir/iutui/internal/platform"
 )
 
-const streamWaitTimeout = 2200 * time.Millisecond
+const streamWaitTimeout = 900 * time.Millisecond
 
 type resolvedPlayTarget struct {
 	targetURL           string
