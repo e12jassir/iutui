@@ -36,7 +36,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var version = "0.5.2"
+var version = "0.5.3"
 
 type nativeThumbs struct {
 	mu      sync.RWMutex

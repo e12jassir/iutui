@@ -479,7 +479,7 @@ func TestVersionFlag(t *testing.T) {
 		t.Fatalf("--version failed: %v", err)
 	}
 	got := strings.TrimSpace(out.String())
-	want := "iutui version 0.5.2"
+	want := "iutui version 0.5.3"
 	if got != want {
 		t.Fatalf("--version = %q, want %q", got, want)
 	}
@@ -531,8 +531,8 @@ func TestDebugLogFlag(t *testing.T) {
 		if entry["msg"] != "iutui starting" {
 			t.Errorf("log msg = %v, want %q", entry["msg"], "iutui starting")
 		}
-		if entry["version"] != "0.5.2" {
-			t.Errorf("log version = %v, want %q", entry["version"], "0.5.2")
+		if entry["version"] != "0.5.3" {
+			t.Errorf("log version = %v, want %q", entry["version"], "0.5.3")
 		}
 		wantStateDir := filepath.Join(stateHome, "iutui")
 		if entry["state_dir"] != wantStateDir {

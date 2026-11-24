@@ -20,7 +20,7 @@
 
 <br />
 
-`iutui` (`v0.5.2`) is a single-binary YouTube TUI and CLI built in pure Go around `mpv` JSON IPC and `yt-dlp`. It starts playback in under three seconds without cookies, renders inline HD thumbnails natively in pure Go (Kitty graphics in Kitty/Ghostty and 24-bit ANSI quadrant blocks in truecolor terminals), publishes MPRIS2 desktop media controls on Linux, and runs background downloads with offline local playback.
+`iutui` (`v0.5.3`) is a single-binary YouTube TUI and CLI built in pure Go around `mpv` JSON IPC and `yt-dlp`. It starts playback in under three seconds without cookies, renders inline HD thumbnails natively in pure Go (Kitty graphics in Kitty/Ghostty and 24-bit ANSI quadrant blocks in truecolor terminals), publishes MPRIS2 desktop media controls on Linux, and runs background downloads with offline local playback.
 
 ## Quick Install
 
@@ -65,13 +65,13 @@ iutui doctor
 
 <br />
 
-Single-video playback resolves through a cookieless `player_client=visionos` path paired with asynchronous lookahead prefetching. The UI runs inside a single static Go binary built with Bubble Tea and Lip Gloss, keeping the `mpv` demuxer cache bounded to `24 MiB` and leaving zero Python or Node runtime processes behind.
+Single-video playback resolves through a cookieless `player_client=android` path paired with asynchronous lookahead prefetching. The UI runs inside a single static Go binary built with Bubble Tea and Lip Gloss, keeping the `mpv` demuxer cache bounded to `24 MiB` and leaving zero Python or Node runtime processes behind.
 
 ## Capabilities
 
 | Area | Behavior |
 |---|---|
-| **Sub-3s Playback & Prefetch** | Cookieless `player_client=visionos` stream resolution paired with async lookahead prefetching and smooth `volume-gain` audio fades on pause/resume, track switches, and queue transitions. |
+| **Sub-3s Playback & Prefetch** | Cookieless `player_client=android` stream resolution paired with async lookahead prefetching and smooth `volume-gain` audio fades on pause/resume, track switches, and queue transitions. |
 | **Linux MPRIS2 D-Bus** | Exports track metadata, position, playback rate, and transport controls over `org.mpris.MediaPlayer2.iutui` for `playerctl`, lock screens, and media keys. |
 | **Live Queue & Autocomplete** | Inspect and edit the active `mpv` queue with `u`; search with `/` using cursor-based editing and live YouTube suggestions (`Tab` to complete). |
 | **Speed, Loop & Auto-Resume** | Adjust playback rate from `0.5x` to `2.0x` (`{` / `}` / `0`), toggle single-track repeat (`R`), and resume videos of 15 minutes or longer automatically via `resume.json`. |
@@ -96,7 +96,7 @@ Single-video playback resolves through a cookieless `player_client=visionos` pat
 |---|---|
 | `iutui` | Launch the interactive TUI |
 | `iutui --debug-log` | Enable JSON `slog` diagnostics in `$XDG_STATE_HOME/iutui/debug.log` (`0600`) |
-| `iutui --version` | Print installed version (`iutui version 0.5.2`) |
+| `iutui --version` | Print installed version (`iutui version 0.5.3`) |
 | `iutui -q` (`--quick`) | Open the interactive quick selector |
 | `iutui play [-a\|-m\|--pip\|--fs] <id\|url>` | Play a video or URL directly (`-a` audio, `-m` Mix Radio, `--pip`, `--fs`) |
 | `iutui status [--json\|--waybar]` | Print live `mpv` playback state (`plain`, `--json`, or `--waybar`) |
