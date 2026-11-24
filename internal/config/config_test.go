@@ -481,3 +481,36 @@ func TestLoadAutoplayAndSpeed(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadLangEnum(t *testing.T) {
+	tests := []struct {
+		raw  string
+		want string
+	}{
+		{raw: "auto", want: "auto"},
+		{raw: "es", want: "es"},
+		{raw: "en", want: "en"},
+		{raw: "fr", want: "auto"},
+		{raw: "", want: "auto"},
+	}
+	for _, tc := range tests {
+		t.Run("YT_LANG="+tc.raw, func(t *testing.T) {
+			clearYTEnv(t)
+			path := filepath.Join(t.TempDir(), "config")
+			content := ""
+			if tc.raw != "" {
+				content = "YT_LANG=" + tc.raw + "\n"
+			}
+			if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+				t.Fatalf("WriteFile() error = %v", err)
+			}
+			cfg, err := Load(path)
+			if err != nil {
+				t.Fatalf("Load() error = %v", err)
+			}
+			if cfg.Lang != tc.want {
+				t.Errorf("Lang = %q, want %q", cfg.Lang, tc.want)
+			}
+		})
+	}
+}

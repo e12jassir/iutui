@@ -2815,9 +2815,9 @@ func TestLiveFiltersDownloadAudioCrossNavAndAll16Settings(t *testing.T) {
 		}
 		s, _ = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}})
 
-		// Adjust all 16 settings and verify state & persistence
-		if rows := s.SettingsRows(); len(rows) != SettingsRowCount || SettingsRowCount != 16 {
-			t.Fatalf("SettingsRows len = %d, SettingsRowCount = %d, want 16", len(rows), SettingsRowCount)
+		// Adjust all 17 settings and verify state & persistence
+		if rows := s.SettingsRows(); len(rows) != SettingsRowCount || SettingsRowCount != 17 {
+			t.Fatalf("SettingsRows len = %d, SettingsRowCount = %d, want 17", len(rows), SettingsRowCount)
 		}
 		for idx := 0; idx < SettingsRowCount; idx++ {
 			s, cmd = s.AdjustSetting(idx, 1)
@@ -2877,13 +2877,13 @@ func TestLiveFiltersDownloadAudioCrossNavAndAll16Settings(t *testing.T) {
 			}
 		}
 
-		// Scroll down with 'j' to last row (Cookies = 15) in compact Height=20, verify screen Y & mouse click hit.
+		// Scroll down with 'j' to last row (Cookies = 16) in compact Height=20, verify screen Y & mouse click hit.
 		s.SettingsIdx = 0
-		for i := 0; i < 15; i++ {
+		for i := 0; i < SettingIdxCookies; i++ {
 			s, _ = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
 		}
 		if s.SettingsIdx != SettingIdxCookies {
-			t.Fatalf("expected SettingsIdx=%d after 15 'j' presses, got %d", SettingIdxCookies, s.SettingsIdx)
+			t.Fatalf("expected SettingsIdx=%d after %d 'j' presses, got %d", SettingIdxCookies, SettingIdxCookies, s.SettingsIdx)
 		}
 		leftX, _, _, _, _, _, _ := s.SettingsModalWindow()
 		rowY, vis := s.SettingsRowScreenY(SettingIdxCookies)
@@ -4025,5 +4025,41 @@ func TestApp_SubscribeActiveUsesLiveTrackNotStalePrevious(t *testing.T) {
 	}
 	if !slices.Equal(s.Subscriptions, []string{"Soda Stereo"}) {
 		t.Fatalf("Subscriptions = %v, want [Soda Stereo]", s.Subscriptions)
+	}
+}
+
+func TestApp_AdjustSettingLangLiveToggle(t *testing.T) {
+	var savedKey, savedVal string
+	s := NewState(Dependencies{
+		InitialLang: "auto",
+		OnConfigChange: func(key, val string) error {
+			savedKey = key
+			savedVal = val
+			return nil
+		},
+	})
+
+	// Cycle 1: auto -> es
+	s, cmd := s.AdjustSetting(SettingIdxLang, 1)
+	if s.LangPref != "es" || s.Lang != "es" || s.Catalog().Lang != "es" {
+		t.Fatalf("after 1st toggle: LangPref=%q Lang=%q Cat.Lang=%q, want es/es/es", s.LangPref, s.Lang, s.Catalog().Lang)
+	}
+	for _, m := range collectNonTickMsgs(cmd, 150*time.Millisecond) {
+		s, _ = s.Update(m)
+	}
+	if savedKey != "YT_LANG" || savedVal != "es" {
+		t.Fatalf("saved config = (%q, %q), want (YT_LANG, es)", savedKey, savedVal)
+	}
+
+	// Cycle 2: es -> en
+	s, cmd = s.AdjustSetting(SettingIdxLang, 1)
+	if s.LangPref != "en" || s.Lang != "en" || s.Catalog().Lang != "en" {
+		t.Fatalf("after 2nd toggle: LangPref=%q Lang=%q Cat.Lang=%q, want en/en/en", s.LangPref, s.Lang, s.Catalog().Lang)
+	}
+	for _, m := range collectNonTickMsgs(cmd, 150*time.Millisecond) {
+		s, _ = s.Update(m)
+	}
+	if savedKey != "YT_LANG" || savedVal != "en" {
+		t.Fatalf("saved config = (%q, %q), want (YT_LANG, en)", savedKey, savedVal)
 	}
 }

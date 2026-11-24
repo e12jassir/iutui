@@ -494,6 +494,7 @@ func runTUI(paths platform.Paths) error {
 		InitialInterleave:    &interleave,
 		InitialCookies:       cfg.Cookies,
 		InitialTheme:         cfg.Theme,
+		InitialLang:          cfg.Lang,
 		InitialSponsorBlock:  &sbEnabled,
 		InitialThumbQuality:  cfg.ThumbQuality,
 		InitialAutoplay:      &autoplay,

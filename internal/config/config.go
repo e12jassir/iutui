@@ -336,9 +336,7 @@ func buildConfig(raw map[string]string) Config {
 	if v := raw["YT_HOME"]; v != "" {
 		cfg.Home = v
 	}
-	if v := raw["YT_LANG"]; v != "" {
-		cfg.Lang = v
-	}
+	cfg.Lang = asEnum(raw["YT_LANG"], cfg.Lang, "auto", "es", "en")
 	if v, ok := raw["YT_COOKIES_FILE"]; ok {
 		cfg.CookiesFile = v
 	}

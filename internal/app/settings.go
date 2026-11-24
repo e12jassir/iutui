@@ -7,28 +7,30 @@ import (
 	"strconv"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/e12jassir/iutui/internal/i18n"
 	"github.com/e12jassir/iutui/internal/tui/theme"
 )
 
 // Interactive setting indices in the Settings modal.
 const (
 	SettingIdxTheme         = 0
-	SettingIdxPreview       = 1
-	SettingIdxThumbQuality  = 2
-	SettingIdxQuality       = 3
-	SettingIdxDefaultMode   = 4
-	SettingIdxVolume        = 5
-	SettingIdxSpeed         = 6
-	SettingIdxAutoplay      = 7
-	SettingIdxSponsorBlock  = 8
-	SettingIdxHideShorts    = 9
-	SettingIdxInterleave    = 10
-	SettingIdxFeedSize      = 11
-	SettingIdxSearchSize    = 12
-	SettingIdxCacheTTL      = 13
-	SettingIdxDownloadAudio = 14
-	SettingIdxCookies       = 15
-	SettingsRowCount        = 16
+	SettingIdxLang          = 1
+	SettingIdxPreview       = 2
+	SettingIdxThumbQuality  = 3
+	SettingIdxQuality       = 4
+	SettingIdxDefaultMode   = 5
+	SettingIdxVolume        = 6
+	SettingIdxSpeed         = 7
+	SettingIdxAutoplay      = 8
+	SettingIdxSponsorBlock  = 9
+	SettingIdxHideShorts    = 10
+	SettingIdxInterleave    = 11
+	SettingIdxFeedSize      = 12
+	SettingIdxSearchSize    = 13
+	SettingIdxCacheTTL      = 14
+	SettingIdxDownloadAudio = 15
+	SettingIdxCookies       = 16
+	SettingsRowCount        = 17
 )
 
 var (
@@ -141,6 +143,15 @@ func (s *State) SettingsRows() []SettingRow {
 		cookiesVal = "off (Solo invitado RSS)"
 	}
 
+	cat := s.Catalog()
+	langVal := cat.Common.LangAuto + " (" + s.Lang + ")"
+	switch s.LangPref {
+	case i18n.LangES:
+		langVal = cat.Common.LangES
+	case i18n.LangEN:
+		langVal = cat.Common.LangEN
+	}
+
 	return []SettingRow{
 		{
 			Index:    SettingIdxTheme,
@@ -149,6 +160,13 @@ func (s *State) SettingsRows() []SettingRow {
 			Value:    themeVal,
 			Desc:     "Paleta visual de colores y bordes en toda la TUI",
 			Shortcut: "t",
+		},
+		{
+			Index:   SettingIdxLang,
+			Section: "APARIENCIA & TERMINAL",
+			Label:   cat.Common.LangLabel,
+			Value:   langVal,
+			Desc:    cat.Common.LangDesc,
 		},
 		{
 			Index:   SettingIdxPreview,
@@ -398,6 +416,21 @@ func (s *State) AdjustSetting(idx, delta int) (*State, tea.Cmd) {
 		next := palettes[((cur+delta)%n+n)%n]
 		s.ThemeName = next
 		return s, tea.Batch(s.toastCmd("🎨 Tema: "+next), s.saveThemeCmd(next))
+
+	case SettingIdxLang:
+		langs := []string{"auto", i18n.LangES, i18n.LangEN}
+		cur := 0
+		for i, l := range langs {
+			if l == s.LangPref {
+				cur = i
+				break
+			}
+		}
+		n := len(langs)
+		next := langs[((cur+delta)%n+n)%n]
+		s.SetLangPref(next)
+		msg := i18n.Format(s.Catalog().Common.LangChangedToast, map[string]string{"lang": next})
+		return s, tea.Batch(s.toastCmd(msg), s.saveConfigCmd("YT_LANG", next))
 
 	case SettingIdxPreview:
 		modes := []string{"auto", "kitty", "chafa", "none"}

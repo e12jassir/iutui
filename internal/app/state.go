@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/e12jassir/iutui/internal/catalog"
 	"github.com/e12jassir/iutui/internal/download"
+	"github.com/e12jassir/iutui/internal/i18n"
 	"github.com/e12jassir/iutui/internal/lyrics"
 	"github.com/e12jassir/iutui/internal/model"
 	"github.com/e12jassir/iutui/internal/player"
@@ -104,6 +106,7 @@ type Dependencies struct {
 	InitialInterleave    *bool
 	InitialCookies       string
 	InitialTheme         string
+	InitialLang          string
 	InitialSponsorBlock  *bool
 	InitialThumbQuality  string
 	InitialAutoplay      *bool
@@ -210,6 +213,9 @@ type State struct {
 	DownloadAudio bool
 	CookiesMode   string
 	ThemeName     string
+	LangPref      string
+	Lang          string
+	Cat           *i18n.Catalog
 	Quality       int
 	AppVersion    string
 	Width         int
@@ -307,7 +313,7 @@ func NewState(deps Dependencies) *State {
 	if deps.InitialDownloadAudio != nil {
 		downloadAudio = *deps.InitialDownloadAudio
 	}
-	return &State{
+	s := &State{
 		Deps:               deps,
 		View:               ViewHome,
 		PrevView:           ViewHome,
@@ -345,6 +351,31 @@ func NewState(deps Dependencies) *State {
 		appCtx:             ctx,
 		appCancel:          cancel,
 	}
+	langPref := strings.TrimSpace(deps.InitialLang)
+	if langPref == "" {
+		langPref = "auto"
+	}
+	s.SetLangPref(langPref)
+	return s
+}
+
+// Catalog returns the active i18n catalog, falling back to Spanish if nil.
+func (s *State) Catalog() *i18n.Catalog {
+	if s.Cat != nil {
+		return s.Cat
+	}
+	return i18n.For(i18n.LangES)
+}
+
+// SetLangPref updates LangPref, resolves Lang from the environment, and refreshes Cat.
+func (s *State) SetLangPref(pref string) {
+	p := strings.ToLower(strings.TrimSpace(pref))
+	if p != "auto" && p != i18n.LangES && p != i18n.LangEN {
+		p = "auto"
+	}
+	s.LangPref = p
+	s.Lang = i18n.Resolve(p, os.Getenv)
+	s.Cat = i18n.For(s.Lang)
 }
 
 func normalizeThumbQuality(v string) string {

@@ -676,6 +676,10 @@ func (s *State) startLyricsFetch(videoID, title, channel string, durationSec flo
 		s.LyricsOffset = 0
 	}
 	prefer := s.LyricsPreferSource
+	lyricsLang := s.Lang
+	if lyricsLang == "" {
+		lyricsLang = "es"
+	}
 
 	ctx, cancel := context.WithTimeout(s.appCtx, lyricsTimeout)
 	s.lyricsCancel = cancel
@@ -684,7 +688,7 @@ func (s *State) startLyricsFetch(videoID, title, channel string, durationSec flo
 		tl, err := client.FetchWithOptions(ctx, videoID, title, channel, lyrics.FetchOptions{
 			Duration:     durationSec,
 			PreferSource: prefer,
-			Lang:         "es",
+			Lang:         lyricsLang,
 		})
 		return LyricsLoadedMsg{Seq: seq, Track: title, Lyrics: tl, Err: err}
 	}

@@ -815,7 +815,7 @@ func TestRenderSettingsStudioOverlay(t *testing.T) {
 		out := Render(s, th, tr)
 		s.Close()
 		assertBounds(t, out, sz[0], sz[1])
-		for _, want := range []string{"Configuración", "◆", "1/16", "ⓘ", "[?] Atajos"} {
+		for _, want := range []string{"Configuración", "◆", "1/17", "ⓘ", "[?] Atajos"} {
 			if !strings.Contains(out, want) {
 				t.Fatalf("%dx%d: expected %q in settings studio overlay, got:\n%s", sz[0], sz[1], want, out)
 			}
@@ -830,7 +830,7 @@ func TestRenderSettingsStudioOverlay(t *testing.T) {
 			out := Render(s, th, tr)
 			s.Close()
 			assertBounds(t, out, sz[0], sz[1])
-			for _, want := range []string{"Cookies navegador", "16/16", "Usa cookies de Zen/Firefox"} {
+			for _, want := range []string{"Cookies navegador", "17/17", "Usa cookies de Zen/Firefox"} {
 				if !strings.Contains(out, want) {
 					t.Fatalf("%dx%d: expected %q in scrolled settings overlay, got:\n%s", sz[0], sz[1], want, out)
 				}
