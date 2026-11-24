@@ -94,6 +94,7 @@ type Dependencies struct {
 	SuggestProvider      SuggestProvider
 	SearchHistory        SearchHistoryStore
 	ResumeStore          ResumePositionStore
+	ListeningStats       *store.ListeningStats
 	InitialQuality       int
 	InitialAudioOnly     bool
 	InitialDefaultMode   string
@@ -149,43 +150,50 @@ type State struct {
 	ResultIdx    int
 	ResultScroll int
 
-	SavedIDs        map[string]bool
-	LikedIDs        map[string]bool
-	HistoryIDs      map[string]bool
-	Subscriptions   []string
-	Queue           []model.Video
-	PlayStack       []model.Video
-	CurrentPlaying  model.Video
-	skipHistoryPush bool
-	PlayerStatus    player.Status
+	SavedIDs           map[string]bool
+	LikedIDs           map[string]bool
+	HistoryIDs         map[string]bool
+	Subscriptions      []string
+	SubscriptionLabels map[string]string
+	Queue              []model.Video
+	PlayStack          []model.Video
+	CurrentPlaying     model.Video
+	skipHistoryPush    bool
+	navigatingBack     bool
+	lastPlaylistPos    int
+	trackMaxPos        float64
+	trackDur           float64
+	PlayerStatus       player.Status
 
 	Toast   string
 	ToastID int
 
-	ShowHelp           bool
-	ShowSettings       bool
-	SettingsIdx        int
-	ShowQualityModal   bool
-	QualityIdx         int
-	ShowStillWatching  bool
-	ShowChapters       bool
-	Chapters           []player.Chapter
-	ChapterIdx         int
-	ShowLyrics         bool
-	LyricsLoading      bool
-	Lyrics             lyrics.TrackLyrics
-	LyricsErr          string
-	LyricsTrack        string
-	LyricsScroll       int
-	LyricsVideoID      string
-	LyricsOffset       float64
-	LyricsPreferSource string
-	ShowQueue          bool
-	QueueIdx           int
-	MPVPlaylist        []player.PlaylistItem
-	SearchSuggestions  []string
-	SuggestIdx         int
-	DownloadProgress   map[string]download.Item
+	ShowHelp            bool
+	ShowSettings        bool
+	SettingsIdx         int
+	ShowQualityModal    bool
+	QualityIdx          int
+	ShowStillWatching   bool
+	ShowChapters        bool
+	Chapters            []player.Chapter
+	ChapterIdx          int
+	ShowLyrics          bool
+	LyricsLoading       bool
+	Lyrics              lyrics.TrackLyrics
+	LyricsErr           string
+	LyricsTrack         string
+	LyricsScroll        int
+	LyricsVideoID       string
+	LyricsOffset        float64
+	LyricsPreferSource  string
+	ShowQueue           bool
+	QueueIdx            int
+	QueueScroll         int
+	queueRefreshPending bool
+	MPVPlaylist         []player.PlaylistItem
+	SearchSuggestions   []string
+	SuggestIdx          int
+	DownloadProgress    map[string]download.Item
 
 	Autoplay      bool
 	SponsorBlock  bool
@@ -300,40 +308,42 @@ func NewState(deps Dependencies) *State {
 		downloadAudio = *deps.InitialDownloadAudio
 	}
 	return &State{
-		Deps:              deps,
-		View:              ViewHome,
-		PrevView:          ViewHome,
-		ActiveTab:         model.TabHome,
-		Focus:             FocusMain,
-		Autoplay:          autoplay,
-		SponsorBlock:      sponsorBlock,
-		AudioOnly:         deps.InitialAudioOnly || defMode == "audio",
-		DefaultMode:       defMode,
-		AudioVolume:       vol,
-		PreviewMode:       preview,
-		ThumbQuality:      thumbQuality,
-		HideShorts:        hideShorts,
-		Interleave:        interleave,
-		FeedSize:          feedSize,
-		SearchSize:        searchSize,
-		CacheTTL:          cacheTTL,
-		DownloadAudio:     downloadAudio,
-		CookiesMode:       cookiesMode,
-		ThemeName:         themeName,
-		Quality:           deps.InitialQuality,
-		AppVersion:        strings.TrimSpace(deps.AppVersion),
-		Feeds:             make(map[model.Tab][]model.Video),
-		SavedIDs:          make(map[string]bool),
-		LikedIDs:          make(map[string]bool),
-		HistoryIDs:        make(map[string]bool),
-		LiveLoading:       make(map[model.Tab]bool),
-		DownloadProgress:  make(map[string]download.Item),
-		SuggestIdx:        -1,
-		metaRequested:     make(map[string]bool),
-		PlayerStatus:      player.Status{Speed: speed},
-		LastInteractionAt: time.Now(),
-		appCtx:            ctx,
-		appCancel:         cancel,
+		Deps:               deps,
+		View:               ViewHome,
+		PrevView:           ViewHome,
+		ActiveTab:          model.TabHome,
+		Focus:              FocusMain,
+		Autoplay:           autoplay,
+		SponsorBlock:       sponsorBlock,
+		AudioOnly:          deps.InitialAudioOnly || defMode == "audio",
+		DefaultMode:        defMode,
+		AudioVolume:        vol,
+		PreviewMode:        preview,
+		ThumbQuality:       thumbQuality,
+		HideShorts:         hideShorts,
+		Interleave:         interleave,
+		FeedSize:           feedSize,
+		SearchSize:         searchSize,
+		CacheTTL:           cacheTTL,
+		DownloadAudio:      downloadAudio,
+		CookiesMode:        cookiesMode,
+		ThemeName:          themeName,
+		Quality:            deps.InitialQuality,
+		AppVersion:         strings.TrimSpace(deps.AppVersion),
+		Feeds:              make(map[model.Tab][]model.Video),
+		SavedIDs:           make(map[string]bool),
+		LikedIDs:           make(map[string]bool),
+		HistoryIDs:         make(map[string]bool),
+		SubscriptionLabels: make(map[string]string),
+		LiveLoading:        make(map[model.Tab]bool),
+		DownloadProgress:   make(map[string]download.Item),
+		SuggestIdx:         -1,
+		metaRequested:      make(map[string]bool),
+		lastPlaylistPos:    -1,
+		PlayerStatus:       player.Status{Speed: speed, PlaylistPos: -1},
+		LastInteractionAt:  time.Now(),
+		appCtx:             ctx,
+		appCancel:          cancel,
 	}
 }
 
@@ -387,8 +397,17 @@ func (s *State) setSearchDraft(draft string, cursor int) {
 }
 
 // HasPlayerBar reports whether the bottom player bar should be visible.
+// An idle WarmUp mpv process without an active track or playlist stays hidden.
 func (s *State) HasPlayerBar() bool {
-	return s.PlayerStatus.IsRunning || s.PlayLoading
+	if s.PlayLoading {
+		return true
+	}
+	if !s.PlayerStatus.IsRunning {
+		return false
+	}
+	return strings.TrimSpace(s.PlayerStatus.Title) != "" ||
+		s.CurrentPlaying.ID != "" ||
+		s.PlayerStatus.PlaylistCount > 0
 }
 
 // IsAnimating reports whether any loading/syncing animation is active.
@@ -437,7 +456,7 @@ var shortsTagRe = regexp.MustCompile(`(?i)(?:^|[^a-z0-9_])#shorts?(?:[^a-z0-9_]|
 // VisibleItems returns the current list of videos filtered by active catalog filters and chips.
 func (s *State) VisibleItems() []model.Video {
 	if s.View == ViewSearch {
-		return filterByChip(s.SearchResults, SearchChips, s.SearchChip, s)
+		return s.SearchResults
 	}
 	if s.View == ViewChannel {
 		return s.ChannelVideos
@@ -615,10 +634,14 @@ func (s *State) BodyHeight() int {
 	if s.Height <= 0 {
 		return 0
 	}
-	if s.HasPlayerBar() {
-		return max(1, s.Height-11)
+	chrome := 5 // top(3) + header(1) + chips(1)
+	if s.View == ViewSearch {
+		chrome = 4 // top(3) + header(1), no filter chips bar in Search
 	}
-	return max(1, s.Height-6)
+	if s.HasPlayerBar() {
+		chrome += 5
+	}
+	return max(1, s.Height-chrome)
 }
 
 // VisibleGridRows returns the number of complete card rows visible in the home grid.

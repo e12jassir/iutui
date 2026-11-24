@@ -8,12 +8,14 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -392,9 +394,20 @@ func runTUI(paths platform.Paths) error {
 	cat.SetDisableCookieAuthSubs(isCookiesDisabled(cfg.Cookies))
 
 	st := store.NewTSVStore(paths.StateDir)
+	musicStats := store.NewListeningStats(paths.StateDir)
 	cat.SubscriptionsProvider = st.Subscriptions
+	cat.LocalMusicProvider = func(ctx context.Context) (catalog.LocalMusicData, error) {
+		liked, _ := st.Liked(ctx)
+		hist, _ := st.History(ctx)
+		return catalog.LocalMusicData{
+			Liked:   liked,
+			History: hist,
+			Stats:   musicStats.Snapshot(),
+		}, nil
+	}
 	eng := player.NewIPCClient(
 		player.WithSocketPath(paths.SocketPath),
+		player.WithRadioClient(player.NewRadioClient()),
 		player.WithLaunchDefaults(player.LaunchOpts{
 			Mode:          cfg.DefaultMode,
 			SocketPath:    paths.SocketPath,
@@ -409,6 +422,8 @@ func runTUI(paths platform.Paths) error {
 	defer eng.Close()
 	eng.SetSponsorBlock(cfg.SponsorBlock)
 	eng.SetAutoplay(cfg.Autoplay)
+	eng.CleanupOrphanSocket()
+	go eng.WarmUp()
 	dl := download.NewManager(paths.StateDir, dlDir, cfg.YtdlpBin)
 	resumeStore := store.NewResumeStore(paths.StateDir)
 	searchHist := store.NewSearchHistory(paths.StateDir)
@@ -469,6 +484,7 @@ func runTUI(paths platform.Paths) error {
 		SuggestProvider:      suggestClient,
 		SearchHistory:        searchHist,
 		ResumeStore:          resumeStore,
+		ListeningStats:       musicStats,
 		InitialQuality:       cfg.Quality,
 		InitialAudioOnly:     cfg.DefaultMode == "audio",
 		InitialDefaultMode:   cfg.DefaultMode,
@@ -584,7 +600,7 @@ func runTUI(paths platform.Paths) error {
 		},
 		tea.WithAltScreen(),
 		tea.WithMouseAllMotion(),
-		tea.WithFilter(app.NewBubbleTeaEscapeFilter()),
+		tea.WithFilter(app.NewBubbleTeaProgramFilter(state)),
 	)
 	startCookieBootstrap(bootCtx, cfg, paths, cookieJar, false, func(jar string) {
 		notifyCookiesReady(jar, true)
@@ -674,6 +690,23 @@ func runTUI(paths platform.Paths) error {
 	})
 	defer tui.SetOnThumbReady(nil)
 	defer programDone.Store(true)
+
+	sigCh := make(chan os.Signal, 2)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	defer signal.Stop(sigCh)
+	sigDone := make(chan struct{})
+	defer close(sigDone)
+	go func() {
+		select {
+		case <-sigCh:
+			if p != nil {
+				p.Quit()
+			}
+			state.Close()
+		case <-sigDone:
+		}
+	}()
+
 	_, err := p.Run()
 	programDone.Store(true)
 	slog.Info("tui exited", "err", err)

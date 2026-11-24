@@ -38,26 +38,8 @@ func renderHomeGrid(s *app.State, th theme.Theme, tr thumbs.Renderer, width, hei
 	}
 
 	totalRows := (len(items) + cols - 1) / cols
-	selRow := 0
-	if s.SelectedIdx >= 0 && s.SelectedIdx < len(items) {
-		selRow = s.SelectedIdx / cols
-	}
 
-	// Render a sample card to know exact row height.
-	sampleCard := renderCard(items[0], false, false, false, "", th, tr, actualCardW, pal)
-	cardH := lipgloss.Height(sampleCard)
-	if cardH < 1 {
-		cardH = 1
-	}
-
-	visibleRows := max(1, height/cardH)
 	startRow := s.ScrollOffset
-	if selRow < startRow {
-		startRow = selRow
-	}
-	if selRow >= startRow+visibleRows {
-		startRow = selRow - visibleRows + 1
-	}
 	if startRow < 0 {
 		startRow = 0
 	}
@@ -79,9 +61,10 @@ func renderHomeGrid(s *app.State, th theme.Theme, tr thumbs.Renderer, width, hei
 			tr.Prefetch(v.ID)
 			selected := idx == s.SelectedIdx
 			saved := s.SavedIDs[v.ID]
+			liked := s.LikedIDs[v.ID]
 			playing := isVideoPlaying(s, v)
 			dlBadge := downloadProgressBadge(s, v.ID)
-			card := renderCard(v, selected, saved, playing, dlBadge, th, tr, actualCardW, pal)
+			card := renderCard(v, selected, saved, liked, playing, dlBadge, th, tr, actualCardW, pal)
 			if c > 0 {
 				rowCards = append(rowCards, gapStr)
 			}
@@ -95,7 +78,7 @@ func renderHomeGrid(s *app.State, th theme.Theme, tr thumbs.Renderer, width, hei
 	return fitBlock(strings.Join(gridRows, "\n"), width, height)
 }
 
-func renderCard(v model.Video, selected, saved, playing bool, dlBadge string, th theme.Theme, tr thumbs.Renderer, cardW int, pal renderPalette) string {
+func renderCard(v model.Video, selected, saved, liked, playing bool, dlBadge string, th theme.Theme, tr thumbs.Renderer, cardW int, pal renderPalette) string {
 	innerW := max(4, cardW-4) // border(2) + padding(2)
 	thumbH := max(homeThumbH, min(11, innerW*9/32))
 
@@ -113,11 +96,14 @@ func renderCard(v model.Video, selected, saved, playing bool, dlBadge string, th
 		}
 		badgeParts = append(badgeParts, th.BadgeDuration.Render(dur))
 	}
+	if liked {
+		badgeParts = append(badgeParts, lipgloss.NewStyle().Foreground(lipgloss.Color("#1DB954")).Bold(true).Render("󰋑"))
+	}
 	if saved {
-		badgeParts = append(badgeParts, lipgloss.NewStyle().Foreground(pal.yellow).Bold(true).Render("★"))
+		badgeParts = append(badgeParts, lipgloss.NewStyle().Foreground(pal.yellow).Bold(true).Render("󰥔"))
 	}
 	if playing {
-		badgeParts = append(badgeParts, lipgloss.NewStyle().Foreground(pal.red).Bold(true).Render("▶ sonando"))
+		badgeParts = append(badgeParts, lipgloss.NewStyle().Foreground(pal.spotAccent).Bold(true).Render("󰎈 Sonando"))
 	}
 	if dlBadge != "" {
 		badgeParts = append(badgeParts, lipgloss.NewStyle().Foreground(pal.spotAccent).Bold(true).Render(dlBadge))
@@ -141,8 +127,8 @@ func renderCard(v model.Video, selected, saved, playing bool, dlBadge string, th
 	t1 := titleStyle.Render(line1)
 	t2 := titleStyle.Render(line2)
 
-	// 4. Channel & views.
-	chName := strings.TrimSpace(v.Channel)
+	// 4. Channel & views (suppress generic "YouTube" filler).
+	chName := cleanChannelName(v.Channel)
 	if chName == "" {
 		chName = "-"
 	}
@@ -159,29 +145,6 @@ func renderCard(v model.Video, selected, saved, playing bool, dlBadge string, th
 		style = th.CardSelected
 	}
 	return style.Width(max(1, cardW-2)).Height(thumbH + 5).Render(body)
-}
-
-var avatarColors = []lipgloss.Color{
-	lipgloss.Color("#c0392b"),
-	lipgloss.Color("#2980b9"),
-	lipgloss.Color("#27ae60"),
-	lipgloss.Color("#8e44ad"),
-	lipgloss.Color("#d35400"),
-	lipgloss.Color("#16a085"),
-}
-
-func channelAvatar(name string, pal renderPalette) string {
-	r := []rune(strings.TrimSpace(name))
-	ch := "?"
-	var sum int
-	if len(r) > 0 {
-		ch = strings.ToUpper(string(r[0]))
-		for _, c := range r {
-			sum += int(c)
-		}
-	}
-	bg := avatarColors[sum%len(avatarColors)]
-	return lipgloss.NewStyle().Background(bg).Foreground(pal.white).Bold(true).Render(ch + " ")
 }
 
 func renderSearchList(s *app.State, th theme.Theme, tr thumbs.Renderer, width, height int, pal renderPalette) string {
@@ -208,21 +171,8 @@ func renderSearchList(s *app.State, th theme.Theme, tr thumbs.Renderer, width, h
 		return fitBlock(empty, width, height)
 	}
 
-	sampleRow := renderSearchRow(items[0], false, false, false, "", th, tr, width, pal)
-	rowH := lipgloss.Height(sampleRow)
-	if rowH < 1 {
-		rowH = 1
-	}
-	visibleCount := max(1, height/rowH)
-
 	curIdx := s.ActiveListIndex()
 	startIdx := s.ActiveListScroll()
-	if curIdx < startIdx {
-		startIdx = curIdx
-	}
-	if curIdx >= startIdx+visibleCount {
-		startIdx = curIdx - visibleCount + 1
-	}
 	if startIdx < 0 {
 		startIdx = 0
 	}
@@ -236,14 +186,14 @@ func renderSearchList(s *app.State, th theme.Theme, tr thumbs.Renderer, width, h
 		v := items[i]
 		tr.Prefetch(v.ID)
 		dlBadge := downloadProgressBadge(s, v.ID)
-		row := renderSearchRow(v, i == curIdx, s.SavedIDs[v.ID], isVideoPlaying(s, v), dlBadge, th, tr, width, pal)
+		row := renderSearchRow(v, i == curIdx, s.SavedIDs[v.ID], s.LikedIDs[v.ID], isVideoPlaying(s, v), dlBadge, th, tr, width, pal)
 		rows = append(rows, row)
 		usedH += lipgloss.Height(row)
 	}
 	return fitBlock(strings.Join(rows, "\n"), width, height)
 }
 
-func renderSearchRow(v model.Video, selected, saved, playing bool, dlBadge string, th theme.Theme, tr thumbs.Renderer, rowW int, pal renderPalette) string {
+func renderSearchRow(v model.Video, selected, saved, liked, playing bool, dlBadge string, th theme.Theme, tr thumbs.Renderer, rowW int, pal renderPalette) string {
 	innerW := max(10, rowW-4)
 	tw := min(searchThumbW, max(12, innerW/3))
 	thumbStr := tr.Render(v.ID, tw, searchThumbH)
@@ -257,7 +207,7 @@ func renderSearchRow(v model.Video, selected, saved, playing bool, dlBadge strin
 	t1 := titleStyle.Render(titleLines[0])
 	t2 := titleStyle.Render(titleLines[1])
 	views := lipgloss.NewStyle().Foreground(pal.dim).Render(truncatePlain(formatViewsLine(v), infoW))
-	chName := strings.TrimSpace(v.Channel)
+	chName := cleanChannelName(v.Channel)
 	if chName == "" {
 		chName = "-"
 	}
@@ -273,11 +223,14 @@ func renderSearchRow(v model.Video, selected, saved, playing bool, dlBadge strin
 		}
 		badges = append(badges, th.BadgeDuration.Render(dur))
 	}
+	if liked {
+		badges = append(badges, lipgloss.NewStyle().Foreground(lipgloss.Color("#1DB954")).Bold(true).Render("󰋑"))
+	}
 	if saved {
-		badges = append(badges, lipgloss.NewStyle().Foreground(pal.yellow).Bold(true).Render("★ Guardado"))
+		badges = append(badges, lipgloss.NewStyle().Foreground(pal.yellow).Bold(true).Render("󰥔 Guardado"))
 	}
 	if playing {
-		badges = append(badges, lipgloss.NewStyle().Foreground(pal.red).Bold(true).Render("▶ sonando"))
+		badges = append(badges, lipgloss.NewStyle().Foreground(pal.spotAccent).Bold(true).Render("󰎈 Sonando"))
 	}
 	if dlBadge != "" {
 		badges = append(badges, lipgloss.NewStyle().Foreground(pal.spotAccent).Bold(true).Render(dlBadge))

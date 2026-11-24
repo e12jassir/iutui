@@ -141,9 +141,8 @@ func TestTeatestSearchFilterAndPlayFlow(t *testing.T) {
 		return bytes.Contains(bts, []byte("De Musica Ligera"))
 	}, teatest.WithDuration(3*time.Second))
 
-	// Filter with ']' twice (Todo -> Videos -> En vivo)
-	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{']'}})
-	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{']'}})
+	// Move down to the second search result ("Soda En Vivo") with 'j' (Search hides filter chips)
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
 
 	teatest.WaitFor(t, tm.Output(), func(bts []byte) bool {
 		return bytes.Contains(bts, []byte("Soda En Vivo"))

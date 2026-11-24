@@ -103,10 +103,10 @@ func TestStateSearchFlowAndEscReturn(t *testing.T) {
 		t.Fatalf("search results = %d, want 2", len(s.VisibleItems()))
 	}
 
-	// Filter search to En vivo (index 2: Todo=0, Videos=1, En vivo=2)
+	// Chip cycling is Home-only and must not filter Search results.
 	s.CycleChip(2)
-	if items := s.VisibleItems(); len(items) != 1 || items[0].ID != "srch2" {
-		t.Fatalf("search live filter = %+v, want srch2", items)
+	if items := s.VisibleItems(); len(items) != 2 {
+		t.Fatalf("search results after CycleChip = %d, want 2 (unfiltered)", len(items))
 	}
 
 	// Esc returns to ViewHome
@@ -952,9 +952,10 @@ func TestCollapsiblePlayerBarAndMouseCoords(t *testing.T) {
 		t.Fatal("expected HasPlayerBar() == true while PlayLoading")
 	}
 
-	// While player bar is visible, clicking bottom transport [▶/⏸] (x=9, y=s.Height-2) must hit player controls.
+	// While player bar is visible, clicking bottom transport Play/Pause must hit player controls.
+	lay := s.PlayerBarLayout()
 	_, pauseCmd := s.Update(tea.MouseMsg{
-		X:      9,
+		X:      (lay.PlayPauseX0 + lay.PlayPauseX1) / 2,
 		Y:      s.Height - 2,
 		Button: tea.MouseButtonLeft,
 		Action: tea.MouseActionPress,
@@ -1796,10 +1797,11 @@ func TestApp_NextPrevSeekBarOptimisticSeekAndLyricsWheel(t *testing.T) {
 	}
 
 	s.PlayerStatus = player.Status{IsRunning: true, Title: "Song Zero", TimePos: 60, Duration: 240}
-	s, cmd = s.Update(tea.MouseMsg{X: 14, Y: s.Height - 2, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	lay := s.PlayerBarLayout()
+	s, cmd = s.Update(tea.MouseMsg{X: (lay.NextX0 + lay.NextX1) / 2, Y: s.Height - 2, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
 	_ = collectNonTickMsgs(cmd, 100*time.Millisecond)
 	if s.CurrentPlaying.ID != "t3" || len(s.Queue) != 0 {
-		t.Fatalf("expected [>|] to pop queued t3, current=%q queueLen=%d", s.CurrentPlaying.ID, len(s.Queue))
+		t.Fatalf("expected Next button to pop queued t3, current=%q queueLen=%d", s.CurrentPlaying.ID, len(s.Queue))
 	}
 	if len(s.PlayStack) != 1 || s.PlayStack[0].ID != "t0" {
 		t.Fatalf("expected PlayStack=[t0], got %+v", s.PlayStack)
@@ -1812,22 +1814,22 @@ func TestApp_NextPrevSeekBarOptimisticSeekAndLyricsWheel(t *testing.T) {
 		t.Fatalf("expected wrap-around next from last t3 to t0, got %q", s.CurrentPlaying.ID)
 	}
 
-	// Prev via [|<] (x=3, y=Height-2) pops PlayStack back to t3 cleanly without re-pushing t0 on top.
-	s, cmd = s.Update(tea.MouseMsg{X: 3, Y: s.Height - 2, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	// Prev button pops PlayStack back to t3 cleanly without re-pushing t0 on top.
+	s, cmd = s.Update(tea.MouseMsg{X: (lay.PrevX0 + lay.PrevX1) / 2, Y: s.Height - 2, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
 	_ = collectNonTickMsgs(cmd, 100*time.Millisecond)
 	if s.CurrentPlaying.ID != "t3" {
-		t.Fatalf("expected [|<] to pop PlayStack back to t3, got %q", s.CurrentPlaying.ID)
+		t.Fatalf("expected Prev button to pop PlayStack back to t3, got %q", s.CurrentPlaying.ID)
 	}
 
-	// Relative buttons [-10s] (x=20) and [+10s] (x=27) update TimePos optimistically.
+	// Relative buttons -10s and +10s update TimePos optimistically.
 	s.PlayerStatus = player.Status{IsRunning: true, Title: "Song Three", TimePos: 60, Duration: 240}
-	s, cmd = s.Update(tea.MouseMsg{X: 20, Y: s.Height - 2, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	s, cmd = s.Update(tea.MouseMsg{X: (lay.Back10X0 + lay.Back10X1) / 2, Y: s.Height - 2, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
 	if s.PlayerStatus.TimePos != 50 {
-		t.Fatalf("after [-10s] click expected TimePos=50, got %v", s.PlayerStatus.TimePos)
+		t.Fatalf("after -10s click expected TimePos=50, got %v", s.PlayerStatus.TimePos)
 	}
 	_ = collectNonTickMsgs(cmd, 100*time.Millisecond)
 
-	s, cmd = s.Update(tea.MouseMsg{X: 27, Y: s.Height - 2, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	s, cmd = s.Update(tea.MouseMsg{X: (lay.Fwd10X0 + lay.Fwd10X1) / 2, Y: s.Height - 2, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
 	if s.PlayerStatus.TimePos != 60 {
 		t.Fatalf("after [+10s] click expected TimePos=60, got %v", s.PlayerStatus.TimePos)
 	}
@@ -2433,11 +2435,11 @@ func TestSearchFocusImmuneToMouseMotionAndSuggestionClick(t *testing.T) {
 		t.Fatalf("expected FocusSearch and SelectedIdx=0 preserved after passive mouse motion, got focus=%v idx=%d", s.Focus, s.SelectedIdx)
 	}
 
-	// Hovering over suggestion row 1 highlights it; left click submits it directly.
+	// Hovering over suggestion row 1 (even near the right edge of the full-width panel) highlights it; left click submits it directly.
 	sideW := s.sidebarWidth()
-	s, _ = s.Update(tea.MouseMsg{X: sideW + 4, Y: 5, Action: tea.MouseActionMotion})
+	s, _ = s.Update(tea.MouseMsg{X: s.Width - 3, Y: 5, Action: tea.MouseActionMotion})
 	if s.SuggestIdx != 1 {
-		t.Fatalf("expected SuggestIdx=1 on suggestion hover, got %d", s.SuggestIdx)
+		t.Fatalf("expected SuggestIdx=1 on suggestion hover near right edge, got %d", s.SuggestIdx)
 	}
 	s, cmd := s.Update(tea.MouseMsg{
 		X:      sideW + 4,
@@ -3234,10 +3236,11 @@ func TestPlayerBarClickLikeAndSaveButtons(t *testing.T) {
 	s.PlayerStatus = player.Status{IsRunning: true, Title: videos[1].Title}
 	s.CurrentPlaying = videos[1]
 
-	// Click [♡] at x=47, y=Height-2 -> likes CurrentPlaying (vidPlay2222) into TabLiked.
+	// Click Like button -> likes CurrentPlaying (vidPlay2222) into TabLiked.
+	lay := s.PlayerBarLayout()
 	var cmd tea.Cmd
 	s, cmd = s.Update(tea.MouseMsg{
-		X:      47,
+		X:      (lay.LikeX0 + lay.LikeX1) / 2,
 		Y:      s.Height - 2,
 		Button: tea.MouseButtonLeft,
 		Action: tea.MouseActionPress,
@@ -3256,9 +3259,9 @@ func TestPlayerBarClickLikeAndSaveButtons(t *testing.T) {
 		t.Fatalf("expected ToggleLiked persisted vidPlay2222, got %+v err=%v", likedInStore, err)
 	}
 
-	// Click [◷] at x=51, y=Height-2 -> saves CurrentPlaying (vidPlay2222) into TabWatchLater.
+	// Click Save button -> saves CurrentPlaying (vidPlay2222) into TabWatchLater.
 	s, cmd = s.Update(tea.MouseMsg{
-		X:      51,
+		X:      (lay.SaveX0 + lay.SaveX1) / 2,
 		Y:      s.Height - 2,
 		Button: tea.MouseButtonLeft,
 		Action: tea.MouseActionPress,
@@ -3277,10 +3280,11 @@ func TestPlayerBarClickLikeAndSaveButtons(t *testing.T) {
 		t.Fatalf("expected ToggleSaved persisted vidPlay2222, got %+v err=%v", savedInStore, err)
 	}
 
-	// Fallback: when CurrentPlaying.ID is empty, clicking [♡] targets SelectedVideo (vidOne11111).
+	// Fallback: when CurrentPlaying.ID is empty, clicking Like button targets SelectedVideo (vidOne11111).
 	s.CurrentPlaying = model.Video{}
+	lay = s.PlayerBarLayout()
 	s, cmd = s.Update(tea.MouseMsg{
-		X:      47,
+		X:      (lay.LikeX0 + lay.LikeX1) / 2,
 		Y:      s.Height - 2,
 		Button: tea.MouseButtonLeft,
 		Action: tea.MouseActionPress,
@@ -3390,5 +3394,636 @@ func TestTabMusicHidesLiveStationsOnDefaultChip(t *testing.T) {
 	visLive := s.VisibleItems()
 	if len(visLive) != 1 || visLive[0].ID != "live2222222" {
 		t.Fatalf("TabMusic En vivo chip visible = %+v, want live2222222", visLive)
+	}
+}
+
+func TestHoverAndSingleClickBottomRowWithTwoVisibleRowsDoesNotScrollAndPlays(t *testing.T) {
+	s, _, eng, _ := newTestState()
+	defer s.Close()
+
+	// 120x36 with active player bar -> bodyH=25, cardH=15:
+	// row 0 (top) occupies 15 rows, row 1 (bottom) occupies 10 rows (>= cardH/2).
+	s, _ = s.Update(tea.WindowSizeMsg{Width: 120, Height: 36})
+	s.PlayerStatus = player.Status{IsRunning: true, Title: "Playing"}
+
+	cols := s.GridCols()
+	videos := make([]model.Video, 3*cols)
+	for i := range videos {
+		videos[i] = model.Video{
+			ID:       fmt.Sprintf("rowvid%02d", i),
+			Title:    fmt.Sprintf("Row Video %02d", i),
+			Channel:  "Chan",
+			Duration: "04:00",
+		}
+	}
+	s, _ = s.Update(FeedLoadedMsg{Tab: model.TabHome, Videos: videos})
+
+	if vis := s.VisibleGridRows(); vis != 1 {
+		t.Fatalf("VisibleGridRows = %d, want 1 at 120x36 with player bar", vis)
+	}
+
+	bottomX := s.mainOriginX() + 2
+	bottomY := 5 + s.gridCardHeight() + 2 // inside row 1 ("la de abajo")
+	wantIdx := cols
+
+	// Hovering row 1 selects it without scrolling.
+	s, _ = s.Update(tea.MouseMsg{X: bottomX, Y: bottomY, Action: tea.MouseActionMotion})
+	if s.SelectedIdx != wantIdx {
+		t.Fatalf("hover on bottom row SelectedIdx = %d, want %d", s.SelectedIdx, wantIdx)
+	}
+	if s.ScrollOffset != 0 {
+		t.Fatalf("hover on bottom row mutated ScrollOffset = %d, want 0", s.ScrollOffset)
+	}
+
+	// Single click on row 1 plays it immediately without scrolling.
+	var cmd tea.Cmd
+	s, cmd = s.Update(tea.MouseMsg{
+		X:      bottomX,
+		Y:      bottomY,
+		Button: tea.MouseButtonLeft,
+		Action: tea.MouseActionPress,
+	})
+	if s.ScrollOffset != 0 {
+		t.Fatalf("click on bottom row mutated ScrollOffset = %d, want 0", s.ScrollOffset)
+	}
+	if !s.PlayLoading || s.PlayLoadingTitle != videos[wantIdx].Title {
+		t.Fatalf("expected single click on hovered bottom row to play %q, got loading=%v title=%q",
+			videos[wantIdx].Title, s.PlayLoading, s.PlayLoadingTitle)
+	}
+	for _, m := range collectNonTickMsgs(cmd, 150*time.Millisecond) {
+		s, _ = s.Update(m)
+	}
+	playedTarget := false
+	for _, c := range eng.Calls() {
+		if c.Method == "Play" && c.Video.ID == videos[wantIdx].ID {
+			playedTarget = true
+			break
+		}
+	}
+	if !playedTarget {
+		t.Fatalf("expected Play(%s), got calls=%+v", videos[wantIdx].ID, eng.Calls())
+	}
+}
+
+func TestApp_AutoplayTrack3PrevGoesToTrack2ThenTrack1NeverSearchResults(t *testing.T) {
+	searchVideos := []model.Video{
+		{ID: "search00001", Title: "Signos", Channel: "Soda Stereo"},
+		{ID: "search00002", Title: "Segundo del Buscador", Channel: "Otro Artista"},
+		{ID: "search00003", Title: "Tercero del Buscador", Channel: "Otro Artista"},
+	}
+	eng := player.NewFakeEngine()
+	eng.SetPlaylist([]player.PlaylistItem{
+		{Index: 0, Title: "Soda Stereo - Signos", Filename: "https://www.youtube.com/watch?v=search00001", Current: true},
+		{Index: 1, Title: "Gustavo Cerati - Adiós", Filename: "https://www.youtube.com/watch?v=adios000002"},
+		{Index: 2, Title: "Soda Stereo - De Música Ligera", Filename: "https://www.youtube.com/watch?v=ligera00003"},
+	})
+	cat := &catalog.FakeCatalog{
+		Feeds: map[model.Tab][]model.Video{model.TabHome: searchVideos},
+	}
+	st := store.NewFakeStore()
+	s := NewState(Dependencies{Catalog: cat, Engine: eng, Store: st})
+	defer s.Close()
+
+	s, _ = s.Update(FeedLoadedMsg{Tab: model.TabHome, Videos: searchVideos})
+	// Select 2nd search result or 1st and play Signos -> in bug, Prev used search index!
+	s.SetSelection(0)
+	var cmd tea.Cmd
+	s, cmd = s.PlaySelected("auto")
+	for _, m := range collectNonTickMsgs(cmd, 100*time.Millisecond) {
+		s, _ = s.Update(m)
+	}
+
+	// Simulate mpv auto-advancing naturally: Track 0 -> Track 1 ("Adiós") -> Track 2 ("De Música Ligera").
+	_ = eng.Next(context.Background())
+	s, _ = s.Update(PlayerStatusMsg{Status: eng.Status()})
+	if s.CurrentPlaying.ID != "adios000002" {
+		t.Fatalf("expected CurrentPlaying updated to adios000002 on autoplay, got %q", s.CurrentPlaying.ID)
+	}
+	_ = eng.Next(context.Background())
+	s, _ = s.Update(PlayerStatusMsg{Status: eng.Status()})
+	if s.CurrentPlaying.ID != "ligera00003" {
+		t.Fatalf("expected CurrentPlaying updated to ligera00003, got %q", s.CurrentPlaying.ID)
+	}
+
+	// User presses Prev from Track 3 -> MUST delegate to mpv Prev and land on Track 2 ("Adiós"), NOT Track 1 or search[1].
+	s, cmd = s.PrevTrack()
+	for _, m := range collectNonTickMsgs(cmd, 100*time.Millisecond) {
+		s, _ = s.Update(m)
+	}
+	s, _ = s.Update(PlayerStatusMsg{Status: eng.Status()})
+	if eng.Status().PlaylistPos != 1 || s.CurrentPlaying.ID != "adios000002" {
+		t.Fatalf("after 1st Prev from Track 3: pos=%d current=%q, want pos=1 current=adios000002",
+			eng.Status().PlaylistPos, s.CurrentPlaying.ID)
+	}
+
+	// User presses Prev again from Track 2 -> MUST land on Track 1 ("Signos").
+	s, cmd = s.PrevTrack()
+	for _, m := range collectNonTickMsgs(cmd, 100*time.Millisecond) {
+		s, _ = s.Update(m)
+	}
+	s, _ = s.Update(PlayerStatusMsg{Status: eng.Status()})
+	if eng.Status().PlaylistPos != 0 || s.CurrentPlaying.ID != "search00001" {
+		t.Fatalf("after 2nd Prev from Track 2: pos=%d current=%q, want pos=0 current=search00001",
+			eng.Status().PlaylistPos, s.CurrentPlaying.ID)
+	}
+
+	// Pressing Prev at Track 1 (PlaylistPos == 0, empty PlayStack) must seek to 0, NEVER play search00002.
+	s.SetSelection(2)
+	s, cmd = s.PrevTrack()
+	for _, m := range collectNonTickMsgs(cmd, 100*time.Millisecond) {
+		s, _ = s.Update(m)
+	}
+	calls := eng.Calls()
+	last := calls[len(calls)-1]
+	if last.Method != "SeekAbsolute" || last.Delta != 0 {
+		t.Fatalf("expected Prev at PlaylistPos=0 to SeekAbsolute(0), got %+v", calls)
+	}
+}
+
+func TestApp_ManualPlayAfterAutoplayPreservesRealPreviousTrackInPlayStack(t *testing.T) {
+	videos := []model.Video{
+		{ID: "signos11111", Title: "Signos", Channel: "Soda Stereo"},
+		{ID: "persiana222", Title: "Persiana Americana", Channel: "Soda Stereo"},
+	}
+	eng := player.NewFakeEngine()
+	st := store.NewFakeStore()
+	s := NewState(Dependencies{Catalog: &catalog.FakeCatalog{}, Engine: eng, Store: st})
+	defer s.Close()
+
+	s, _ = s.Update(FeedLoadedMsg{Tab: model.TabHome, Videos: videos})
+	s.SetSelection(0)
+	s, cmd := s.PlaySelected("auto")
+	for _, m := range collectNonTickMsgs(cmd, 100*time.Millisecond) {
+		s, _ = s.Update(m)
+	}
+
+	// Autoplay moves naturally to "Adiós" while PlaylistCount=3, PlaylistPos=1.
+	s, _ = s.Update(PlayerStatusMsg{Status: player.Status{
+		IsRunning:     true,
+		Title:         "Gustavo Cerati - Adiós",
+		VideoID:       "adios000002",
+		PlaylistCount: 3,
+		PlaylistPos:   1,
+	}})
+
+	// Now user manually plays "Persiana Americana".
+	s.SetSelection(1)
+	s, cmd = s.PlaySelected("auto")
+	for _, m := range collectNonTickMsgs(cmd, 100*time.Millisecond) {
+		s, _ = s.Update(m)
+	}
+	if len(s.PlayStack) == 0 || s.PlayStack[len(s.PlayStack)-1].ID != "adios000002" {
+		t.Fatalf("expected manual Play after autoplay to push real previous track adios000002 to PlayStack, got %+v", s.PlayStack)
+	}
+}
+
+func TestApp_NextTrackUsesLiveMPVPlaylistBeforeGridFallback(t *testing.T) {
+	grid := []model.Video{
+		{ID: "grid1111111", Title: "Grid One"},
+		{ID: "grid2222222", Title: "Grid Two"},
+	}
+	eng := player.NewFakeEngine()
+	eng.SetPlaylist([]player.PlaylistItem{
+		{Index: 0, Title: "Grid One", Filename: "https://www.youtube.com/watch?v=grid1111111", Current: true},
+		{Index: 1, Title: "Queued Priority Track", Filename: "https://www.youtube.com/watch?v=queued99999"},
+	})
+	s := NewState(Dependencies{Catalog: &catalog.FakeCatalog{}, Engine: eng, Store: store.NewFakeStore()})
+	defer s.Close()
+
+	s, _ = s.Update(FeedLoadedMsg{Tab: model.TabHome, Videos: grid})
+	s.PlayerStatus = player.Status{
+		IsRunning:     true,
+		Title:         "Grid One",
+		VideoID:       "grid1111111",
+		PlaylistCount: 2,
+		PlaylistPos:   0,
+	}
+	s, cmd := s.NextTrack()
+	for _, m := range collectNonTickMsgs(cmd, 100*time.Millisecond) {
+		s, _ = s.Update(m)
+	}
+	calls := eng.Calls()
+	if len(calls) != 1 || calls[0].Method != "Next" {
+		t.Fatalf("expected NextTrack with live multi-track playlist to delegate to Engine.Next, got calls=%+v", calls)
+	}
+	if eng.Status().Title != "Queued Priority Track" {
+		t.Fatalf("expected fake playlist Next to advance to Queued Priority Track, got %q", eng.Status().Title)
+	}
+}
+
+func TestApp_PlayerBarNerdFontSubscribeAndQueueDrawerClick(t *testing.T) {
+	eng := player.NewFakeEngine()
+	eng.SetPlaylist([]player.PlaylistItem{
+		{Index: 0, VideoID: "playVid0001", Title: "Soda Stereo - Signos", Artist: "Soda Stereo", Duration: "05:17", Filename: "https://www.youtube.com/watch?v=playVid0001", Current: true},
+		{Index: 1, VideoID: "playVid0002", Title: "Gustavo Cerati - Adiós", Artist: "Gustavo Cerati", Duration: "03:56", Filename: "https://www.youtube.com/watch?v=playVid0002"},
+	})
+	st := store.NewFakeStore()
+	s := NewState(Dependencies{Catalog: &catalog.FakeCatalog{}, Engine: eng, Store: st})
+	defer s.Close()
+	s.Width, s.Height = 140, 40
+
+	s.CurrentPlaying = model.Video{ID: "playVid0001", Title: "Signos", Channel: "Soda Stereo"}
+	s.PlayerStatus = player.Status{IsRunning: true, Title: "Signos", VideoID: "playVid0001", PlaylistCount: 2, PlaylistPos: 0}
+
+	lay := s.PlayerBarLayout()
+	var cmd tea.Cmd
+	// Click Subscribe button in Nerd Font player bar -> subscribes active track channel.
+	s, cmd = s.Update(tea.MouseMsg{
+		X:      (lay.SubX0 + lay.SubX1) / 2,
+		Y:      s.Height - 2,
+		Button: tea.MouseButtonLeft,
+		Action: tea.MouseActionPress,
+	})
+	for _, m := range collectNonTickMsgs(cmd, 150*time.Millisecond) {
+		s, _ = s.Update(m)
+	}
+	if !s.IsActiveSubscribed() {
+		t.Fatalf("expected active track channel Soda Stereo to be subscribed, subs=%v", s.Subscriptions)
+	}
+
+	// Clear toast so Row 1 Queue badge is visible, then click Queue badge to open docked drawer.
+	s.Toast = ""
+	lay = s.PlayerBarLayout()
+	if !lay.HasQueue {
+		t.Fatal("expected Row 1 Queue badge to be clickable when Toast is empty")
+	}
+	s, cmd = s.Update(tea.MouseMsg{
+		X:      (lay.QueueX0 + lay.QueueX1) / 2,
+		Y:      s.Height - 4,
+		Button: tea.MouseButtonLeft,
+		Action: tea.MouseActionPress,
+	})
+	for _, m := range collectNonTickMsgs(cmd, 150*time.Millisecond) {
+		s, _ = s.Update(m)
+	}
+	if !s.ShowQueue || s.QueueSideWidth() == 0 {
+		t.Fatalf("expected docked Queue drawer open at width 140, show=%v sideW=%d", s.ShowQueue, s.QueueSideWidth())
+	}
+
+	// Click item #1 in the docked Queue panel -> plays index 1 while keeping drawer open.
+	_, _, panelX, topY, panelW, _ := s.QueueSideWindow()
+	s, cmd = s.Update(tea.MouseMsg{
+		X:      panelX + 4,
+		Y:      topY + 3 + 4, // 2nd item (index 1)
+		Button: tea.MouseButtonLeft,
+		Action: tea.MouseActionPress,
+	})
+	for _, m := range collectNonTickMsgs(cmd, 150*time.Millisecond) {
+		s, _ = s.Update(m)
+	}
+	if !s.ShowQueue {
+		t.Fatal("expected docked Queue drawer to stay open after clicking a track inside it")
+	}
+	foundIdx1 := false
+	for _, c := range eng.Calls() {
+		if c.Method == "PlayPlaylistIndex" && c.Seconds == 1 {
+			foundIdx1 = true
+		}
+	}
+	if !foundIdx1 {
+		t.Fatalf("expected PlayPlaylistIndex(1), got calls=%+v", eng.Calls())
+	}
+
+	// Click [✕] in docked Queue header closes drawer.
+	s, _ = s.Update(tea.MouseMsg{
+		X:      panelX + panelW - 3,
+		Y:      topY + 1,
+		Button: tea.MouseButtonLeft,
+		Action: tea.MouseActionPress,
+	})
+	if s.ShowQueue {
+		t.Fatal("expected clicking [✕] in Queue drawer header to close ShowQueue")
+	}
+}
+
+type feedbackSpyEngine struct {
+	*player.FakeEngine
+	mu        sync.Mutex
+	skips     []model.Video
+	completes []model.Video
+}
+
+func (e *feedbackSpyEngine) RecordFastSkip(v model.Video) {
+	e.mu.Lock()
+	e.skips = append(e.skips, v)
+	e.mu.Unlock()
+}
+
+func (e *feedbackSpyEngine) RecordCompletedTrack(v model.Video) {
+	e.mu.Lock()
+	e.completes = append(e.completes, v)
+	e.mu.Unlock()
+}
+
+func TestApp_FastSkipTriggersSessionFeedbackAndNotDoubleTap(t *testing.T) {
+	eng := &feedbackSpyEngine{FakeEngine: player.NewFakeEngine()}
+	eng.SetPlaylist([]player.PlaylistItem{
+		{Index: 0, VideoID: "fast0000001", Title: "Skip Me", Filename: "fast0000001", Current: true},
+		{Index: 1, VideoID: "fast0000002", Title: "Accidental Double Tap", Filename: "fast0000002"},
+		{Index: 2, VideoID: "fast0000003", Title: "Full Listen", Filename: "fast0000003"},
+		{Index: 3, VideoID: "fast0000004", Title: "Next", Filename: "fast0000004"},
+	})
+	stats := store.NewListeningStats(t.TempDir())
+	s := NewState(Dependencies{Catalog: &catalog.FakeCatalog{}, Engine: eng, Store: store.NewFakeStore(), ListeningStats: stats})
+	defer s.Close()
+
+	// Track 0 played 10s (in [3s, 25s]) -> NextTrack MUST trigger RecordFastSkip.
+	s.CurrentPlaying = model.Video{ID: "fast0000001", Title: "Skip Me", Channel: "Bad Artist"}
+	s.PlayerStatus = player.Status{IsRunning: true, Title: "Skip Me", TimePos: 10, Duration: 240, PlaylistCount: 4, PlaylistPos: 0}
+	s, _ = s.NextTrack()
+	if len(eng.skips) != 1 || eng.skips[0].ID != "fast0000001" {
+		t.Fatalf("expected RecordFastSkip for 10s listen, got skips=%+v", eng.skips)
+	}
+
+	// Track 1 played only 1.2s (accidental double tap < 3s) -> MUST NOT trigger RecordFastSkip or RecordCompletedTrack.
+	s.CurrentPlaying = model.Video{ID: "fast0000002", Title: "Accidental Double Tap", Channel: "Neutral"}
+	s.PlayerStatus = player.Status{IsRunning: true, Title: "Accidental Double Tap", TimePos: 1.2, Duration: 240, PlaylistCount: 4, PlaylistPos: 1}
+	s, _ = s.NextTrack()
+	if len(eng.skips) != 1 || len(eng.completes) != 0 {
+		t.Fatalf("expected <3s double-tap ignored, got skips=%+v completes=%+v", eng.skips, eng.completes)
+	}
+
+	// Track 2 played 180s (>= 60s) -> NextTrack MUST trigger RecordCompletedTrack.
+	s.CurrentPlaying = model.Video{ID: "fast0000003", Title: "Full Listen", Channel: "Good Artist"}
+	s.PlayerStatus = player.Status{IsRunning: true, Title: "Full Listen", TimePos: 180, Duration: 240, PlaylistCount: 4, PlaylistPos: 2}
+	s, _ = s.NextTrack()
+	if len(eng.completes) != 1 || eng.completes[0].ID != "fast0000003" {
+		t.Fatalf("expected RecordCompletedTrack for 180s listen, got completes=%+v", eng.completes)
+	}
+}
+
+func TestApp_QueueScrollMouseHoverKeysSyncAndGridGapHover(t *testing.T) {
+	t.Run("queue_scroll_mouse_hover_keys_and_click_sync", func(t *testing.T) {
+		eng := player.NewFakeEngine()
+		playlist := make([]player.PlaylistItem, 20)
+		for i := range playlist {
+			playlist[i] = player.PlaylistItem{
+				Index:   i,
+				VideoID: fmt.Sprintf("qvid%07d", i),
+				Title:   fmt.Sprintf("Track %02d", i),
+				Artist:  "Artist",
+				Current: i == 0,
+			}
+		}
+		eng.SetPlaylist(playlist)
+		s := NewState(Dependencies{Catalog: &catalog.FakeCatalog{}, Engine: eng, Store: store.NewFakeStore()})
+		defer s.Close()
+		s.Width, s.Height = 156, 45
+		s.PlayerStatus = player.Status{IsRunning: true, Title: "Track 00", PlaylistCount: 20, PlaylistPos: 0}
+
+		s, cmd := s.OpenQueue()
+		for _, m := range collectNonTickMsgs(cmd, 150*time.Millisecond) {
+			s, _ = s.Update(m)
+		}
+		if !s.ShowQueue || s.QueueSideWidth() == 0 {
+			t.Fatalf("expected docked Queue drawer open, show=%v sideW=%d", s.ShowQueue, s.QueueSideWidth())
+		}
+
+		// Scroll down with wheel inside drawer -> QueueScroll advances independently from 0.
+		_, _, panelX, topY, _, _ := s.QueueSideWindow()
+		for i := 0; i < 4; i++ {
+			s, _ = s.Update(tea.MouseMsg{X: panelX + 4, Y: topY + 4, Button: tea.MouseButtonWheelDown})
+		}
+		if s.QueueScroll != 4 {
+			t.Fatalf("expected QueueScroll=4 after 4 wheel downs, got %d", s.QueueScroll)
+		}
+		startBeforeHover, _, _, _, _, _ := s.QueueSideWindow()
+		if startBeforeHover != 4 {
+			t.Fatalf("expected QueueSideWindow start=4, got %d", startBeforeHover)
+		}
+
+		// Hover upper visible slot (slot 0 -> item 4): QueueScroll MUST NOT jump, QueueIdx == QueueScroll + 0.
+		s, _ = s.Update(tea.MouseMsg{X: panelX + 4, Y: topY + 3, Action: tea.MouseActionMotion})
+		if s.QueueScroll != 4 || s.QueueIdx != 4 {
+			t.Fatalf("after hover slot 0: scroll=%d idx=%d, want (4, 4)", s.QueueScroll, s.QueueIdx)
+		}
+
+		// Hover slot 1 (item 5), then press 'k': QueueIdx moves to 4 while QueueScroll remains 4.
+		s, _ = s.Update(tea.MouseMsg{X: panelX + 4, Y: topY + 3 + 4, Action: tea.MouseActionMotion})
+		if s.QueueIdx != 5 || s.QueueScroll != 4 {
+			t.Fatalf("after hover slot 1: scroll=%d idx=%d, want (4, 5)", s.QueueScroll, s.QueueIdx)
+		}
+		s, _ = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
+		if s.QueueIdx != 4 || s.QueueScroll != 4 {
+			t.Fatalf("after 'k': scroll=%d idx=%d, want (4, 4)", s.QueueScroll, s.QueueIdx)
+		}
+		// Another 'k' crosses top edge -> QueueScroll decrements cleanly to 3.
+		s, _ = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
+		if s.QueueIdx != 3 || s.QueueScroll != 3 {
+			t.Fatalf("after crossing top edge with 'k': scroll=%d idx=%d, want (3, 3)", s.QueueScroll, s.QueueIdx)
+		}
+
+		// Clicking slot 2 (item 5) optimistically marks item 5 Current and preserves QueueScroll.
+		s, cmd = s.Update(tea.MouseMsg{
+			X:      panelX + 4,
+			Y:      topY + 3 + 2*4,
+			Button: tea.MouseButtonLeft,
+			Action: tea.MouseActionPress,
+		})
+		if s.QueueScroll != 3 || s.QueueIdx != 5 || !s.MPVPlaylist[5].Current || s.MPVPlaylist[0].Current {
+			t.Fatalf("after click slot 2: scroll=%d idx=%d cur5=%v cur0=%v", s.QueueScroll, s.QueueIdx, s.MPVPlaylist[5].Current, s.MPVPlaylist[0].Current)
+		}
+		_ = collectNonTickMsgs(cmd, 150*time.Millisecond)
+	})
+
+	t.Run("grid_gap_hover_and_suggestion_dismiss_click", func(t *testing.T) {
+		s, _, _, _ := newTestState()
+		defer s.Close()
+		s.Width, s.Height = 120, 38
+		videos := make([]model.Video, 8)
+		for i := range videos {
+			videos[i] = model.Video{ID: fmt.Sprintf("g%02d", i), Title: fmt.Sprintf("Grid %02d", i), Duration: "03:00"}
+		}
+		s, _ = s.Update(FeedLoadedMsg{Tab: model.TabHome, Videos: videos})
+
+		// Hovering inside the 2-col gap between col 0 and col 1 must NOT snap selection to col 1.
+		gapX := s.mainOriginX() + s.gridCardWidth()
+		s, _ = s.Update(tea.MouseMsg{X: gapX, Y: 7, Action: tea.MouseActionMotion})
+		if s.SelectedIdx != 0 {
+			t.Fatalf("expected hovering in card gap to keep SelectedIdx=0, got %d", s.SelectedIdx)
+		}
+
+		// Clicking outside an open suggestion dropdown dismisses search focus cleanly without misclicking a card.
+		s.Focus = FocusSearch
+		s.SearchDraft = "pink"
+		s.SearchSuggestions = []string{"pink floyd live", "pink floyd pulse"}
+		s, _ = s.Update(tea.MouseMsg{
+			X:      s.mainOriginX() + s.gridCardWidth() + 4,
+			Y:      15,
+			Button: tea.MouseButtonLeft,
+			Action: tea.MouseActionPress,
+		})
+		if s.Focus != FocusMain || len(s.SearchSuggestions) != 0 || s.SelectedIdx != 0 {
+			t.Fatalf("expected outside click to dismiss suggestions cleanly without changing SelectedIdx, focus=%v sugs=%d idx=%d",
+				s.Focus, len(s.SearchSuggestions), s.SelectedIdx)
+		}
+	})
+}
+
+func TestApp_MouseMotionFilterSkipsRedundantEvents(t *testing.T) {
+	s, _, _, _ := newTestState()
+	defer s.Close()
+	s.Width, s.Height = 140, 40
+	videos := make([]model.Video, 8)
+	for i := range videos {
+		videos[i] = model.Video{ID: fmt.Sprintf("f%02d", i), Title: fmt.Sprintf("Video %02d", i), Duration: "03:00"}
+	}
+	s, _ = s.Update(FeedLoadedMsg{Tab: model.TabHome, Videos: videos})
+
+	filter := NewBubbleTeaProgramFilter(s)
+
+	// Motion within already-selected card 0 must be dropped (nil) -> zero redundant redraws.
+	inCard0 := tea.MouseMsg{X: s.mainOriginX() + 3, Y: 7, Action: tea.MouseActionMotion}
+	if got := filter(nil, inCard0); got != nil {
+		t.Fatalf("expected redundant motion inside card 0 dropped, got %#v", got)
+	}
+
+	// Motion over empty top bar or gap between cards must also be dropped.
+	inGap := tea.MouseMsg{X: s.mainOriginX() + s.gridCardWidth(), Y: 7, Action: tea.MouseActionMotion}
+	if got := filter(nil, inGap); got != nil {
+		t.Fatalf("expected motion over card gap dropped, got %#v", got)
+	}
+
+	// Motion moving into card 1 must pass through so hover selection updates immediately.
+	inCard1 := tea.MouseMsg{X: s.mainOriginX() + s.gridCardWidth() + 4, Y: 7, Action: tea.MouseActionMotion}
+	if got := filter(nil, inCard1); got == nil {
+		t.Fatal("expected motion crossing into card 1 to pass filter")
+	}
+
+	// Left click must always pass filter.
+	click := tea.MouseMsg{X: s.mainOriginX() + 3, Y: 7, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress}
+	if got := filter(nil, click); got == nil {
+		t.Fatal("expected left click to pass filter")
+	}
+}
+
+func TestApp_SubscriptionLabelsHydrationAndChannelClick(t *testing.T) {
+	cat := &channelSpyCatalog{
+		FakeCatalog: &catalog.FakeCatalog{
+			Feeds: map[model.Tab][]model.Video{
+				model.TabHome: {
+					{ID: "subv0000001", Title: "De Música Ligera", Channel: "Soda Stereo", ChannelID: "UC1234567890123456789012", Duration: "05:00"},
+				},
+			},
+		},
+		channelVideos: []model.Video{
+			{ID: "chv1", Title: "Signos", Channel: "Soda Stereo", ChannelID: "UC1234567890123456789012"},
+		},
+	}
+	st := store.NewFakeStore()
+	st.Subs = []string{"UC1234567890123456789012"} // existing raw UC... entry without label
+
+	s := NewState(Dependencies{Catalog: cat, Engine: player.NewFakeEngine(), Store: st})
+	defer s.Close()
+	s.Width, s.Height = 156, 45
+
+	s, _ = s.Update(SavedLoadedMsg{Subs: st.Subs})
+	s, cmd := s.Update(FeedLoadedMsg{Tab: model.TabHome, Videos: cat.Feeds[model.TabHome]})
+	for _, m := range collectNonTickMsgs(cmd, 150*time.Millisecond) {
+		s, _ = s.Update(m)
+	}
+
+	if got := s.SubscriptionDisplayName("UC1234567890123456789012"); got != "Soda Stereo" {
+		t.Fatalf("SubscriptionDisplayName = %q, want Soda Stereo", got)
+	}
+	labels, _ := st.SubscriptionLabels(context.Background())
+	if labels["UC1234567890123456789012"] != "Soda Stereo" {
+		t.Fatalf("expected fake store hydrated with label, got %+v", labels)
+	}
+
+	// IsActiveSubscribed matches even when CurrentPlaying only carries the channel name.
+	s.CurrentPlaying = model.Video{ID: "subv0000001", Title: "De Música Ligera", Channel: "Soda Stereo"}
+	if !s.IsActiveSubscribed() {
+		t.Fatal("expected IsActiveSubscribed to match UC... entry via SubscriptionLabels")
+	}
+
+	// Clicking row y=17 in full sidebar opens the channel view directly with human ChannelTitle.
+	s, cmd = s.Update(tea.MouseMsg{X: 5, Y: 17, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	for _, m := range collectNonTickMsgs(cmd, 150*time.Millisecond) {
+		s, _ = s.Update(m)
+	}
+	if s.View != ViewChannel || s.ChannelTitle != "Soda Stereo" || cat.lastChannel != "Soda Stereo" {
+		t.Fatalf("expected channel view opened for Soda Stereo, got view=%v title=%q last=%q", s.View, s.ChannelTitle, cat.lastChannel)
+	}
+}
+
+func TestApp_LiveQueueDrawerRefreshOnPlaylistGrowth(t *testing.T) {
+	eng := player.NewFakeEngine()
+	eng.SetPlaylist([]player.PlaylistItem{
+		{Index: 0, VideoID: "q0", Title: "Track 0", Current: true},
+	})
+	s := NewState(Dependencies{Catalog: &catalog.FakeCatalog{}, Engine: eng, Store: store.NewFakeStore()})
+	defer s.Close()
+	s.Width, s.Height = 140, 40
+	s.PlayerStatus = player.Status{IsRunning: true, Title: "Track 0", PlaylistCount: 1, PlaylistPos: 0}
+
+	s, cmd := s.OpenQueue()
+	for _, m := range collectNonTickMsgs(cmd, 150*time.Millisecond) {
+		s, _ = s.Update(m)
+	}
+	if len(s.MPVPlaylist) != 1 {
+		t.Fatalf("initial MPVPlaylist len = %d, want 1", len(s.MPVPlaylist))
+	}
+
+	// Background radio expands playlist to 3 items and emits PlayerStatusMsg -> open Queue drawer refreshes!
+	eng.SetPlaylist([]player.PlaylistItem{
+		{Index: 0, VideoID: "q0", Title: "Track 0", Current: true},
+		{Index: 1, VideoID: "q1", Title: "Track 1"},
+		{Index: 2, VideoID: "q2", Title: "Track 2"},
+	})
+	s, cmd = s.Update(PlayerStatusMsg{Status: player.Status{IsRunning: true, Title: "Track 0", PlaylistCount: 3, PlaylistPos: 0}})
+	for _, m := range collectNonTickMsgs(cmd, 150*time.Millisecond) {
+		s, _ = s.Update(m)
+	}
+	if len(s.MPVPlaylist) != 3 {
+		t.Fatalf("expected open Queue drawer to auto-refresh to 3 items, got %d", len(s.MPVPlaylist))
+	}
+}
+
+func TestApp_SubscribeActiveUsesLiveTrackNotStalePrevious(t *testing.T) {
+	eng := player.NewFakeEngine()
+	st := store.NewFakeStore()
+	s := NewState(Dependencies{Catalog: &catalog.FakeCatalog{}, Engine: eng, Store: st})
+	defer s.Close()
+
+	// Start with track A (Ramones) active.
+	s.CurrentPlaying = model.Video{ID: "ramones0001", Title: "Ramones - Blitzkrieg Bop", Channel: "Ramones"}
+	s.PlayerStatus = player.Status{
+		IsRunning:   true,
+		VideoID:     "ramones0001",
+		Title:       "Ramones - Blitzkrieg Bop",
+		PlaylistPos: 0,
+	}
+
+	// Simulate mpv advancing VideoID/PlaylistPos to Soda Stereo BEFORE media-title updates
+	// (media-title still carries outgoing "Ramones - Blitzkrieg Bop" on first IPC tick).
+	s, _ = s.Update(PlayerStatusMsg{Status: player.Status{
+		IsRunning:   true,
+		VideoID:     "sodast00002",
+		Title:       "Ramones - Blitzkrieg Bop",
+		PlaylistPos: 1,
+	}})
+	if s.CurrentPlaying.Channel == "Ramones" {
+		t.Fatalf("expected stale Ramones channel not copied onto sodast00002, got %+v", s.CurrentPlaying)
+	}
+
+	// Next IPC tick delivers Soda Stereo's real media-title while VideoID stays sodast00002.
+	s, _ = s.Update(PlayerStatusMsg{Status: player.Status{
+		IsRunning:   true,
+		VideoID:     "sodast00002",
+		Title:       "Soda Stereo - Persiana Americana",
+		PlaylistPos: 1,
+	}})
+	if s.CurrentPlaying.ID != "sodast00002" || !strings.Contains(s.CurrentPlaying.Title, "Soda Stereo") {
+		t.Fatalf("expected CurrentPlaying synced to Soda Stereo, got %+v", s.CurrentPlaying)
+	}
+
+	// Clicking Subscribe must subscribe Soda Stereo and NEVER Ramones.
+	s, cmd := s.ToggleSubscribeActive()
+	for _, m := range collectNonTickMsgs(cmd, 150*time.Millisecond) {
+		s, _ = s.Update(m)
+	}
+	if !slices.Equal(s.Subscriptions, []string{"Soda Stereo"}) {
+		t.Fatalf("Subscriptions = %v, want [Soda Stereo]", s.Subscriptions)
 	}
 }

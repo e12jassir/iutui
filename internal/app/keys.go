@@ -47,11 +47,39 @@ func (s *State) handleKey(msg tea.KeyMsg) (*State, tea.Cmd) {
 		case "j", "down":
 			if len(s.MPVPlaylist) > 0 && s.QueueIdx < len(s.MPVPlaylist)-1 {
 				s.QueueIdx++
+				s.syncQueueScroll()
 			}
 			return s, nil
 		case "k", "up":
 			if s.QueueIdx > 0 {
 				s.QueueIdx--
+				s.syncQueueScroll()
+			}
+			return s, nil
+		case "pgdown", "ctrl+d":
+			if len(s.MPVPlaylist) > 0 {
+				step := max(1, s.queueVisibleCount())
+				s.QueueIdx = min(len(s.MPVPlaylist)-1, s.QueueIdx+step)
+				s.syncQueueScroll()
+			}
+			return s, nil
+		case "pgup", "ctrl+u":
+			if len(s.MPVPlaylist) > 0 {
+				step := max(1, s.queueVisibleCount())
+				s.QueueIdx = max(0, s.QueueIdx-step)
+				s.syncQueueScroll()
+			}
+			return s, nil
+		case "home", "g":
+			if len(s.MPVPlaylist) > 0 {
+				s.QueueIdx = 0
+				s.syncQueueScroll()
+			}
+			return s, nil
+		case "end", "G":
+			if len(s.MPVPlaylist) > 0 {
+				s.QueueIdx = len(s.MPVPlaylist) - 1
+				s.syncQueueScroll()
 			}
 			return s, nil
 		case "enter", " ":
@@ -720,13 +748,9 @@ func (s *State) cycleSidebarTab(delta int) (*State, tea.Cmd) {
 	return s.SwitchTab(tabs[next])
 }
 
-// CycleChip steps through the active view's filter chips.
+// CycleChip steps through the Home view's filter chips.
 func (s *State) CycleChip(delta int) *State {
-	if s.View == ViewSearch {
-		n := len(SearchChips)
-		s.SearchChip = (s.SearchChip + delta + n) % n
-		s.ResultIdx = 0
-		s.ResultScroll = 0
+	if s.View != ViewHome {
 		return s
 	}
 	n := len(HomeChips)

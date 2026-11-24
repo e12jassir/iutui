@@ -28,7 +28,7 @@ const (
 
 var (
 	toastTTL        = 4 * time.Second
-	suggestDebounce = 180 * time.Millisecond
+	suggestDebounce = 100 * time.Millisecond
 )
 
 // FeedLoadedMsg arrives when a catalog feed finishes loading.
@@ -55,10 +55,11 @@ type SearchDoneMsg struct {
 
 // SavedLoadedMsg arrives when saved/liked/history/subscriptions finish loading.
 type SavedLoadedMsg struct {
-	Saved   []model.Video
-	Liked   []model.Video
-	History []model.Video
-	Subs    []string
+	Saved     []model.Video
+	Liked     []model.Video
+	History   []model.Video
+	Subs      []string
+	SubLabels map[string]string
 }
 
 // ToggledSaveMsg arrives after Store.ToggleSaved completes.
@@ -129,6 +130,7 @@ type ChannelLoadedMsg struct {
 
 // SubscriptionToggledMsg arrives when Store toggles a channel subscription.
 type SubscriptionToggledMsg struct {
+	SubRef     string
 	Channel    string
 	Subscribed bool
 	Subs       []string
@@ -212,6 +214,9 @@ func (s *State) Update(msg tea.Msg) (*State, tea.Cmd) {
 		s.Height = msg.Height
 		s.Ready = true
 		s.syncScrollToSelection()
+		if s.ShowQueue {
+			s.syncQueueScroll()
+		}
 		return s, nil
 
 	case FeedLoadedMsg:
@@ -220,12 +225,13 @@ func (s *State) Update(msg tea.Msg) (*State, tea.Cmd) {
 			return s, s.toastCmd(fmt.Sprintf("Error cargando %s: %v", msg.Tab.String(), msg.Err))
 		}
 		s.Feeds[msg.Tab] = msg.Videos
+		labelCmd := s.hydrateSubscriptionLabelsCmd(msg.Videos)
 		if msg.Tab == s.ActiveTab {
 			s.SetSelection(s.SelectedIdx)
 			s.prefetchTop(msg.Videos, 4)
-			return s, s.enrichVisibleMetadataCmd(msg.Videos, s.SelectedIdx)
+			return s, tea.Batch(s.enrichVisibleMetadataCmd(msg.Videos, s.SelectedIdx), labelCmd)
 		}
-		return s, s.enrichVisibleMetadataCmd(msg.Videos, 0)
+		return s, tea.Batch(s.enrichVisibleMetadataCmd(msg.Videos, 0), labelCmd)
 
 	case SearchDoneMsg:
 		if (msg.Seq != 0 && msg.Seq != s.searchSeq) || msg.Query != s.SearchQuery {
@@ -259,6 +265,31 @@ func (s *State) Update(msg tea.Msg) (*State, tea.Cmd) {
 			s.HistoryIDs[v.ID] = true
 		}
 		s.Subscriptions = msg.Subs
+		if len(msg.SubLabels) > 0 {
+			if s.SubscriptionLabels == nil {
+				s.SubscriptionLabels = make(map[string]string, len(msg.SubLabels))
+			}
+			for k, v := range msg.SubLabels {
+				if strings.TrimSpace(v) != "" {
+					s.SubscriptionLabels[k] = v
+				}
+			}
+		}
+		var labelCmds []tea.Cmd
+		if c := s.hydrateSubscriptionLabelsCmd(msg.History); c != nil {
+			labelCmds = append(labelCmds, c)
+		}
+		if c := s.hydrateSubscriptionLabelsCmd(msg.Saved); c != nil {
+			labelCmds = append(labelCmds, c)
+		}
+		if c := s.hydrateSubscriptionLabelsCmd(msg.Liked); c != nil {
+			labelCmds = append(labelCmds, c)
+		}
+		for _, feed := range s.Feeds {
+			if c := s.hydrateSubscriptionLabelsCmd(feed); c != nil {
+				labelCmds = append(labelCmds, c)
+			}
+		}
 		if _, ok := s.Feeds[model.TabHistory]; !ok && len(msg.History) > 0 {
 			s.Feeds[model.TabHistory] = msg.History
 		}
@@ -268,7 +299,9 @@ func (s *State) Update(msg tea.Msg) (*State, tea.Cmd) {
 		if _, ok := s.Feeds[model.TabLiked]; !ok {
 			s.Feeds[model.TabLiked] = append([]model.Video(nil), msg.Liked...)
 		}
-		return s, s.enrichVisibleMetadataCmd(s.VisibleItems(), s.SelectedIdx)
+		s.syncRadioTaste()
+		labelCmds = append(labelCmds, s.enrichVisibleMetadataCmd(s.VisibleItems(), s.SelectedIdx))
+		return s, tea.Batch(labelCmds...)
 
 	case ToggledSaveMsg:
 		if msg.Err != nil {
@@ -292,11 +325,13 @@ func (s *State) Update(msg tea.Msg) (*State, tea.Cmd) {
 		if msg.Liked {
 			s.LikedIDs[msg.Video.ID] = true
 			s.Feeds[model.TabLiked] = prependUniqueVideo(s.Feeds[model.TabLiked], msg.Video)
+			s.syncRadioTaste()
 			s.SetSelection(s.SelectedIdx)
 			return s, s.toastCmd("♥ Me gusta: " + msg.Video.Title)
 		}
 		delete(s.LikedIDs, msg.Video.ID)
 		s.Feeds[model.TabLiked] = removeVideoByID(s.Feeds[model.TabLiked], msg.Video.ID)
+		s.syncRadioTaste()
 		s.SetSelection(s.SelectedIdx)
 		return s, s.toastCmd("Quitado de Me gusta")
 
@@ -375,6 +410,15 @@ func (s *State) Update(msg tea.Msg) (*State, tea.Cmd) {
 		if s.PlayerStatus.IsRunning {
 			s.PlayLoading = false
 		}
+		if s.ShowQueue && !s.queueRefreshPending {
+			if pc, ok := s.Deps.Engine.(playlistController); ok {
+				s.queueRefreshPending = true
+				return s, func() tea.Msg {
+					items, err := pc.Playlist(s.appCtx)
+					return QueueLoadedMsg{Items: items, Err: err}
+				}
+			}
+		}
 		return s, nil
 
 	case DownloadDoneMsg:
@@ -449,7 +493,21 @@ func (s *State) Update(msg tea.Msg) (*State, tea.Cmd) {
 		if msg.Subs != nil {
 			s.Subscriptions = msg.Subs
 		} else {
-			s.Subscriptions = toggleLocalSub(s.Subscriptions, msg.Channel, msg.Subscribed)
+			key := msg.SubRef
+			if key == "" {
+				key = msg.Channel
+			}
+			s.Subscriptions = toggleLocalSub(s.Subscriptions, key, msg.Subscribed)
+		}
+		if msg.SubRef != "" {
+			if s.SubscriptionLabels == nil {
+				s.SubscriptionLabels = make(map[string]string)
+			}
+			if msg.Subscribed && msg.Channel != "" && !strings.EqualFold(msg.Channel, msg.SubRef) {
+				s.SubscriptionLabels[msg.SubRef] = msg.Channel
+			} else if !msg.Subscribed {
+				delete(s.SubscriptionLabels, msg.SubRef)
+			}
 		}
 		delete(s.Feeds, model.TabSubscriptions)
 		var reload tea.Cmd
@@ -528,14 +586,48 @@ func (s *State) Update(msg tea.Msg) (*State, tea.Cmd) {
 		return s, nil
 
 	case QueueLoadedMsg:
+		s.queueRefreshPending = false
 		if msg.Err == nil && len(msg.Items) > 0 {
+			for i := range msg.Items {
+				it := &msg.Items[i]
+				if it.VideoID == "" {
+					it.VideoID = player.ExtractYouTubeID(it.Filename)
+				}
+				if it.VideoID != "" && (it.Artist == "" || it.Duration == "" || it.Title == it.Filename) {
+					v := s.resolvePlayingVideo(it.VideoID, it.Title)
+					if v.Title != "" && (it.Title == "" || it.Title == it.Filename || strings.HasPrefix(it.Title, "http")) {
+						it.Title = v.Title
+					}
+					if it.Artist == "" && v.Channel != "" && !strings.EqualFold(v.Channel, "YouTube") {
+						it.Artist = v.Channel
+					}
+					if it.Duration == "" && v.Duration != "" && v.Duration != "-" {
+						it.Duration = v.Duration
+					}
+				}
+			}
 			s.MPVPlaylist = msg.Items
+			curIdx := -1
+			for i, it := range msg.Items {
+				if it.Current {
+					curIdx = i
+					break
+				}
+			}
+			if s.QueueIdx >= len(s.MPVPlaylist) || (s.QueueIdx == 0 && curIdx > 0) {
+				if curIdx >= 0 {
+					s.QueueIdx = curIdx
+				} else {
+					s.QueueIdx = max(0, len(s.MPVPlaylist)-1)
+				}
+			}
 		} else if len(s.Queue) > 0 {
 			s.MPVPlaylist = s.localQueuePlaylist()
 		}
 		if s.QueueIdx >= len(s.MPVPlaylist) {
 			s.QueueIdx = max(0, len(s.MPVPlaylist)-1)
 		}
+		s.syncQueueScroll()
 		return s, nil
 
 	case LoopToggledMsg:
@@ -567,6 +659,107 @@ func (s *State) Update(msg tea.Msg) (*State, tea.Cmd) {
 			s.PlayLoading = false
 			s.playInFlight = false
 		}
+		var historyCmd tea.Cmd
+		if !msg.Status.IsRunning {
+			s.lastPlaylistPos = -1
+			s.navigatingBack = false
+			s.trackMaxPos = 0
+			s.trackDur = 0
+		} else if !isStaleTitle && !s.playInFlight {
+			prevPosIdx := s.lastPlaylistPos
+			posChanged := msg.Status.PlaylistPos >= 0 && prevPosIdx >= 0 && msg.Status.PlaylistPos != prevPosIdx
+			idChanged := msg.Status.VideoID != "" && s.CurrentPlaying.ID != "" && msg.Status.VideoID != s.CurrentPlaying.ID
+			if idChanged || posChanged {
+				titleHint := msg.Status.Title
+				if idChanged && strings.TrimSpace(titleHint) == strings.TrimSpace(s.CurrentPlaying.Title) {
+					titleHint = ""
+					if msg.Status.PlaylistPos >= 0 && msg.Status.PlaylistPos < len(s.MPVPlaylist) && strings.TrimSpace(s.MPVPlaylist[msg.Status.PlaylistPos].Title) != "" {
+						titleHint = s.MPVPlaylist[msg.Status.PlaylistPos].Title
+					}
+				}
+				nextTrack := s.resolvePlayingVideo(msg.Status.VideoID, titleHint)
+				prevTrack := s.CurrentPlaying
+				movedBackward := s.navigatingBack || (posChanged && msg.Status.PlaylistPos < prevPosIdx)
+				s.navigatingBack = false
+
+				if !movedBackward && prevTrack.ID != "" && prevTrack.ID != nextTrack.ID {
+					pos := max(s.trackMaxPos, prevPos)
+					dur := max(s.trackDur, prevDur)
+					if pos >= 45.0 || (dur > 30 && pos/dur >= 0.45) {
+						if fb, ok := s.Deps.Engine.(radioSessionFeedback); ok {
+							fb.RecordCompletedTrack(prevTrack)
+						}
+						if s.Deps.ListeningStats != nil {
+							stats := s.Deps.ListeningStats
+							recPrev := prevTrack
+							go func() { _ = stats.RecordComplete(recPrev) }()
+						}
+					}
+				}
+				s.trackMaxPos = 0
+				s.trackDur = 0
+
+				if movedBackward {
+					if nextTrack.ID != "" && len(s.PlayStack) > 0 && s.PlayStack[len(s.PlayStack)-1].ID == nextTrack.ID {
+						s.PlayStack = s.PlayStack[:len(s.PlayStack)-1]
+					}
+				} else if prevTrack.ID != "" && prevTrack.ID != nextTrack.ID {
+					s.PlayStack = append(s.PlayStack, prevTrack)
+					if len(s.PlayStack) > 50 {
+						s.PlayStack = s.PlayStack[len(s.PlayStack)-50:]
+					}
+				}
+
+				if nextTrack.ID != "" {
+					s.Queue = removeVideoByID(s.Queue, nextTrack.ID)
+					s.CurrentPlaying = nextTrack
+					s.HistoryIDs[nextTrack.ID] = true
+					if hist, ok := s.Feeds[model.TabHistory]; ok {
+						s.Feeds[model.TabHistory] = prependUniqueVideo(hist, nextTrack)
+					}
+					if s.Deps.Store != nil {
+						rec := nextTrack
+						stats := s.Deps.ListeningStats
+						historyCmd = func() tea.Msg {
+							_ = s.Deps.Store.RecordHistory(s.appCtx, rec)
+							if stats != nil {
+								_ = stats.RecordPlay(rec)
+							}
+							return nil
+						}
+					}
+				} else if msg.Status.Title != "" {
+					s.CurrentPlaying = model.Video{Title: msg.Status.Title}
+				}
+			} else {
+				if curTitle := strings.TrimSpace(msg.Status.Title); curTitle != "" && !strings.EqualFold(strings.TrimSpace(s.CurrentPlaying.Title), curTitle) {
+					resolved := s.resolvePlayingVideo(msg.Status.VideoID, curTitle)
+					if resolved.Title == "" {
+						resolved.Title = curTitle
+					}
+					if resolved.ID == "" {
+						resolved.ID = msg.Status.VideoID
+					}
+					s.CurrentPlaying = resolved
+				}
+				if msg.Status.TimePos > s.trackMaxPos {
+					s.trackMaxPos = msg.Status.TimePos
+				}
+				if msg.Status.Duration > s.trackDur {
+					s.trackDur = msg.Status.Duration
+				}
+			}
+			if msg.Status.PlaylistPos >= 0 {
+				s.lastPlaylistPos = msg.Status.PlaylistPos
+				for i := range s.MPVPlaylist {
+					matchIdx := s.MPVPlaylist[i].Index
+					if matchIdx < 0 {
+						matchIdx = i
+					}
+					s.MPVPlaylist[i].Current = (matchIdx == msg.Status.PlaylistPos)
+				}
+			}
+		}
 		if msg.Status.IsRunning && msg.Status.Title != "" && msg.Status.Title != s.lastTrackTitle {
 			if s.lastTrackTitle != "" && time.Since(s.LastInteractionAt) > 12*time.Second {
 				s.AutoplayTracksSinceInput++
@@ -574,6 +767,19 @@ func (s *State) Update(msg tea.Msg) (*State, tea.Cmd) {
 			s.lastTrackTitle = msg.Status.Title
 		}
 		cmds := []tea.Cmd{s.waitPlayerStatusCmd()}
+		if historyCmd != nil {
+			cmds = append(cmds, historyCmd)
+		}
+		if s.ShowQueue && msg.Status.IsRunning && !isStaleTitle && !s.playInFlight &&
+			msg.Status.PlaylistCount > 0 && msg.Status.PlaylistCount != len(s.MPVPlaylist) && !s.queueRefreshPending {
+			if pc, ok := s.Deps.Engine.(playlistController); ok {
+				s.queueRefreshPending = true
+				cmds = append(cmds, func() tea.Msg {
+					items, err := pc.Playlist(s.appCtx)
+					return QueueLoadedMsg{Items: items, Err: err}
+				})
+			}
+		}
 		if s.ShowLyrics && msg.Status.IsRunning && strings.TrimSpace(msg.Status.Title) != "" && msg.Status.Title != s.LyricsTrack {
 			v := s.findVideoForTitle(msg.Status.Title)
 			dur := msg.Status.Duration

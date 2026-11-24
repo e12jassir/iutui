@@ -16,6 +16,15 @@ type autoplayConfigurer interface {
 	SetAutoplayFallback([]string)
 }
 
+type radioTasteSetter interface {
+	SetRadioTaste(player.TasteProfile)
+}
+
+type radioSessionFeedback interface {
+	RecordFastSkip(model.Video)
+	RecordCompletedTrack(model.Video)
+}
+
 type pauser interface {
 	Pause(ctx context.Context) error
 }
@@ -184,7 +193,20 @@ func (s *State) playVideo(v model.Video, mode string) (*State, tea.Cmd) {
 		}
 	}
 	s.skipHistoryPush = false
+	s.navigatingBack = false
+	s.lastPlaylistPos = -1
+	s.trackMaxPos = 0
+	s.trackDur = 0
+	s.MPVPlaylist = nil
+	s.QueueIdx = 0
+	s.QueueScroll = 0
+	s.queueRefreshPending = false
 	s.CurrentPlaying = v
+	if s.Deps.ListeningStats != nil && v.ID != "" {
+		rec := v
+		stats := s.Deps.ListeningStats
+		go func() { _ = stats.RecordPlay(rec) }()
+	}
 
 	targetVideo := v
 	offlineLocal := false
@@ -225,6 +247,7 @@ func (s *State) playVideo(v model.Video, mode string) (*State, tea.Cmd) {
 	s.PlayLoading = true
 	s.PlayLoadingTitle = v.Title
 	s.PlayerStatus.Title = v.Title
+	s.PlayerStatus.VideoID = model.MixSeedVideoID(v.ID)
 	s.PlayerStatus.TimePos = resumePos
 	s.PlayerStatus.Duration = 0
 	s.RegisterUserActivity()
@@ -234,6 +257,7 @@ func (s *State) playVideo(v model.Video, mode string) (*State, tea.Cmd) {
 		ac.SetAutoplay(s.Autoplay)
 		ac.SetAutoplayFallback(upcomingIDs)
 	}
+	s.syncRadioTaste()
 
 	s.HistoryIDs[v.ID] = true
 	if hist, ok := s.Feeds[model.TabHistory]; ok {
@@ -282,10 +306,16 @@ func (s *State) playVideo(v model.Video, mode string) (*State, tea.Cmd) {
 	return s, tea.Batch(toastCmd, playCmd, lyricsCmd, s.ensureAnimTick())
 }
 
-// NextTrack advances playback to the next queued or visible track, or delegates to mpv playlist-next.
+// NextTrack advances playback through the active mpv playlist, queued tracks, or visible grid.
 func (s *State) NextTrack() (*State, tea.Cmd) {
 	if s.Deps.Engine == nil {
 		return s, nil
+	}
+	s.recordSkipOrCompleteForOutgoing(s.CurrentPlaying)
+	if s.PlayerStatus.IsRunning && s.PlayerStatus.PlaylistCount > 1 &&
+		s.PlayerStatus.PlaylistPos >= 0 && s.PlayerStatus.PlaylistPos+1 < s.PlayerStatus.PlaylistCount {
+		s.navigatingBack = false
+		return s, s.engineCmd(func(ctx context.Context) error { return s.Deps.Engine.Next(ctx) }, "⏭ Siguiente")
 	}
 	if len(s.Queue) > 0 {
 		next := s.Queue[0]
@@ -303,10 +333,14 @@ func (s *State) NextTrack() (*State, tea.Cmd) {
 	return s, s.engineCmd(func(ctx context.Context) error { return s.Deps.Engine.Next(ctx) }, "⏭ Siguiente")
 }
 
-// PrevTrack returns playback to the previous played or visible track, or restarts the active track.
+// PrevTrack returns playback to the previous played track in the active mpv playlist or PlayStack, or restarts the active track.
 func (s *State) PrevTrack() (*State, tea.Cmd) {
 	if s.Deps.Engine == nil {
 		return s, nil
+	}
+	if s.PlayerStatus.IsRunning && s.PlayerStatus.PlaylistCount > 1 && s.PlayerStatus.PlaylistPos > 0 {
+		s.navigatingBack = true
+		return s, s.engineCmd(func(ctx context.Context) error { return s.Deps.Engine.Prev(ctx) }, "⏮ Anterior")
 	}
 	if len(s.PlayStack) > 0 {
 		prev := s.PlayStack[len(s.PlayStack)-1]
@@ -317,15 +351,119 @@ func (s *State) PrevTrack() (*State, tea.Cmd) {
 		s.skipHistoryPush = true
 		return s.playVideo(prev, "auto")
 	}
+	if s.PlayerStatus.IsRunning || s.CurrentPlaying.ID != "" {
+		return s.SeekAbsolutePos(0, "⏮ Inicio de pista")
+	}
 	if items := s.VisibleItems(); len(items) > 1 && s.activeIdx() > 0 {
 		s.SetSelection(s.activeIdx() - 1)
 		s.skipHistoryPush = true
 		return s.PlaySelected("auto")
 	}
-	if s.PlayerStatus.IsRunning {
-		return s.SeekAbsolutePos(0, "⏮ Inicio de pista")
-	}
 	return s, s.engineCmd(func(ctx context.Context) error { return s.Deps.Engine.Prev(ctx) }, "⏮ Anterior")
+}
+
+func (s *State) recordSkipOrCompleteForOutgoing(outgoing model.Video) {
+	if outgoing.ID == "" || !s.PlayerStatus.IsRunning {
+		return
+	}
+	pos := max(s.trackMaxPos, s.PlayerStatus.TimePos)
+	dur := max(s.trackDur, s.PlayerStatus.Duration)
+	isFastSkip := pos >= 3.0 && (pos < 25.0 || (dur > 60 && pos/dur < 0.25))
+	isCompleted := pos >= 60.0 || (dur > 30 && pos/dur >= 0.50)
+
+	if isFastSkip {
+		if fb, ok := s.Deps.Engine.(radioSessionFeedback); ok {
+			fb.RecordFastSkip(outgoing)
+		}
+		if s.Deps.ListeningStats != nil {
+			stats := s.Deps.ListeningStats
+			go func() { _ = stats.RecordSkip(outgoing) }()
+		}
+	} else if isCompleted {
+		if fb, ok := s.Deps.Engine.(radioSessionFeedback); ok {
+			fb.RecordCompletedTrack(outgoing)
+		}
+		if s.Deps.ListeningStats != nil {
+			stats := s.Deps.ListeningStats
+			go func() { _ = stats.RecordComplete(outgoing) }()
+		}
+	}
+}
+
+func (s *State) syncRadioTaste() {
+	if s.Deps.Engine == nil {
+		return
+	}
+	if ts, ok := s.Deps.Engine.(radioTasteSetter); ok {
+		ts.SetRadioTaste(player.BuildTasteProfile(s.Feeds[model.TabLiked], s.Feeds[model.TabHistory]))
+	}
+}
+
+func (s *State) resolvePlayingVideo(videoID, title string) model.Video {
+	id := player.ExtractYouTubeID(videoID)
+	if id == "" {
+		id = strings.TrimSpace(videoID)
+	}
+	if id != "" {
+		if s.CurrentPlaying.ID == id {
+			v := s.CurrentPlaying
+			if title != "" && v.Title == "" {
+				v.Title = title
+			}
+			return v
+		}
+		for _, v := range s.Queue {
+			if v.ID == id {
+				return v
+			}
+		}
+		for i := len(s.PlayStack) - 1; i >= 0; i-- {
+			if s.PlayStack[i].ID == id {
+				return s.PlayStack[i]
+			}
+		}
+		for _, v := range s.VisibleItems() {
+			if v.ID == id {
+				return v
+			}
+		}
+		for _, feed := range s.Feeds {
+			for _, v := range feed {
+				if v.ID == id {
+					return v
+				}
+			}
+		}
+		for _, it := range s.MPVPlaylist {
+			itID := it.VideoID
+			if itID == "" {
+				itID = player.ExtractYouTubeID(it.Filename)
+			}
+			if itID == id {
+				resolvedTitle := strings.TrimSpace(it.Title)
+				if resolvedTitle == "" {
+					resolvedTitle = strings.TrimSpace(title)
+				}
+				cleanArtist := strings.TrimSpace(it.Artist)
+				if strings.EqualFold(cleanArtist, "YouTube") || strings.EqualFold(cleanArtist, "Mix / Cola") {
+					cleanArtist = ""
+				}
+				if resolvedTitle != "" || cleanArtist != "" {
+					return model.Video{
+						ID:       id,
+						Title:    resolvedTitle,
+						Channel:  cleanArtist,
+						Duration: strings.TrimSpace(it.Duration),
+					}
+				}
+			}
+		}
+		return model.Video{ID: id, Title: title}
+	}
+	if title != "" {
+		return s.findVideoForTitle(title)
+	}
+	return model.Video{}
 }
 
 // SeekRelative seeks playback relative by deltaSec with optimistic UI timestamp feedback.
@@ -394,29 +532,54 @@ func (s *State) EnqueueSelected() (*State, tea.Cmd) {
 func (s *State) localQueuePlaylist() []player.PlaylistItem {
 	items := make([]player.PlaylistItem, 0, len(s.Queue)+1)
 	if s.CurrentPlaying.ID != "" {
+		artist := s.CurrentPlaying.Channel
+		if strings.EqualFold(artist, "YouTube") {
+			artist = ""
+		}
 		items = append(items, player.PlaylistItem{
 			Index:    0,
+			VideoID:  player.ExtractYouTubeID(s.CurrentPlaying.ID),
 			Title:    s.CurrentPlaying.Title,
+			Artist:   artist,
+			Duration: s.CurrentPlaying.Duration,
 			Filename: s.CurrentPlaying.ID,
 			Current:  true,
 		})
 	}
 	for _, v := range s.Queue {
+		artist := v.Channel
+		if strings.EqualFold(artist, "YouTube") {
+			artist = ""
+		}
 		items = append(items, player.PlaylistItem{
 			Index:    len(items),
+			VideoID:  player.ExtractYouTubeID(v.ID),
 			Title:    v.Title,
+			Artist:   artist,
+			Duration: v.Duration,
 			Filename: v.ID,
 		})
 	}
 	return items
 }
 
-// OpenQueue opens the live mpv queue modal and refreshes playlist entries from Engine.
+// ToggleQueue opens or closes the Queue/Mix drawer cleanly.
+func (s *State) ToggleQueue() (*State, tea.Cmd) {
+	if s.ShowQueue {
+		s.ShowQueue = false
+		s.queueRefreshPending = false
+		return s, nil
+	}
+	return s.OpenQueue()
+}
+
+// OpenQueue opens the live mpv queue drawer/modal and refreshes playlist entries from Engine.
 func (s *State) OpenQueue() (*State, tea.Cmd) {
 	s.ShowHelp = false
 	s.ShowSettings = false
 	s.ShowQualityModal = false
 	s.ShowChapters = false
+	s.ShowLyrics = false
 	s.ShowQueue = true
 
 	if pc, ok := s.Deps.Engine.(playlistController); ok {
@@ -426,35 +589,71 @@ func (s *State) OpenQueue() (*State, tea.Cmd) {
 		if s.QueueIdx >= len(s.MPVPlaylist) {
 			s.QueueIdx = max(0, len(s.MPVPlaylist)-1)
 		}
+		s.syncQueueScroll()
+		s.queueRefreshPending = true
 		return s, func() tea.Msg {
 			items, err := pc.Playlist(s.appCtx)
 			return QueueLoadedMsg{Items: items, Err: err}
 		}
 	}
 
+	s.queueRefreshPending = false
 	s.MPVPlaylist = s.localQueuePlaylist()
 	if s.QueueIdx >= len(s.MPVPlaylist) {
 		s.QueueIdx = max(0, len(s.MPVPlaylist)-1)
 	}
+	s.syncQueueScroll()
 	return s, nil
 }
 
-// PlayQueueSelected jumps playback to the currently highlighted Queue overlay item.
+// PlayQueueSelected jumps playback to the currently highlighted Queue overlay item and closes it.
 func (s *State) PlayQueueSelected() (*State, tea.Cmd) {
-	if s.QueueIdx < 0 || s.QueueIdx >= len(s.MPVPlaylist) {
-		s.ShowQueue = false
+	return s.playQueueAt(s.QueueIdx, true)
+}
+
+func (s *State) playQueueAt(queueIdx int, closeAfter bool) (*State, tea.Cmd) {
+	if queueIdx < 0 || queueIdx >= len(s.MPVPlaylist) {
+		if closeAfter {
+			s.ShowQueue = false
+		}
 		return s, nil
 	}
-	item := s.MPVPlaylist[s.QueueIdx]
-	s.ShowQueue = false
+	s.QueueIdx = queueIdx
+	for i := range s.MPVPlaylist {
+		s.MPVPlaylist[i].Current = (i == queueIdx)
+	}
+	item := s.MPVPlaylist[queueIdx]
+	if closeAfter {
+		s.ShowQueue = false
+	}
 	if pc, ok := s.Deps.Engine.(playlistController); ok && s.PlayerStatus.IsRunning {
 		idx := item.Index
 		if idx < 0 {
-			idx = s.QueueIdx
+			idx = queueIdx
 		}
 		title := item.Title
 		if title == "" {
 			title = fmt.Sprintf("Pista %d", idx+1)
+		}
+		vid := item.VideoID
+		if vid == "" {
+			vid = player.ExtractYouTubeID(item.Filename)
+		}
+		if vid != "" || title != "" {
+			resolved := s.resolvePlayingVideo(vid, item.Title)
+			if resolved.ID == "" {
+				resolved.ID = vid
+			}
+			if resolved.Title == "" {
+				resolved.Title = title
+			}
+			if resolved.Channel == "" && item.Artist != "" && !strings.EqualFold(item.Artist, "YouTube") && !strings.EqualFold(item.Artist, "Mix / Cola") {
+				resolved.Channel = strings.TrimSpace(item.Artist)
+			}
+			if resolved.Duration == "" {
+				resolved.Duration = strings.TrimSpace(item.Duration)
+			}
+			s.CurrentPlaying = resolved
 		}
 		return s, s.engineCmd(func(ctx context.Context) error {
 			return pc.PlayPlaylistIndex(ctx, idx)
@@ -480,6 +679,7 @@ func (s *State) RemoveQueueSelected() (*State, tea.Cmd) {
 	if s.QueueIdx >= len(s.MPVPlaylist) && s.QueueIdx > 0 {
 		s.QueueIdx--
 	}
+	s.syncQueueScroll()
 	for i, v := range s.Queue {
 		if (removed.Filename != "" && v.ID == removed.Filename) || v.Title == removed.Title {
 			s.Queue = append(s.Queue[:i], s.Queue[i+1:]...)
@@ -506,6 +706,7 @@ func (s *State) ClearQueue() (*State, tea.Cmd) {
 	s.Queue = nil
 	s.MPVPlaylist = nil
 	s.QueueIdx = 0
+	s.QueueScroll = 0
 	if pc, ok := s.Deps.Engine.(playlistController); ok && s.PlayerStatus.IsRunning {
 		return s, s.engineCmd(func(ctx context.Context) error {
 			return pc.ClearPlaylist(ctx)

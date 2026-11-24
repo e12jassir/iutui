@@ -7,7 +7,9 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/e12jassir/iutui/internal/app"
 	"github.com/e12jassir/iutui/internal/lyrics"
+	"github.com/e12jassir/iutui/internal/player"
 	"github.com/e12jassir/iutui/internal/tui/theme"
+	"github.com/e12jassir/iutui/internal/tui/thumbs"
 	"github.com/mattn/go-runewidth"
 )
 
@@ -406,6 +408,156 @@ func renderQueueOverlay(s *app.State, width, height int, th theme.Theme, pal ren
 	rows = append(rows, "", lipgloss.NewStyle().Foreground(pal.dim).Render(truncatePlain(footer, innerW)))
 	modal := th.Toast.BorderForeground(pal.spotAccent).Width(boxW - 2).Render(strings.Join(rows, "\n"))
 	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, modal)
+}
+
+func renderQueueSidePanel(s *app.State, _ theme.Theme, tr thumbs.Renderer, width, height int, pal renderPalette) string {
+	innerW := max(12, width-2)
+	bodyH := max(1, height-2)
+	start, end, _, _, _, _ := s.QueueSideWindow()
+
+	hdrTitleTxt := fmt.Sprintf(" 󰲸 Cola · Mix (%d)", len(s.MPVPlaylist))
+	closeTxt := "[✕]"
+	maxTitleW := max(6, innerW-len(closeTxt)-2)
+	hdrTitle := lipgloss.NewStyle().Foreground(pal.spotAccent).Bold(true).Render(truncatePlain(hdrTitleTxt, maxTitleW))
+	closeBtn := lipgloss.NewStyle().Foreground(pal.muted).Bold(true).Render(closeTxt)
+	hdrGap := max(1, innerW-lipgloss.Width(hdrTitle)-lipgloss.Width(closeBtn)-1)
+	hdrRow := hdrTitle + strings.Repeat(" ", hdrGap) + closeBtn + " "
+	divider := lipgloss.NewStyle().Foreground(pal.spotBorder).Render(" " + strings.Repeat("─", max(1, innerW-2)))
+
+	lines := make([]string, 0, bodyH)
+	lines = append(lines, hdrRow, divider)
+
+	itemAreaH := max(1, bodyH-3) // header + divider + footer
+	if len(s.MPVPlaylist) == 0 {
+		lines = append(lines, " "+lipgloss.NewStyle().Foreground(pal.muted).Render(truncatePlain("Cola vacía — añade pistas con 'q'", max(4, innerW-2))))
+	} else {
+		showCover := tr != nil && innerW >= 24
+		const coverW = 10
+		const coverH = 3
+
+		for i := start; i < end; i++ {
+			if len(lines) >= 2+itemAreaH {
+				break
+			}
+			it := s.MPVPlaylist[i]
+			vid := it.VideoID
+			if vid == "" {
+				vid = player.ExtractYouTubeID(it.Filename)
+			}
+			if showCover && vid != "" {
+				tr.Prefetch(vid)
+			}
+
+			name := strings.TrimSpace(it.Title)
+			if name == "" {
+				name = strings.TrimSpace(it.Filename)
+			}
+			if name == "" {
+				name = fmt.Sprintf("Pista %d", it.Index+1)
+			}
+			artist := strings.TrimSpace(it.Artist)
+			if artist == "" {
+				if idx := strings.Index(name, " - "); idx > 0 {
+					artist = strings.TrimSpace(name[:idx])
+					name = strings.TrimSpace(name[idx+3:])
+				} else {
+					artist = "Mix / Cola"
+				}
+			}
+
+			prefix := fmt.Sprintf("%d. ", i+1)
+			if it.Current {
+				prefix = "▶ "
+			} else if i == s.QueueIdx {
+				prefix = "▸ "
+			}
+
+			dur := strings.TrimSpace(it.Duration)
+			if dur == "" {
+				dur = "--:--"
+			}
+			meta := dur + " · En cola"
+			if it.Current {
+				meta = dur + " · Sonando"
+			}
+
+			selected := i == s.QueueIdx
+			titleSt := lipgloss.NewStyle().Foreground(pal.text).Bold(it.Current)
+			artistSt := lipgloss.NewStyle().Foreground(pal.muted)
+			metaSt := lipgloss.NewStyle().Foreground(pal.dim)
+			if it.Current {
+				titleSt = lipgloss.NewStyle().Foreground(pal.spotAccent).Bold(true)
+				metaSt = lipgloss.NewStyle().Foreground(pal.spotAccent)
+			}
+			if selected {
+				titleSt = lipgloss.NewStyle().Foreground(pal.white).Background(pal.surf).Bold(true)
+				artistSt = lipgloss.NewStyle().Foreground(pal.text).Background(pal.surf)
+				metaSt = lipgloss.NewStyle().Foreground(pal.spotAccent).Background(pal.surf)
+			}
+
+			if showCover && vid != "" {
+				infoW := max(8, innerW-coverW-3)
+				thumbRaw := tr.Render(vid, coverW, coverH)
+				thumbRows := strings.Split(thumbRaw, "\n")
+				infoRows := []string{
+					titleSt.Render(truncatePlain(prefix+name, infoW)),
+					artistSt.Render(truncatePlain(artist, infoW)),
+					metaSt.Render(truncatePlain(meta, infoW)),
+				}
+				for r := 0; r < coverH && len(lines) < 2+itemAreaH; r++ {
+					tLine := strings.Repeat(" ", coverW)
+					if r < len(thumbRows) && thumbRows[r] != "" {
+						tLine = thumbRows[r]
+					}
+					rowLine := " " + tLine + " " + infoRows[r]
+					if selected {
+						rem := max(0, innerW-lipgloss.Width(rowLine))
+						rowLine += lipgloss.NewStyle().Background(pal.surf).Render(strings.Repeat(" ", rem))
+					}
+					lines = append(lines, rowLine)
+				}
+			} else {
+				infoW := max(8, innerW-2)
+				infoRows := []string{
+					titleSt.Render(" " + truncatePlain(prefix+name, infoW)),
+					artistSt.Render("   " + truncatePlain(artist, max(4, infoW-2))),
+					metaSt.Render("   " + truncatePlain(meta, max(4, infoW-2))),
+				}
+				for _, ir := range infoRows {
+					if len(lines) >= 2+itemAreaH {
+						break
+					}
+					if selected {
+						rem := max(0, innerW-lipgloss.Width(ir))
+						ir += lipgloss.NewStyle().Background(pal.surf).Render(strings.Repeat(" ", rem))
+					}
+					lines = append(lines, ir)
+				}
+			}
+			if len(lines) < 2+itemAreaH {
+				lines = append(lines, "")
+			}
+		}
+	}
+
+	for len(lines) < bodyH-1 {
+		lines = append(lines, "")
+	}
+	footerLeft := "↑/↓ · Click/Enter · x Quitar · c Limpiar · Esc"
+	footerRight := ""
+	if len(s.MPVPlaylist) > end-start && end > start {
+		footerRight = fmt.Sprintf("%d-%d/%d", start+1, end, len(s.MPVPlaylist))
+	}
+	availLeft := max(8, innerW-2-lipgloss.Width(footerRight))
+	leftRendered := lipgloss.NewStyle().Foreground(pal.dim).Render(truncatePlain(footerLeft, availLeft))
+	footer := " " + leftRendered
+	if footerRight != "" {
+		gap := max(1, innerW-2-lipgloss.Width(leftRendered)-lipgloss.Width(footerRight))
+		footer = " " + leftRendered + strings.Repeat(" ", gap) + lipgloss.NewStyle().Foreground(pal.muted).Render(footerRight)
+	}
+	lines = append(lines[:bodyH-1], footer)
+
+	return renderSpotatuiPanel("Cola", lines, width, height, true, pal)
 }
 
 func renderChaptersOverlay(s *app.State, width, height int, th theme.Theme, pal renderPalette) string {

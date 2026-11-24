@@ -41,10 +41,11 @@ func (s *State) handleMouse(msg tea.MouseMsg) (*State, tea.Cmd) {
 			return s, nil
 		}
 		if s.ShowQueue {
-			if len(s.MPVPlaylist) > 0 && s.QueueIdx < len(s.MPVPlaylist)-1 {
-				s.QueueIdx++
+			qW := s.QueueSideWidth()
+			if qW == 0 || (msg.X >= s.Width-qW && msg.Y >= 3) {
+				s.scrollQueueBy(1, msg.X, msg.Y)
+				return s, nil
 			}
-			return s, nil
 		}
 		if s.ShowSettings {
 			s.SettingsIdx = (s.SettingsIdx + 1) % SettingsRowCount
@@ -60,11 +61,7 @@ func (s *State) handleMouse(msg tea.MouseMsg) (*State, tea.Cmd) {
 			s.LyricsScroll += 2
 			return s, nil
 		}
-		step := 1
-		if s.View == ViewHome {
-			step = s.GridCols()
-		}
-		s.SetSelection(s.activeIdx() + step)
+		s.scrollMainBy(1)
 		return s, s.enrichVisibleMetadataCmd(s.VisibleItems(), s.activeIdx())
 
 	case msg.Button == tea.MouseButtonWheelUp:
@@ -90,10 +87,11 @@ func (s *State) handleMouse(msg tea.MouseMsg) (*State, tea.Cmd) {
 			return s, nil
 		}
 		if s.ShowQueue {
-			if s.QueueIdx > 0 {
-				s.QueueIdx--
+			qW := s.QueueSideWidth()
+			if qW == 0 || (msg.X >= s.Width-qW && msg.Y >= 3) {
+				s.scrollQueueBy(-1, msg.X, msg.Y)
+				return s, nil
 			}
-			return s, nil
 		}
 		if s.ShowSettings {
 			s.SettingsIdx = (s.SettingsIdx + SettingsRowCount - 1) % SettingsRowCount
@@ -109,11 +107,7 @@ func (s *State) handleMouse(msg tea.MouseMsg) (*State, tea.Cmd) {
 			s.LyricsScroll -= 2
 			return s, nil
 		}
-		step := 1
-		if s.View == ViewHome {
-			step = s.GridCols()
-		}
-		s.SetSelection(s.activeIdx() - step)
+		s.scrollMainBy(-1)
 		return s, s.enrichVisibleMetadataCmd(s.VisibleItems(), s.activeIdx())
 
 	case msg.Action == tea.MouseActionMotion:
@@ -123,6 +117,46 @@ func (s *State) handleMouse(msg tea.MouseMsg) (*State, tea.Cmd) {
 		return s.handleLeftClick(msg.X, msg.Y)
 	}
 	return s, nil
+}
+
+// WouldMouseMotionChange reports whether a MouseActionMotion event at (x, y)
+// would change hover selection or modal cursor state, allowing the program
+// event filter to skip redundant no-op motion redraws while preserving behavior.
+func (s *State) WouldMouseMotionChange(x, y int) bool {
+	if s.ShowHelp || s.ShowStillWatching {
+		return false
+	}
+	if s.ShowSettings {
+		idx, inside := s.settingsModalRowAt(x, y)
+		return inside && idx >= 0 && idx != s.SettingsIdx
+	}
+	if s.ShowQualityModal {
+		idx, inside := s.qualityModalRowAt(x, y)
+		return inside && idx >= 0 && idx != s.QualityIdx
+	}
+	if s.ShowQueue {
+		if qW := s.QueueSideWidth(); qW > 0 {
+			if idx, inside, _ := s.queueSideRowAt(x, y); inside {
+				return idx >= 0 && idx != s.QueueIdx
+			}
+		} else {
+			idx, inside := s.queueModalRowAt(x, y)
+			return inside && idx >= 0 && idx != s.QueueIdx
+		}
+	}
+	if s.ShowChapters {
+		idx, inside := s.chaptersModalRowAt(x, y)
+		return inside && idx >= 0 && idx != s.ChapterIdx
+	}
+	if s.Focus == FocusSearch {
+		idx, inside := s.suggestionRowAt(x, y)
+		return inside && idx >= 0 && idx != s.SuggestIdx
+	}
+	idx, ok := s.videoIndexAt(x, y, false)
+	if !ok {
+		return false
+	}
+	return s.Focus != FocusMain || idx != s.ActiveListIndex()
 }
 
 func (s *State) handleMouseMotion(x, y int) *State {
@@ -142,10 +176,19 @@ func (s *State) handleMouseMotion(x, y int) *State {
 		return s
 	}
 	if s.ShowQueue {
-		if idx, inside := s.queueModalRowAt(x, y); inside && idx >= 0 {
-			s.QueueIdx = idx
+		if qW := s.QueueSideWidth(); qW > 0 {
+			if idx, inside, _ := s.queueSideRowAt(x, y); inside {
+				if idx >= 0 {
+					s.QueueIdx = idx
+				}
+				return s
+			}
+		} else {
+			if idx, inside := s.queueModalRowAt(x, y); inside && idx >= 0 {
+				s.QueueIdx = idx
+			}
+			return s
 		}
-		return s
 	}
 	if s.ShowChapters {
 		if idx, inside := s.chaptersModalRowAt(x, y); inside && idx >= 0 {
@@ -185,16 +228,28 @@ func (s *State) handleLeftClick(x, y int) (*State, tea.Cmd) {
 		return s, nil
 	}
 	if s.ShowQueue {
-		idx, inside := s.queueModalRowAt(x, y)
-		if !inside {
-			s.ShowQueue = false
+		if qW := s.QueueSideWidth(); qW > 0 {
+			if idx, inside, closeHit := s.queueSideRowAt(x, y); inside {
+				if closeHit {
+					s.ShowQueue = false
+					return s, nil
+				}
+				if idx >= 0 && idx < len(s.MPVPlaylist) {
+					return s.playQueueAt(idx, false)
+				}
+				return s, nil
+			}
+		} else {
+			idx, inside := s.queueModalRowAt(x, y)
+			if !inside {
+				s.ShowQueue = false
+				return s, nil
+			}
+			if idx >= 0 && idx < len(s.MPVPlaylist) {
+				return s.playQueueAt(idx, true)
+			}
 			return s, nil
 		}
-		if idx >= 0 && idx < len(s.MPVPlaylist) {
-			s.QueueIdx = idx
-			return s.PlayQueueSelected()
-		}
-		return s, nil
 	}
 	if s.ShowChapters {
 		idx, inside := s.chaptersModalRowAt(x, y)
@@ -287,16 +342,24 @@ func (s *State) handleLeftClick(x, y int) (*State, tea.Cmd) {
 
 	// Clicking outside top search panel and suggestion dropdown blurs search focus
 	if s.Focus == FocusSearch {
+		hadSuggestions := len(s.SearchSuggestions) > 0 && strings.TrimSpace(s.SearchDraft) != ""
 		if s.suggestCancel != nil {
 			s.suggestCancel()
 		}
 		s.Focus = FocusMain
 		s.SearchSuggestions = nil
 		s.SuggestIdx = -1
+		if hadSuggestions {
+			return s, nil
+		}
 	}
 
 	// 2. Bottom Player panel (y == s.Height-5 .. s.Height-1) when visible
 	if s.HasPlayerBar() && y >= s.Height-5 {
+		layout := s.PlayerBarLayout()
+		if y == s.Height-4 && layout.HasQueue && x >= layout.QueueX0 && x <= layout.QueueX1 {
+			return s.ToggleQueue()
+		}
 		if y == s.Height-3 && s.PlayerStatus.Duration > 0 {
 			posLen := len(formatClockApp(s.PlayerStatus.TimePos))
 			durLen := len(formatClockApp(s.PlayerStatus.Duration))
@@ -317,24 +380,26 @@ func (s *State) handleLeftClick(x, y int) (*State, tea.Cmd) {
 		}
 		if y == s.Height-2 {
 			switch {
-			case x >= 2 && x <= 5:
-				return s.PrevTrack()
-			case x >= 7 && x <= 11:
-				return s, s.engineCmd(func(ctx context.Context) error { return s.Deps.Engine.TogglePause(ctx) }, "")
-			case x >= 13 && x <= 16:
-				return s.NextTrack()
-			case x >= 18 && x <= 23:
-				return s.SeekRelative(-10)
-			case x >= 25 && x <= 30:
-				return s.SeekRelative(10)
-			case x >= 32 && x <= 37:
-				return s, s.engineCmd(func(ctx context.Context) error { return s.Deps.Engine.AddVolume(ctx, -5) }, "Vol -5%")
-			case x >= 39 && x <= 44:
-				return s, s.engineCmd(func(ctx context.Context) error { return s.Deps.Engine.AddVolume(ctx, 5) }, "Vol +5%")
-			case x >= 46 && x <= 48:
+			case x >= layout.LikeX0 && x <= layout.LikeX1:
 				return s.ToggleLikeActive()
-			case x >= 50 && x <= 52:
+			case x >= layout.SaveX0 && x <= layout.SaveX1:
 				return s.ToggleSaveActive()
+			case x >= layout.SubX0 && x <= layout.SubX1:
+				return s.ToggleSubscribeActive()
+			case x >= layout.PrevX0 && x <= layout.PrevX1:
+				return s.PrevTrack()
+			case x >= layout.Back10X0 && x <= layout.Back10X1:
+				return s.SeekRelative(-10)
+			case x >= layout.PlayPauseX0 && x <= layout.PlayPauseX1:
+				return s, s.engineCmd(func(ctx context.Context) error { return s.Deps.Engine.TogglePause(ctx) }, "")
+			case x >= layout.Fwd10X0 && x <= layout.Fwd10X1:
+				return s.SeekRelative(10)
+			case x >= layout.NextX0 && x <= layout.NextX1:
+				return s.NextTrack()
+			case layout.ShowVol && x >= layout.VolDownX0 && x <= layout.VolDownX1:
+				return s, s.engineCmd(func(ctx context.Context) error { return s.Deps.Engine.AddVolume(ctx, -5) }, "Vol -5%")
+			case layout.ShowVol && x >= layout.VolUpX0 && x <= layout.VolUpX1:
+				return s, s.engineCmd(func(ctx context.Context) error { return s.Deps.Engine.AddVolume(ctx, 5) }, "Vol +5%")
 			}
 		}
 		return s, nil
@@ -370,7 +435,11 @@ func (s *State) handleLeftClick(x, y int) (*State, tea.Cmd) {
 			subIdx := y - 17
 			if subIdx >= 0 && subIdx < len(s.Subscriptions) && subIdx < 4 {
 				sub := s.Subscriptions[subIdx]
-				s.setSearchDraft(sub, len([]rune(sub)))
+				label := s.SubscriptionDisplayName(sub)
+				if _, ok := s.Deps.Catalog.(channelCatalog); ok {
+					return s.openChannelVideo(model.Video{ChannelID: sub, Channel: label})
+				}
+				s.setSearchDraft(label, len([]rune(label)))
 				return s.SubmitSearch()
 			}
 			s.Focus = FocusSidebar
@@ -392,21 +461,13 @@ func (s *State) handleLeftClick(x, y int) (*State, tea.Cmd) {
 		return s, nil
 	}
 
-	// 4. Chips row inside Main panel (y == 4)
-	if y == 4 {
+	// 4. Chips row inside Main panel (y == 4) — only shown in Home view (not Search).
+	if y == 4 && s.View == ViewHome {
 		chips := HomeChips
-		if s.View == ViewSearch {
-			chips = SearchChips
-		}
 		cx := mainX + 1
 		for i, c := range chips {
 			cw := runewidth.StringWidth(c.Label) + 2 // Padding(0, 1)
 			if x >= cx && x < cx+cw {
-				if s.View == ViewSearch {
-					s.SearchChip = i
-					s.ResultIdx = 0
-					return s, nil
-				}
 				s.HomeChip = i
 				s.SelectedIdx = 0
 				s.ScrollOffset = 0
@@ -417,7 +478,7 @@ func (s *State) handleLeftClick(x, y int) (*State, tea.Cmd) {
 		return s, nil
 	}
 
-	// 5. Main content inside panel (y >= 5)
+	// 5. Main content inside panel (y >= 4 in Search, y >= 5 in Home/Channel)
 	if idx, ok := s.videoIndexAt(x, y, true); ok {
 		if idx == s.ActiveListIndex() {
 			return s.PlaySelected("auto")
@@ -428,7 +489,11 @@ func (s *State) handleLeftClick(x, y int) (*State, tea.Cmd) {
 }
 
 func (s *State) videoIndexAt(x, y int, allowPartialBottom bool) (int, bool) {
-	if y < 5 {
+	topY := 5
+	if s.View == ViewSearch {
+		topY = 4
+	}
+	if y < topY {
 		return 0, false
 	}
 	mainX := s.mainOriginX()
@@ -441,17 +506,17 @@ func (s *State) videoIndexAt(x, y int, allowPartialBottom bool) (int, bool) {
 		return 0, false
 	}
 
-	relY := y - 5
-	bodyH := max(1, s.Height-6)
-	if s.HasPlayerBar() {
-		bodyH = max(1, s.Height-11)
-	}
-	if relY >= bodyH {
+	relY := y - topY
+	bodyH := s.BodyHeight()
+	if bodyH <= 0 || relY >= bodyH {
 		return 0, false
 	}
 
 	if s.View == ViewSearch || s.View == ViewChannel {
 		visibleCount := max(1, bodyH/searchRowH)
+		if !allowPartialBottom && bodyH-visibleCount*searchRowH >= searchRowH/3 {
+			visibleCount++
+		}
 		rowOffset := relY / searchRowH
 		if rowOffset < 0 || (!allowPartialBottom && rowOffset >= visibleCount) {
 			return 0, false
@@ -465,13 +530,18 @@ func (s *State) videoIndexAt(x, y int, allowPartialBottom bool) (int, bool) {
 	}
 
 	cols := s.GridCols()
-	stepW := s.gridCardWidth() + cardGap
-	col := (x - mainX) / stepW
-	if col < 0 || col >= cols {
+	cardW := s.gridCardWidth()
+	stepW := cardW + cardGap
+	relX := x - mainX
+	col := relX / stepW
+	if col < 0 || col >= cols || relX%stepW >= cardW {
 		return 0, false
 	}
 	cH := s.gridCardHeight()
 	visibleRows := max(1, bodyH/cH)
+	if !allowPartialBottom && bodyH-visibleRows*cH >= cH/3 {
+		visibleRows++
+	}
 	rowOffset := relY / cH
 	if rowOffset < 0 || (!allowPartialBottom && rowOffset >= visibleRows) {
 		return 0, false
@@ -546,9 +616,12 @@ func (s *State) QueueModalWindow() (start, end, boxW, leftX, topY, boxH, optStar
 	if n == 0 {
 		maxVisible = 1
 	}
-	start = 0
-	if s.QueueIdx >= maxVisible {
-		start = s.QueueIdx - maxVisible + 1
+	maxStart := max(0, n-maxVisible)
+	start = s.QueueScroll
+	if start < 0 {
+		start = 0
+	} else if start > maxStart {
+		start = maxStart
 	}
 	end = min(n, start+maxVisible)
 	visRows := max(1, end-start)
@@ -596,9 +669,173 @@ func (s *State) LyricsSideWidth() int {
 	return lyricsSideW
 }
 
+// QueueSideWidth returns the width reserved for the docked right-side Queue/Mix panel.
+func (s *State) QueueSideWidth() int {
+	if !s.ShowQueue || s.Width < miniGuideMinW {
+		return 0
+	}
+	remW := s.Width - s.sidebarWidth()
+	queueSideW := min(46, max(32, remW/3))
+	if remW-queueSideW < 36 {
+		return 0
+	}
+	return queueSideW
+}
+
+// QueueSideWindow computes the visible item slice and screen bounds for the
+// docked right-side Queue/Mix drawer. Each track entry occupies 4 rows.
+func (s *State) QueueSideWindow() (start, end, panelX, topY, panelW, panelH int) {
+	panelW = s.QueueSideWidth()
+	if panelW <= 0 {
+		return 0, 0, 0, 0, 0, 0
+	}
+	panelX = s.Width - panelW
+	topY = 3
+	panelH = s.Height - topY
+	if s.HasPlayerBar() {
+		panelH -= 5
+	}
+	if panelH < 4 {
+		panelH = 4
+	}
+	visItems := queueSideVisibleCount(panelH)
+	n := len(s.MPVPlaylist)
+	maxStart := max(0, n-visItems)
+	start = s.QueueScroll
+	if start < 0 {
+		start = 0
+	} else if start > maxStart {
+		start = maxStart
+	}
+	end = min(n, start+visItems)
+	return start, end, panelX, topY, panelW, panelH
+}
+
+func queueSideVisibleCount(panelH int) int {
+	return max(1, (panelH-5)/4)
+}
+
+func (s *State) queueVisibleCount() int {
+	if s.QueueSideWidth() > 0 {
+		topY := 3
+		panelH := s.Height - topY
+		if s.HasPlayerBar() {
+			panelH -= 5
+		}
+		if panelH < 4 {
+			panelH = 4
+		}
+		return queueSideVisibleCount(panelH)
+	}
+	n := len(s.MPVPlaylist)
+	if n == 0 {
+		return 1
+	}
+	return max(4, min(n, s.Height-10))
+}
+
+func (s *State) clampQueueScroll() {
+	vis := s.queueVisibleCount()
+	maxScroll := max(0, len(s.MPVPlaylist)-vis)
+	if s.QueueScroll < 0 {
+		s.QueueScroll = 0
+	} else if s.QueueScroll > maxScroll {
+		s.QueueScroll = maxScroll
+	}
+}
+
+func (s *State) syncQueueScroll() {
+	vis := s.queueVisibleCount()
+	if s.QueueIdx < s.QueueScroll {
+		s.QueueScroll = s.QueueIdx
+	} else if s.QueueIdx >= s.QueueScroll+vis {
+		s.QueueScroll = s.QueueIdx - vis + 1
+	}
+	s.clampQueueScroll()
+}
+
+func (s *State) scrollQueueBy(delta, mouseX, mouseY int) {
+	n := len(s.MPVPlaylist)
+	if n == 0 {
+		s.QueueScroll = 0
+		s.QueueIdx = 0
+		return
+	}
+	vis := s.queueVisibleCount()
+	maxScroll := max(0, n-vis)
+	nextScroll := max(0, min(maxScroll, s.QueueScroll+delta))
+	scrolled := nextScroll != s.QueueScroll
+	s.QueueScroll = nextScroll
+	if s.QueueSideWidth() > 0 {
+		if idx, inside, _ := s.queueSideRowAt(mouseX, mouseY); inside && idx >= 0 {
+			s.QueueIdx = idx
+			return
+		}
+	}
+	if !scrolled {
+		s.QueueIdx = max(0, min(n-1, s.QueueIdx+delta))
+		return
+	}
+	lastVis := min(n-1, s.QueueScroll+vis-1)
+	if s.QueueIdx < s.QueueScroll {
+		s.QueueIdx = s.QueueScroll
+	} else if s.QueueIdx > lastVis {
+		s.QueueIdx = lastVis
+	}
+}
+
+func (s *State) scrollMainBy(delta int) {
+	items := s.VisibleItems()
+	if len(items) == 0 {
+		return
+	}
+	if s.View == ViewSearch {
+		vis := max(1, s.VisibleListRows())
+		maxScroll := max(0, len(items)-vis)
+		s.ResultScroll = max(0, min(maxScroll, s.ResultScroll+delta))
+		nextIdx := max(0, min(len(items)-1, s.ResultIdx+delta))
+		s.SelectVisible(nextIdx)
+		return
+	}
+	if s.View == ViewChannel {
+		vis := max(1, s.VisibleListRows())
+		maxScroll := max(0, len(items)-vis)
+		s.ChannelScroll = max(0, min(maxScroll, s.ChannelScroll+delta))
+		nextIdx := max(0, min(len(items)-1, s.ChannelIdx+delta))
+		s.SelectVisible(nextIdx)
+		return
+	}
+	cols := max(1, s.GridCols())
+	vis := max(1, s.VisibleGridRows())
+	totalRows := (len(items) + cols - 1) / cols
+	maxScroll := max(0, totalRows-vis)
+	s.ScrollOffset = max(0, min(maxScroll, s.ScrollOffset+delta))
+	nextIdx := max(0, min(len(items)-1, s.SelectedIdx+delta*cols))
+	s.SelectVisible(nextIdx)
+}
+
+func (s *State) queueSideRowAt(x, y int) (idx int, inside, closeHit bool) {
+	start, end, panelX, topY, panelW, panelH := s.QueueSideWindow()
+	if panelW <= 0 || x < panelX || x >= panelX+panelW || y < topY || y >= topY+panelH {
+		return -1, false, false
+	}
+	// Header row (y == topY + 1): "[✕]" sits at right inside border.
+	if y == topY+1 && x >= panelX+panelW-6 && x <= panelX+panelW-2 {
+		return -1, true, true
+	}
+	itemAreaTop := topY + 3
+	if y >= itemAreaTop && y < topY+panelH-2 {
+		itemIdx := start + (y-itemAreaTop)/4
+		if itemIdx >= start && itemIdx < end {
+			return itemIdx, true, false
+		}
+	}
+	return -1, true, false
+}
+
 // MainInnerWidth returns the inner content width of the main center panel.
 func (s *State) MainInnerWidth() int {
-	remW := s.Width - s.sidebarWidth() - s.LyricsSideWidth()
+	remW := s.Width - s.sidebarWidth() - s.LyricsSideWidth() - s.QueueSideWidth()
 	return max(10, remW-2)
 }
 
@@ -696,7 +933,7 @@ func (s *State) suggestionRowAt(x, y int) (idx int, inside bool) {
 		return -1, false
 	}
 	sideW := s.sidebarWidth()
-	panelW := max(24, (s.Width-sideW)-15)
+	panelW := s.MainInnerWidth() + 2
 	sugCount := min(6, len(s.SearchSuggestions))
 	sugH := sugCount + 2
 	maxBody := s.Height - 3

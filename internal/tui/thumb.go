@@ -188,12 +188,17 @@ var (
 	thumbCacheLRU = newLRUCache[string, thumbCacheValue](maxThumbCacheEntries)
 	kittyLRU      = newLRUCache[uint32, struct{}](maxKittyImages)
 
-	fetchingMu   sync.Mutex
-	fetchingMap  = make(map[string]bool)
-	fetchSem     = make(chan struct{}, 6)
-	prepareMu    sync.Mutex
-	preparingMap = make(map[string]bool)
-	prepareSem   = make(chan struct{}, 4)
+	fetchingMu         sync.Mutex
+	fetchingMap        = make(map[string]bool)
+	knownLocalThumbs   = make(map[string]bool)
+	failedFetchUntil   = make(map[string]time.Time)
+	fetchSem           = make(chan struct{}, 6)
+	prepareMu          sync.Mutex
+	preparingMap       = make(map[string]bool)
+	failedPrepareUntil = make(map[string]time.Time)
+	prepareSem         = make(chan struct{}, 4)
+
+	thumbFailCooldown = 2 * time.Minute
 
 	thumbCfgMu             sync.RWMutex
 	thumbCacheDir          string
@@ -224,6 +229,7 @@ func SetThumbCacheDir(dir string) {
 	thumbCfgMu.Unlock()
 	if changed {
 		thumbCacheLRU.clear()
+		clearFetchCooldowns()
 	}
 }
 
@@ -247,6 +253,18 @@ func SetThumbHTTPClient(c *http.Client) {
 		thumbHTTPClient = c
 	}
 	thumbCfgMu.Unlock()
+	clearFetchCooldowns()
+}
+
+func clearFetchCooldowns() {
+	fetchingMu.Lock()
+	failedFetchUntil = make(map[string]time.Time)
+	knownLocalThumbs = make(map[string]bool)
+	fetchingMu.Unlock()
+
+	prepareMu.Lock()
+	failedPrepareUntil = make(map[string]time.Time)
+	prepareMu.Unlock()
 }
 
 func getThumbHTTPClient() *http.Client {
@@ -270,6 +288,7 @@ func SetThumbBaseURL(base string) {
 		thumbBaseURL = trimmed
 	}
 	thumbCfgMu.Unlock()
+	clearFetchCooldowns()
 }
 
 func getThumbBaseURL() string {
@@ -342,10 +361,13 @@ func ClearThumbCache() {
 
 	fetchingMu.Lock()
 	fetchingMap = make(map[string]bool)
+	knownLocalThumbs = make(map[string]bool)
+	failedFetchUntil = make(map[string]time.Time)
 	fetchingMu.Unlock()
 
 	prepareMu.Lock()
 	preparingMap = make(map[string]bool)
+	failedPrepareUntil = make(map[string]time.Time)
 	prepareMu.Unlock()
 
 	for _, imgID := range kittyLRU.clearUnpinned() {
@@ -365,6 +387,12 @@ func notifyThumbReady(videoID string) {
 		defer asyncWG.Done()
 		fn(videoID)
 	}()
+}
+
+// SetTTYWriter overrides the destination writer used for Kitty graphics APC
+// sequences, allowing the TUI to share a synchronized writer with Bubble Tea.
+func SetTTYWriter(w io.Writer) {
+	setTTYWriter(w)
 }
 
 func setTTYWriter(w io.Writer) {
@@ -478,15 +506,40 @@ func FetchThumbnailAsync(id string) {
 	if len(cleanID) < 5 || !isValidCleanThumbID(cleanID) {
 		return
 	}
+	failKey := cleanID + "_" + getThumbQuality()
+
 	fetchingMu.Lock()
-	if fetchingMap[cleanID] {
+	if knownLocalThumbs[failKey] || fetchingMap[cleanID] {
+		fetchingMu.Unlock()
+		return
+	}
+	now := time.Now()
+	if until, ok := failedFetchUntil[failKey]; ok && now.Before(until) {
+		fetchingMu.Unlock()
+		return
+	}
+	fetchingMu.Unlock()
+
+	if GetThumbnailFile(id) != "" {
+		fetchingMu.Lock()
+		knownLocalThumbs[failKey] = true
+		fetchingMu.Unlock()
+		return
+	}
+	variants := thumbQualityVariants()
+	now = time.Now()
+
+	fetchingMu.Lock()
+	if knownLocalThumbs[failKey] || fetchingMap[cleanID] {
+		fetchingMu.Unlock()
+		return
+	}
+	if until, ok := failedFetchUntil[failKey]; ok && now.Before(until) {
 		fetchingMu.Unlock()
 		return
 	}
 	fetchingMap[cleanID] = true
 	fetchingMu.Unlock()
-
-	variants := thumbQualityVariants()
 
 	asyncWG.Add(1)
 	go func() {
@@ -512,6 +565,12 @@ func FetchThumbnailAsync(id string) {
 
 		fetchingMu.Lock()
 		delete(fetchingMap, cleanID)
+		if downloaded {
+			knownLocalThumbs[failKey] = true
+			delete(failedFetchUntil, failKey)
+		} else {
+			failedFetchUntil[failKey] = time.Now().Add(thumbFailCooldown)
+		}
 		fetchingMu.Unlock()
 
 		if downloaded {
@@ -613,8 +672,13 @@ func RenderThumbnailANSI(id string, width, height int) string {
 }
 
 func prepareKittyAsync(cacheKey, id, file string, width, height int) {
+	now := time.Now()
 	prepareMu.Lock()
 	if preparingMap[cacheKey] {
+		prepareMu.Unlock()
+		return
+	}
+	if until, ok := failedPrepareUntil[cacheKey]; ok && now.Before(until) {
 		prepareMu.Unlock()
 		return
 	}
@@ -637,6 +701,11 @@ func prepareKittyAsync(cacheKey, id, file string, width, height int) {
 
 		prepareMu.Lock()
 		delete(preparingMap, cacheKey)
+		if ready {
+			delete(failedPrepareUntil, cacheKey)
+		} else {
+			failedPrepareUntil[cacheKey] = time.Now().Add(thumbFailCooldown)
+		}
 		prepareMu.Unlock()
 
 		if ready {

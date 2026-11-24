@@ -41,6 +41,18 @@ type subscriptionToggler interface {
 	ToggleSubscription(ctx context.Context, channelRef string) (bool, error)
 }
 
+type subscriptionLabelProvider interface {
+	SubscriptionLabels(ctx context.Context) (map[string]string, error)
+}
+
+type labeledSubscriptionToggler interface {
+	ToggleSubscriptionLabeled(ctx context.Context, channelRef, label string) (bool, error)
+}
+
+type subscriptionLabelSetter interface {
+	SetSubscriptionLabel(ctx context.Context, channelRef, label string) error
+}
+
 // DownloadSelected queues a background download for the highlighted video.
 func (s *State) DownloadSelected(audioOnly bool) (*State, tea.Cmd) {
 	v, ok := s.SelectedVideo()
@@ -68,6 +80,24 @@ func (s *State) DownloadSelected(audioOnly bool) (*State, tea.Cmd) {
 
 func (s *State) activeOrSelectedVideo() (model.Video, bool) {
 	if s.CurrentPlaying.ID != "" {
+		if s.PlayerStatus.IsRunning {
+			liveTitle := strings.TrimSpace(s.PlayerStatus.Title)
+			liveID := strings.TrimSpace(s.PlayerStatus.VideoID)
+			idMismatch := liveID != "" && liveID != s.CurrentPlaying.ID
+			titleMismatch := liveTitle != "" && !strings.EqualFold(strings.TrimSpace(s.CurrentPlaying.Title), liveTitle)
+			if idMismatch || titleMismatch {
+				v := s.resolvePlayingVideo(liveID, liveTitle)
+				if v.Title == "" {
+					v.Title = liveTitle
+				}
+				if v.ID == "" {
+					v.ID = liveID
+				}
+				if v.ID != "" || v.Title != "" {
+					return v, true
+				}
+			}
+		}
 		return s.CurrentPlaying, true
 	}
 	return s.SelectedVideo()
@@ -190,7 +220,11 @@ func (s *State) loadStoreCmd() tea.Cmd {
 		}
 		history, _ := s.Deps.Store.History(s.appCtx)
 		subs, _ := s.Deps.Store.Subscriptions(s.appCtx)
-		return SavedLoadedMsg{Saved: saved, Liked: liked, History: history, Subs: subs}
+		var subLabels map[string]string
+		if lp, ok := s.Deps.Store.(subscriptionLabelProvider); ok {
+			subLabels, _ = lp.SubscriptionLabels(s.appCtx)
+		}
+		return SavedLoadedMsg{Saved: saved, Liked: liked, History: history, Subs: subs, SubLabels: subLabels}
 	}
 }
 
@@ -278,7 +312,17 @@ func (s *State) OpenSelectedChannel() (*State, tea.Cmd) {
 	if !ok {
 		return s, nil
 	}
+	if strings.TrimSpace(v.Channel) == "" && strings.TrimSpace(v.ChannelID) == "" {
+		return s, s.toastCmd("Este video no tiene canal visible")
+	}
+	return s.openChannelVideo(v)
+}
+
+func (s *State) openChannelVideo(v model.Video) (*State, tea.Cmd) {
 	chName := strings.TrimSpace(v.Channel)
+	if chName == "" {
+		chName = strings.TrimSpace(v.ChannelID)
+	}
 	if chName == "" {
 		return s, s.toastCmd("Este video no tiene canal visible")
 	}
@@ -313,34 +357,219 @@ func (s *State) OpenSelectedChannel() (*State, tea.Cmd) {
 	return s, tea.Batch(cmd, s.ensureAnimTick())
 }
 
-// ToggleSubscribeSelected subscribes or unsubscribes from the highlighted video's channel.
-func (s *State) ToggleSubscribeSelected() (*State, tea.Cmd) {
-	v, ok := s.SelectedVideo()
-	if !ok || s.Deps.Store == nil {
-		return s, nil
+func resolveVideoChannel(v model.Video) (subRef, label string) {
+	chID := strings.TrimSpace(v.ChannelID)
+	ch := strings.TrimSpace(v.Channel)
+	if strings.EqualFold(ch, "YouTube") {
+		ch = ""
 	}
-	subRef := strings.TrimSpace(v.ChannelID)
-	label := strings.TrimSpace(v.Channel)
+	if ch == "" {
+		if idx := strings.Index(v.Title, " - "); idx > 0 {
+			ch = strings.TrimSpace(v.Title[:idx])
+		}
+	}
+	subRef = chID
 	if subRef == "" {
-		subRef = label
+		subRef = ch
 	}
+	label = ch
 	if label == "" {
 		label = subRef
 	}
+	return subRef, label
+}
+
+// SubscriptionDisplayName returns the human-readable channel label for a
+// stored subscription ref (e.g. resolving a raw "UC..." ID from persisted labels
+// or loaded video feeds when available).
+func (s *State) SubscriptionDisplayName(ref string) string {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return ""
+	}
+	if lbl := strings.TrimSpace(s.SubscriptionLabels[ref]); lbl != "" {
+		return lbl
+	}
+	if strings.HasPrefix(ref, "UC") {
+		if ch := s.resolveChannelNameByID(ref); ch != "" {
+			return ch
+		}
+	}
+	return ref
+}
+
+func (s *State) resolveChannelNameByID(channelID string) string {
+	match := func(v model.Video) string {
+		if !strings.EqualFold(strings.TrimSpace(v.ChannelID), channelID) {
+			return ""
+		}
+		ch := strings.TrimSpace(v.Channel)
+		if ch == "" || ch == "-" || strings.EqualFold(ch, "YouTube") {
+			return ""
+		}
+		return ch
+	}
+	if ch := match(s.CurrentPlaying); ch != "" {
+		return ch
+	}
+	for _, tab := range []model.Tab{model.TabSubscriptions, model.TabHome, model.TabMusic, model.TabHistory, model.TabLiked, model.TabWatchLater} {
+		for _, v := range s.Feeds[tab] {
+			if ch := match(v); ch != "" {
+				return ch
+			}
+		}
+	}
+	for _, v := range s.SearchResults {
+		if ch := match(v); ch != "" {
+			return ch
+		}
+	}
+	for _, v := range s.ChannelVideos {
+		if ch := match(v); ch != "" {
+			return ch
+		}
+	}
+	return ""
+}
+
+func (s *State) hydrateSubscriptionLabelsCmd(videos []model.Video) tea.Cmd {
+	if len(s.Subscriptions) == 0 || len(videos) == 0 {
+		return nil
+	}
+	need := make(map[string]string) // lower(ref) -> canonical ref
+	for _, sub := range s.Subscriptions {
+		sub = strings.TrimSpace(sub)
+		if sub == "" || strings.TrimSpace(s.SubscriptionLabels[sub]) != "" {
+			continue
+		}
+		need[strings.ToLower(sub)] = sub
+	}
+	if len(need) == 0 {
+		return nil
+	}
+	if s.SubscriptionLabels == nil {
+		s.SubscriptionLabels = make(map[string]string)
+	}
+	type labelUpdate struct {
+		ref, label string
+	}
+	var updates []labelUpdate
+	for _, v := range videos {
+		cid := strings.TrimSpace(v.ChannelID)
+		ch := strings.TrimSpace(v.Channel)
+		if cid == "" || ch == "" || ch == "-" || strings.EqualFold(ch, "YouTube") || strings.EqualFold(ch, cid) {
+			continue
+		}
+		if ref, ok := need[strings.ToLower(cid)]; ok {
+			s.SubscriptionLabels[ref] = ch
+			updates = append(updates, labelUpdate{ref: ref, label: ch})
+			delete(need, strings.ToLower(cid))
+			if len(need) == 0 {
+				break
+			}
+		}
+	}
+	if len(updates) == 0 {
+		return nil
+	}
+	setter, ok := s.Deps.Store.(subscriptionLabelSetter)
+	if !ok {
+		return nil
+	}
+	return func() tea.Msg {
+		for _, u := range updates {
+			_ = setter.SetSubscriptionLabel(s.appCtx, u.ref, u.label)
+		}
+		return nil
+	}
+}
+
+// IsActiveSubscribed reports whether the active or selected video's channel is subscribed.
+func (s *State) IsActiveSubscribed() bool {
+	v, ok := s.activeOrSelectedVideo()
+	if !ok {
+		return false
+	}
+	subRef, label := resolveVideoChannel(v)
+	for _, sub := range s.Subscriptions {
+		t := strings.TrimSpace(sub)
+		if t == "" {
+			continue
+		}
+		lbl := strings.TrimSpace(s.SubscriptionLabels[t])
+		if (subRef != "" && strings.EqualFold(t, subRef)) ||
+			(label != "" && strings.EqualFold(t, label)) ||
+			(label != "" && lbl != "" && strings.EqualFold(lbl, label)) {
+			return true
+		}
+	}
+	return false
+}
+
+// ToggleSubscribeSelected subscribes or unsubscribes from the highlighted video's channel.
+func (s *State) ToggleSubscribeSelected() (*State, tea.Cmd) {
+	v, ok := s.SelectedVideo()
+	if !ok {
+		return s, nil
+	}
+	return s.toggleSubscribeVideo(v)
+}
+
+// ToggleSubscribeActive subscribes or unsubscribes from the playing track's channel (fallback: selected).
+func (s *State) ToggleSubscribeActive() (*State, tea.Cmd) {
+	v, ok := s.activeOrSelectedVideo()
+	if !ok {
+		return s, nil
+	}
+	return s.toggleSubscribeVideo(v)
+}
+
+func (s *State) toggleSubscribeVideo(v model.Video) (*State, tea.Cmd) {
+	if s.Deps.Store == nil {
+		return s, nil
+	}
+	subRef, label := resolveVideoChannel(v)
 	if subRef == "" {
 		return s, s.toastCmd("Este video no tiene canal para suscribirse")
 	}
-	st, ok := s.Deps.Store.(subscriptionToggler)
-	if !ok {
+	directMatch := false
+	for _, existing := range s.Subscriptions {
+		if strings.EqualFold(strings.TrimSpace(existing), subRef) {
+			subRef = strings.TrimSpace(existing)
+			directMatch = true
+			break
+		}
+	}
+	if !directMatch && label != "" {
+		for _, existing := range s.Subscriptions {
+			t := strings.TrimSpace(existing)
+			if lbl := strings.TrimSpace(s.SubscriptionLabels[t]); lbl != "" && strings.EqualFold(lbl, label) {
+				subRef = t
+				break
+			}
+		}
+	}
+
+	lst, hasLabeled := s.Deps.Store.(labeledSubscriptionToggler)
+	st, hasBasic := s.Deps.Store.(subscriptionToggler)
+	if !hasLabeled && !hasBasic {
 		return s, s.toastCmd("Suscripciones rápidas no disponibles")
 	}
 	return s, func() tea.Msg {
-		subscribed, err := st.ToggleSubscription(s.appCtx, subRef)
+		var (
+			subscribed bool
+			err        error
+		)
+		if hasLabeled {
+			subscribed, err = lst.ToggleSubscriptionLabeled(s.appCtx, subRef, label)
+		} else {
+			subscribed, err = st.ToggleSubscription(s.appCtx, subRef)
+		}
 		if err != nil {
-			return SubscriptionToggledMsg{Channel: label, Err: err}
+			return SubscriptionToggledMsg{SubRef: subRef, Channel: label, Err: err}
 		}
 		subs, _ := s.Deps.Store.Subscriptions(s.appCtx)
-		return SubscriptionToggledMsg{Channel: label, Subscribed: subscribed, Subs: subs}
+		return SubscriptionToggledMsg{SubRef: subRef, Channel: label, Subscribed: subscribed, Subs: subs}
 	}
 }
 
@@ -401,6 +630,7 @@ func (s *State) ToggleLyrics() (*State, tea.Cmd) {
 	if title == "" {
 		return s, s.toastCmd("Selecciona o reproduce un tema primero")
 	}
+	s.ShowQueue = false
 	s.ShowLyrics = true
 	if title == s.LyricsTrack && !s.LyricsLoading && (len(s.Lyrics.Synced) > 0 || len(s.Lyrics.Plain) > 0) {
 		return s, nil

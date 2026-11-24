@@ -312,8 +312,8 @@ func TestRenderLoadingAnimations(t *testing.T) {
 		if strings.Contains(out0, "━━●━━") {
 			t.Fatalf("expected no bouncing wave bar in home sync, got:\n%s", out0)
 		}
-		if !strings.Contains(out0, "[⠋]") {
-			t.Fatalf("expected animated top badge [⠋], got:\n%s", out0)
+		if !strings.Contains(out0, "⠋") {
+			t.Fatalf("expected animated top spinner ⠋, got:\n%s", out0)
 		}
 
 		s.AnimFrame = 3
@@ -643,8 +643,8 @@ func TestRenderPhase2Features(t *testing.T) {
 
 		outEmpty := Render(s, th, tr)
 		assertBounds(t, outEmpty, 120, 36)
-		if !strings.Contains(outEmpty, "Cola de reproducción (0)") || !strings.Contains(outEmpty, "Cola vacía") {
-			t.Fatalf("expected empty queue overlay message, got:\n%s", outEmpty)
+		if !strings.Contains(outEmpty, "Cola · Mix (0)") || !strings.Contains(outEmpty, "Cola vacía") {
+			t.Fatalf("expected empty docked queue drawer message, got:\n%s", outEmpty)
 		}
 
 		s.MPVPlaylist = []player.PlaylistItem{
@@ -654,8 +654,16 @@ func TestRenderPhase2Features(t *testing.T) {
 		s.QueueIdx = 1
 		outPop := Render(s, th, tr)
 		assertBounds(t, outPop, 120, 36)
-		if !strings.Contains(outPop, "Cola de reproducción (2)") || !strings.Contains(outPop, "First Track") || !strings.Contains(outPop, "Second Track") {
-			t.Fatalf("expected populated queue overlay items, got:\n%s", outPop)
+		if !strings.Contains(outPop, "Cola · Mix (2)") || !strings.Contains(outPop, "First Track") || !strings.Contains(outPop, "Second Track") {
+			t.Fatalf("expected populated docked queue drawer items, got:\n%s", outPop)
+		}
+
+		// Narrow terminal falls back to centered overlay modal.
+		s.Width, s.Height = 80, 24
+		outModal := Render(s, th, tr)
+		assertBounds(t, outModal, 80, 24)
+		if !strings.Contains(outModal, "Cola de reproducción (2)") || !strings.Contains(outModal, "First Track") {
+			t.Fatalf("expected narrow modal fallback, got:\n%s", outModal)
 		}
 	})
 
@@ -671,8 +679,8 @@ func TestRenderPhase2Features(t *testing.T) {
 		}
 		out := Render(s, th, tr)
 		assertBounds(t, out, 120, 36)
-		if !strings.Contains(out, "1.25x") || !strings.Contains(out, "↻") {
-			t.Fatalf("expected speed '1.25x' and loop '↻' in player bar title, got:\n%s", out)
+		if !strings.Contains(out, "1.25x") || !strings.Contains(out, "󰑖") {
+			t.Fatalf("expected speed '1.25x' and loop '󰑖' in player bar title, got:\n%s", out)
 		}
 	})
 
@@ -894,10 +902,10 @@ func TestRenderPlayerBarLikeAndSaveButtons(t *testing.T) {
 	lipgloss.SetColorProfile(0)
 	defer lipgloss.SetColorProfile(prevProfile)
 
-	accentLike := lipgloss.NewStyle().Foreground(lipgloss.Color("#1DB954")).Bold(true).Render("[♥]")
-	plainLike := lipgloss.NewStyle().Foreground(pal.ctrlBtn).Bold(true).Render("[♥]")
-	accentSave := lipgloss.NewStyle().Foreground(pal.spotAccent).Bold(true).Render("[◷]")
-	plainSave := lipgloss.NewStyle().Foreground(pal.ctrlBtn).Bold(true).Render("[◷]")
+	accentLike := lipgloss.NewStyle().Foreground(lipgloss.Color("#1DB954")).Bold(true).Render("󰋑")
+	plainLike := lipgloss.NewStyle().Foreground(pal.ctrlBtn).Bold(true).Render("󰋕")
+	accentSave := lipgloss.NewStyle().Foreground(pal.spotAccent).Bold(true).Render("󰥔")
+	plainSave := lipgloss.NewStyle().Foreground(pal.ctrlBtn).Bold(true).Render("󰥔")
 
 	s := newTestState(app.ViewHome, 120, 36)
 	defer s.Close()
@@ -905,8 +913,8 @@ func TestRenderPlayerBarLikeAndSaveButtons(t *testing.T) {
 
 	outUnliked := Render(s, th, tr)
 	assertBounds(t, outUnliked, 120, 36)
-	if !strings.Contains(outUnliked, plainLike+" "+plainSave) {
-		t.Fatalf("expected unliked player bar to render [♥] [◷] with ctrlBtn style, got:\n%s", outUnliked)
+	if !strings.Contains(outUnliked, plainLike+"  "+plainSave) {
+		t.Fatalf("expected unliked player bar to render Nerd Font 󰋕  󰥔 with ctrlBtn style, got:\n%s", outUnliked)
 	}
 	if strings.Contains(outUnliked, accentLike) {
 		t.Fatalf("did not expect accent like styling when CurrentPlaying is not in LikedIDs")
@@ -916,16 +924,301 @@ func TestRenderPlayerBarLikeAndSaveButtons(t *testing.T) {
 	outLiked := Render(s, th, tr)
 	assertBounds(t, outLiked, 120, 36)
 	if !strings.Contains(outLiked, accentLike) {
-		t.Fatalf("expected [♥] to use spotAccent style when CurrentPlaying.ID is in LikedIDs, got:\n%s", outLiked)
+		t.Fatalf("expected 󰋑 to use spotify green style when CurrentPlaying.ID is in LikedIDs, got:\n%s", outLiked)
 	}
 	if !strings.Contains(outLiked, plainSave) {
-		t.Fatalf("expected [◷] to remain ctrlBtn style when CurrentPlaying.ID is not in SavedIDs")
+		t.Fatalf("expected 󰥔 to remain ctrlBtn style when CurrentPlaying.ID is not in SavedIDs")
 	}
 
 	s.SavedIDs[s.CurrentPlaying.ID] = true
 	outBoth := Render(s, th, tr)
 	assertBounds(t, outBoth, 120, 36)
 	if !strings.Contains(outBoth, accentLike) || !strings.Contains(outBoth, accentSave) {
-		t.Fatalf("expected both [♥] and [◷] to use spotAccent style when liked & saved")
+		t.Fatalf("expected both 󰋑 and 󰥔 to use active styles when liked & saved")
 	}
+}
+
+func TestRenderPlayerBarNoBlinkingYouTubeAndNerdFontControls(t *testing.T) {
+	th := theme.DefaultTheme()
+	tr := thumbs.NewTextRenderer()
+
+	s := newTestState(app.ViewHome, 120, 36)
+	defer s.Close()
+	s.Feeds[model.TabHome] = []model.Video{
+		{ID: "vidYT000001", Title: "Signos", Channel: "YouTube"},
+	}
+	s.Feeds[model.TabMusic] = []model.Video{
+		{ID: "vidYT000001", Title: "Signos", Channel: ""},
+	}
+	s.CurrentPlaying = model.Video{ID: "vidYT000001", Title: "Signos", Channel: "YouTube"}
+	s.PlayerStatus = player.Status{IsRunning: true, Title: "Signos", TimePos: 40, Duration: 317, Volume: 80}
+
+	out := Render(s, th, tr)
+	assertBounds(t, out, 120, 36)
+	if strings.Contains(out, "· YouTube") {
+		t.Fatalf("expected generic '· YouTube' suppressed on player bar, got:\n%s", out)
+	}
+	if !strings.Contains(out, "󰂚 Sub") || !strings.Contains(out, "󰒮  󰑟  󰏤  󰈑  󰒭") {
+		t.Fatalf("expected Nerd Font Studio player controls, got:\n%s", out)
+	}
+}
+
+func TestRenderDockedQueueSidePanelWithCoverArt(t *testing.T) {
+	th := theme.DefaultTheme()
+	tr := thumbs.NewTextRenderer()
+
+	for _, dims := range [][2]int{{120, 36}, {156, 45}} {
+		s := newTestState(app.ViewHome, dims[0], dims[1])
+		s.ShowQueue = true
+		s.QueueIdx = 1
+		s.MPVPlaylist = []player.PlaylistItem{
+			{Index: 0, VideoID: "abcDEF12345", Title: "Signos", Artist: "Soda Stereo", Duration: "05:17", Current: true},
+			{Index: 1, VideoID: "xyzUVW67890", Title: "Adiós", Artist: "Gustavo Cerati", Duration: "03:56"},
+		}
+		out := Render(s, th, tr)
+		s.Close()
+		assertBounds(t, out, dims[0], dims[1])
+		if !strings.Contains(out, "󰲸 Cola · Mix (2)") || !strings.Contains(out, "Gustavo Cerati") || !strings.Contains(out, "03:56") {
+			t.Fatalf("expected docked Queue/Mix panel with cover metadata at %dx%d, got:\n%s", dims[0], dims[1], out)
+		}
+	}
+}
+
+func TestRenderRespectsScrollOffsetWhenBottomRowSelectedInPlace(t *testing.T) {
+	th := theme.DefaultTheme()
+	tr := thumbs.NewTextRenderer()
+
+	t.Run("home_grid_keeps_top_row_when_bottom_row_selected_with_scroll_zero", func(t *testing.T) {
+		s := newTestState(app.ViewHome, 120, 36)
+		defer s.Close()
+		// 120x36 with player bar shows 1 full row + 1 partial bottom row.
+		cols := s.GridCols()
+		videos := make([]model.Video, 3*cols)
+		for i := range videos {
+			videos[i] = model.Video{
+				ID:       fmt.Sprintf("gridv%02d", i),
+				Title:    fmt.Sprintf("Grid Card %02d", i),
+				Channel:  "Chan",
+				Duration: "04:00",
+			}
+		}
+		s.Feeds[model.TabHome] = videos
+		s.SelectVisible(cols) // selects row 1 while keeping ScrollOffset == 0
+
+		out := Render(s, th, tr)
+		assertBounds(t, out, 120, 36)
+		if !strings.Contains(out, "gridv00") {
+			t.Fatalf("expected top row card gridv00 to remain at top when ScrollOffset=0, got:\n%s", out)
+		}
+		if !strings.Contains(out, fmt.Sprintf("gridv%02d", cols)) {
+			t.Fatalf("expected bottom row card to remain visible, got:\n%s", out)
+		}
+	})
+
+	t.Run("search_list_keeps_top_row_when_bottom_row_selected_with_scroll_zero", func(t *testing.T) {
+		s := newTestState(app.ViewSearch, 120, 36)
+		defer s.Close()
+		videos := make([]model.Video, 6)
+		for i := range videos {
+			videos[i] = model.Video{
+				ID:       fmt.Sprintf("srchv%02d", i),
+				Title:    fmt.Sprintf("Search Row %02d", i),
+				Channel:  "Chan",
+				Duration: "04:00",
+			}
+		}
+		s.SearchResults = videos
+		s.SelectVisible(2) // selects partially visible 3rd row while ResultScroll == 0
+
+		out := Render(s, th, tr)
+		assertBounds(t, out, 120, 36)
+		if !strings.Contains(out, "srchv00") {
+			t.Fatalf("expected top search row srchv00 preserved, got:\n%s", out)
+		}
+		if !strings.Contains(out, "srchv02") {
+			t.Fatalf("expected srchv02 visible on screen, got:\n%s", out)
+		}
+	})
+}
+
+func TestRenderStudioQuietChromeLayout(t *testing.T) {
+	th := theme.DefaultTheme()
+	tr := thumbs.NewTextRenderer()
+
+	for _, dims := range [][2]int{{80, 24}, {100, 32}, {120, 36}, {156, 45}} {
+		s := newTestState(app.ViewHome, dims[0], dims[1])
+		s.ActiveTab = model.TabMusic
+		s.Feeds[model.TabMusic] = []model.Video{
+			{ID: "music000001", Title: "Signos", Channel: "Soda Stereo", Duration: "05:17"},
+			{ID: "music000002", Title: "De Música Ligera", Channel: "YouTube", Duration: "04:49"},
+		}
+		s.LikedIDs["music000001"] = true
+
+		out := Render(s, th, tr)
+		s.Close()
+		assertBounds(t, out, dims[0], dims[1])
+
+		for _, legacy := range []string{"[?]", "[S]", "[Q]", "╭YouTube"} {
+			if strings.Contains(out, legacy) {
+				t.Fatalf("%dx%d: did not expect legacy chrome %q in Studio Quiet Chrome, got:\n%s", dims[0], dims[1], legacy, out)
+			}
+		}
+		for _, want := range []string{"󰍉", "󰋗", "󰒓", "󰐥", "󰋑", "Soda Stereo"} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("%dx%d: expected Nerd Font chrome/badge %q, got:\n%s", dims[0], dims[1], want, out)
+			}
+		}
+		if dims[0] >= 140 {
+			if !strings.Contains(out, "▎") || !strings.Contains(out, "󰝚  Música") {
+				t.Fatalf("%dx%d: expected active rail ▎ and Nerd Font sidebar tab, got:\n%s", dims[0], dims[1], out)
+			}
+		}
+	}
+}
+
+func TestRenderSidebarIconSymmetryAndRoundedTopPanels(t *testing.T) {
+	th := theme.DefaultTheme()
+	tr := thumbs.NewTextRenderer()
+	pal := resolveRenderPalette("youtube-dark")
+
+	t.Run("sidebar_icons_align_at_same_column_for_all_tabs", func(t *testing.T) {
+		s := newTestState(app.ViewHome, 156, 45)
+		defer s.Close()
+		s.ActiveTab = model.TabHome
+		s.Subscriptions = []string{"UCiscmdXDtypp2zTzEE1234"}
+		s.SubscriptionLabels = map[string]string{
+			"UCiscmdXDtypp2zTzEE1234": "Soda Stereo",
+		}
+
+		sideOut := renderSidebarFull(s, th, 26, 32, pal)
+		if !strings.Contains(sideOut, "╭") || !strings.Contains(sideOut, "╰") {
+			t.Fatalf("expected rounded panel borders around full sidebar, got:\n%s", sideOut)
+		}
+		if strings.Contains(sideOut, "UCiscmd") {
+			t.Fatalf("expected raw UC channel ID resolved to human name, got:\n%s", sideOut)
+		}
+		if !strings.Contains(sideOut, "Soda Stereo") {
+			t.Fatalf("expected resolved subscription name Soda Stereo in sidebar, got:\n%s", sideOut)
+		}
+		icons := []string{"󰋜", "󰝚", "󰗃", "󰋚", "󰥔", "󰲸", "󰋑", "󰇚", "󰀄"}
+		for _, ic := range icons {
+			found := false
+			for _, line := range strings.Split(sideOut, "\n") {
+				idx := strings.Index(line, ic)
+				if idx < 0 {
+					continue
+				}
+				found = true
+				prefix := line[:idx]
+				if w := lipgloss.Width(prefix); w != 3 {
+					t.Fatalf("icon %s landed at display col %d, want 3 in line %q", ic, w, line)
+				}
+			}
+			if !found {
+				t.Fatalf("missing sidebar icon %s in:\n%s", ic, sideOut)
+			}
+		}
+	})
+
+	t.Run("top_panels_have_rounded_borders_and_clean_focused_search", func(t *testing.T) {
+		s := newTestState(app.ViewHome, 120, 36)
+		defer s.Close()
+		s.Focus = app.FocusSearch
+		s.SearchDraft = "andres calamaro"
+
+		top := renderTopPanels(s, th, tr, 120, pal)
+		lines := strings.Split(top, "\n")
+		if len(lines) != 3 {
+			t.Fatalf("expected 3 rows for rounded top mini-panels, got %d:\n%s", len(lines), top)
+		}
+		for _, want := range []string{"╭", "╰", "andres calamaro█", "󰑐", "󰋗", "󰒓", "󰐥"} {
+			if !strings.Contains(top, want) {
+				t.Fatalf("expected %q in rounded top panels, got:\n%s", want, top)
+			}
+		}
+	})
+
+	t.Run("clean_player_title_no_sidebar_counts_and_no_home_header", func(t *testing.T) {
+		s := newTestState(app.ViewHome, 156, 45)
+		defer s.Close()
+		s.ActiveTab = model.TabMusic
+		for i := 0; i < 6; i++ {
+			s.HistoryIDs[fmt.Sprintf("hist%d", i)] = true
+		}
+		out := Render(s, th, tr)
+		assertBounds(t, out, 156, 45)
+
+		if !strings.Contains(out, "╭Reproductor─") {
+			t.Fatalf("expected clean player bar title ╭Reproductor─, got:\n%s", out)
+		}
+		for _, unwanted := range []string{"Reproduciendo", "Mix local", "basado en tu escucha", "Local", "Historial       6", "󰋜 Inicio", "󰝚 Música"} {
+			if strings.Contains(out, unwanted) && unwanted != "󰝚 Música" {
+				t.Fatalf("did not expect %q in clean chrome output, got:\n%s", unwanted, out)
+			}
+		}
+		// Sidebar keeps 󰝚  Música, whereas main top header row must not print "󰝚 Música" above chips.
+		if strings.Contains(out, " 󰝚 Música ") {
+			t.Fatalf("did not expect main top header title above chips, got:\n%s", out)
+		}
+	})
+
+	t.Run("suggestions_overlay_does_not_shift_sidebar_or_lower_main_rows", func(t *testing.T) {
+		s := newTestState(app.ViewHome, 140, 42)
+		defer s.Close()
+		s.Focus = app.FocusSearch
+		s.SearchDraft = ""
+		baseOut := Render(s, th, tr)
+		baseLines := strings.Split(baseOut, "\n")
+
+		s.SearchDraft = "soda"
+		s.SearchSuggestions = []string{"soda stereo", "soda stereo signos"}
+		sugOut := Render(s, th, tr)
+		sugLines := strings.Split(sugOut, "\n")
+
+		if !strings.Contains(sugOut, "Sugerencias") || !strings.Contains(sugOut, "soda stereo signos") {
+			t.Fatalf("expected Sugerencias overlay in output, got:\n%s", sugOut)
+		}
+		// Rows below the suggestion overlay (e.g., bottom grid rows and player bar) must stay at identical Y indices.
+		for _, y := range []int{15, 25, 36, 40} {
+			if baseLines[y] != sugLines[y] {
+				t.Fatalf("line %d shifted when suggestions opened:\nBASE: %q\nSUG : %q", y, baseLines[y], sugLines[y])
+			}
+		}
+
+		// Suggestion panel spans the full main pane width flush to the right edge (col 139 of 140, no sliced thumbnail bleed).
+		if got := dropLeftColumns(sugLines[3], 139); !strings.Contains(got, "╮") {
+			t.Fatalf("expected Sugerencias top border to end with ╮ at rightmost column, got %q", got)
+		}
+		for _, rowY := range []int{4, 5} {
+			if got := dropLeftColumns(sugLines[rowY], 139); !strings.Contains(got, "│") {
+				t.Fatalf("row %d: expected Sugerencias body to end with │ at rightmost column, got %q", rowY, got)
+			}
+		}
+		if got := dropLeftColumns(sugLines[6], 139); !strings.Contains(got, "╯") {
+			t.Fatalf("expected Sugerencias bottom border to end with ╯ at rightmost column, got %q", got)
+		}
+	})
+
+	t.Run("search_hides_chips_and_keeps_loading_spinner_only_in_search_bar", func(t *testing.T) {
+		s := newTestState(app.ViewSearch, 140, 36)
+		defer s.Close()
+		s.SearchQuery = "midudev"
+		s.SearchPending = true
+		s.AnimFrame = 0
+		s.SearchResults = []model.Video{
+			{ID: "midu0000001", Title: "Crea una Landing", Channel: "midudev", Duration: "25:48"},
+		}
+		out := Render(s, th, tr)
+		assertBounds(t, out, 140, 36)
+		if strings.Contains(out, "No vistos") {
+			t.Fatalf("did not expect Search filter chips ('No vistos') in ViewSearch, got:\n%s", out)
+		}
+		lines := strings.Split(out, "\n")
+		if !strings.Contains(lines[1], "⠋") {
+			t.Fatalf("expected loading spinner at the end of top search bar (line 1), got:\n%s", lines[1])
+		}
+		if strings.Contains(lines[3], "⠋") {
+			t.Fatalf("did not expect duplicate loading spinner in main header row (line 3), got:\n%s", lines[3])
+		}
+	})
 }

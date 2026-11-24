@@ -62,22 +62,22 @@ func DefaultTheme() Theme {
 			Foreground(White).
 			Padding(0, 1),
 		Chip: lipgloss.NewStyle().
-			Background(Surf).
-			Foreground(Text).
+			Background(Bg).
+			Foreground(Muted).
 			Padding(0, 1),
 		ChipActive: lipgloss.NewStyle().
-			Background(White).
-			Foreground(Bg).
+			Background(Surf).
+			Foreground(lipgloss.Color("#FF4D6D")).
 			Bold(true).
 			Padding(0, 1),
 		Card: lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
+			Border(lipgloss.HiddenBorder()).
 			BorderForeground(lipgloss.Color("#374151")).
 			Foreground(Text).
 			Padding(0, 1),
 		CardSelected: lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("#BD93F9")).
+			BorderForeground(lipgloss.Color("#FF4D6D")).
 			Foreground(White).
 			Padding(0, 1),
 		BadgeLive: lipgloss.NewStyle().
@@ -160,7 +160,7 @@ var palettesByName = map[string]Palette{
 		Blue:      Blue,
 		Yellow:    Yellow,
 		Track:     Track,
-		Accent:    lipgloss.Color("#BD93F9"),
+		Accent:    lipgloss.Color("#FF4D6D"),
 		Secondary: Blue,
 	},
 	"catppuccin": {
@@ -324,16 +324,17 @@ func ThemeFromPalette(p Palette) Theme {
 	sidebarBase := lipgloss.NewStyle().
 		Foreground(p.Muted).
 		Padding(0, 1)
-	if p.Name != "terminal" && p.Name != "no-color" {
-		sidebarBase = sidebarBase.Background(p.Bg)
-	}
 	chipBase := lipgloss.NewStyle().
-		Foreground(p.Text).
+		Foreground(p.Muted).
 		Padding(0, 1)
 	if p.Name != "terminal" && p.Name != "no-color" {
-		chipBase = chipBase.Background(p.Surf)
+		chipBase = chipBase.Background(p.Bg)
 	} else {
 		chipBase = chipBase.Background(lipgloss.Color("0"))
+	}
+	chipActiveBg := p.Surf
+	if p.Name == "no-color" || p.Name == "terminal" {
+		chipActiveBg = p.SurfHi
 	}
 	badgeDur := lipgloss.NewStyle().
 		Foreground(p.White).
@@ -357,12 +358,12 @@ func ThemeFromPalette(p Palette) Theme {
 			Padding(0, 1),
 		Chip: chipBase,
 		ChipActive: lipgloss.NewStyle().
-			Background(p.White).
-			Foreground(p.Bg).
+			Background(chipActiveBg).
+			Foreground(p.Accent).
 			Bold(true).
 			Padding(0, 1),
 		Card: lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
+			Border(lipgloss.HiddenBorder()).
 			BorderForeground(p.Border).
 			Foreground(p.Text).
 			Padding(0, 1),

@@ -139,21 +139,34 @@ func (g *EscapeGuard) FilterKey(msg tea.KeyMsg) (tea.KeyMsg, bool) {
 // NewBubbleTeaEscapeFilter returns a tea.WithFilter hook that drops leaked SGR
 // mouse, CSI/DA, and Kitty APC key fragments before they reach Model.Update.
 func NewBubbleTeaEscapeFilter() func(tea.Model, tea.Msg) tea.Msg {
+	return NewBubbleTeaProgramFilter(nil)
+}
+
+// NewBubbleTeaProgramFilter returns a tea.WithFilter hook that drops leaked escape
+// key fragments and filters out redundant MouseActionMotion events that would not
+// change hover selection, avoiding unnecessary View/TTY redraws on fast pointer sweeps.
+func NewBubbleTeaProgramFilter(s *State) func(tea.Model, tea.Msg) tea.Msg {
 	var (
 		mu    sync.Mutex
 		guard EscapeGuard
 	)
 	return func(_ tea.Model, msg tea.Msg) tea.Msg {
-		keyMsg, ok := msg.(tea.KeyMsg)
-		if !ok {
+		switch m := msg.(type) {
+		case tea.KeyMsg:
+			mu.Lock()
+			filtered, keep := guard.FilterKey(m)
+			mu.Unlock()
+			if !keep {
+				return nil
+			}
+			return filtered
+		case tea.MouseMsg:
+			if m.Action == tea.MouseActionMotion && s != nil && !s.WouldMouseMotionChange(m.X, m.Y) {
+				return nil
+			}
+			return msg
+		default:
 			return msg
 		}
-		mu.Lock()
-		filtered, keep := guard.FilterKey(keyMsg)
-		mu.Unlock()
-		if !keep {
-			return nil
-		}
-		return filtered
 	}
 }

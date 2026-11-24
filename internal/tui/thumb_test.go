@@ -67,10 +67,12 @@ func resetThumbTestState() {
 
 	fetchingMu.Lock()
 	clear(fetchingMap)
+	clear(failedFetchUntil)
 	fetchingMu.Unlock()
 
 	prepareMu.Lock()
 	clear(preparingMap)
+	clear(failedPrepareUntil)
 	prepareMu.Unlock()
 }
 
@@ -780,5 +782,59 @@ func TestSetThumbQualityAndClearThumbCache(t *testing.T) {
 	}
 	if strings.Contains(out, delBrand) {
 		t.Fatalf("ClearThumbCache must not delete pinned brandImgID (%q)", delBrand)
+	}
+}
+
+func TestFetchThumbnailAsyncSkipsExistingCacheAndCooldownsFailures(t *testing.T) {
+	cacheDir := setupThumbTest(t)
+
+	var reqCount atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reqCount.Add(1)
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	SetThumbBaseURL(srv.URL)
+	SetThumbHTTPClient(srv.Client())
+
+	var readyCount atomic.Int32
+	SetOnThumbReady(func(string) {
+		readyCount.Add(1)
+	})
+
+	// 1. Existing cached thumbnail on disk must short-circuit without HTTP or callback.
+	writeThumbFixture(t, cacheDir, "cached01", "maxresdefault", bytes.Repeat([]byte("A"), 3200))
+	for i := 0; i < 5; i++ {
+		FetchThumbnailAsync("cached01")
+	}
+	asyncWG.Wait()
+	if got := reqCount.Load(); got != 0 {
+		t.Fatalf("expected 0 HTTP requests for already-cached thumbnail, got %d", got)
+	}
+	if got := readyCount.Load(); got != 0 {
+		t.Fatalf("expected 0 ready callbacks for already-cached thumbnail, got %d", got)
+	}
+
+	// 2. Repeated Prefetch calls after a 404 failure must honor cooldown until ClearThumbCache().
+	FetchThumbnailAsync("miss4041")
+	asyncWG.Wait()
+	firstAttempts := reqCount.Load()
+	if firstAttempts == 0 {
+		t.Fatal("expected initial FetchThumbnailAsync to attempt download for missing ID")
+	}
+	for i := 0; i < 5; i++ {
+		FetchThumbnailAsync("miss4041")
+	}
+	asyncWG.Wait()
+	if got := reqCount.Load(); got != firstAttempts {
+		t.Fatalf("expected cooldown to suppress duplicate failed retries (got %d requests, want %d)", got, firstAttempts)
+	}
+
+	ClearThumbCache()
+	FetchThumbnailAsync("miss4041")
+	asyncWG.Wait()
+	if got := reqCount.Load(); got <= firstAttempts {
+		t.Fatalf("expected ClearThumbCache to reset cooldown and allow retry, got %d <= %d", got, firstAttempts)
 	}
 }
