@@ -17,6 +17,7 @@ type FakeStore struct {
 	LikedVideos   []model.Video
 	HistoryVideos []model.Video
 	Subs          []string
+	SubLabels     map[string]string
 	Err           error
 }
 
@@ -141,9 +142,34 @@ func (f *FakeStore) Subscriptions(ctx context.Context) ([]string, error) {
 	return slices.Clone(f.Subs), nil
 }
 
+// SubscriptionLabels returns a copy of SubLabels.
+func (f *FakeStore) SubscriptionLabels(ctx context.Context) (map[string]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.Err != nil {
+		return nil, f.Err
+	}
+	if len(f.SubLabels) == 0 {
+		return nil, nil
+	}
+	out := make(map[string]string, len(f.SubLabels))
+	for k, v := range f.SubLabels {
+		out[k] = v
+	}
+	return out, nil
+}
+
 // ToggleSubscription adds or removes channelRef from Subs case-insensitively and reports
 // whether it is now subscribed.
 func (f *FakeStore) ToggleSubscription(ctx context.Context, channelRef string) (bool, error) {
+	return f.ToggleSubscriptionLabeled(ctx, channelRef, "")
+}
+
+// ToggleSubscriptionLabeled adds or removes channelRef from Subs with an optional display label.
+func (f *FakeStore) ToggleSubscriptionLabeled(ctx context.Context, channelRef, label string) (bool, error) {
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
@@ -151,6 +177,7 @@ func (f *FakeStore) ToggleSubscription(ctx context.Context, channelRef string) (
 	if ref == "" {
 		return false, errors.New("channel reference is required")
 	}
+	lbl := strings.TrimSpace(label)
 
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -161,9 +188,46 @@ func (f *FakeStore) ToggleSubscription(ctx context.Context, channelRef string) (
 	for i, existing := range f.Subs {
 		if strings.EqualFold(strings.TrimSpace(existing), ref) {
 			f.Subs = append(f.Subs[:i], f.Subs[i+1:]...)
+			if f.SubLabels != nil {
+				delete(f.SubLabels, existing)
+				delete(f.SubLabels, ref)
+			}
 			return false, nil
 		}
 	}
 	f.Subs = append(f.Subs, ref)
+	if lbl != "" && !strings.EqualFold(lbl, ref) {
+		if f.SubLabels == nil {
+			f.SubLabels = make(map[string]string)
+		}
+		f.SubLabels[ref] = lbl
+	}
 	return true, nil
+}
+
+// SetSubscriptionLabel records a display label for an existing subscribed ref in FakeStore.
+func (f *FakeStore) SetSubscriptionLabel(ctx context.Context, channelRef, label string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	ref := strings.TrimSpace(channelRef)
+	lbl := strings.TrimSpace(label)
+	if ref == "" || lbl == "" || strings.EqualFold(lbl, ref) {
+		return nil
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.Err != nil {
+		return f.Err
+	}
+	for _, existing := range f.Subs {
+		if strings.EqualFold(strings.TrimSpace(existing), ref) {
+			if f.SubLabels == nil {
+				f.SubLabels = make(map[string]string)
+			}
+			f.SubLabels[existing] = lbl
+			return nil
+		}
+	}
+	return nil
 }

@@ -297,6 +297,50 @@ func TestToggleSubscription(t *testing.T) {
 	}
 }
 
+func TestToggleSubscriptionLabeledAndLabelsPreserved(t *testing.T) {
+	ctx := context.Background()
+	s := NewTSVStore(t.TempDir())
+
+	sub, err := s.ToggleSubscriptionLabeled(ctx, "UC1111111111111111111111", "Soda Stereo")
+	if err != nil || !sub {
+		t.Fatalf("ToggleSubscriptionLabeled 1 = (%v, %v), want (true, nil)", sub, err)
+	}
+	sub, err = s.ToggleSubscriptionLabeled(ctx, "UC2222222222222222222222", "Andrés Calamaro")
+	if err != nil || !sub {
+		t.Fatalf("ToggleSubscriptionLabeled 2 = (%v, %v), want (true, nil)", sub, err)
+	}
+
+	// Plain ToggleSubscription on another channel must preserve labels on existing entries.
+	if _, err := s.ToggleSubscription(ctx, "@gopher"); err != nil {
+		t.Fatalf("ToggleSubscription error: %v", err)
+	}
+	labels, err := s.SubscriptionLabels(ctx)
+	if err != nil {
+		t.Fatalf("SubscriptionLabels error: %v", err)
+	}
+	if labels["UC1111111111111111111111"] != "Soda Stereo" || labels["UC2222222222222222222222"] != "Andrés Calamaro" {
+		t.Fatalf("unexpected preserved labels: %+v", labels)
+	}
+
+	// SetSubscriptionLabel updates an existing raw subscription entry in place.
+	if _, err := s.ToggleSubscription(ctx, "UC3333333333333333333333"); err != nil {
+		t.Fatalf("add raw sub error: %v", err)
+	}
+	if err := s.SetSubscriptionLabel(ctx, "UC3333333333333333333333", "Pink Floyd"); err != nil {
+		t.Fatalf("SetSubscriptionLabel error: %v", err)
+	}
+	labels, err = s.SubscriptionLabels(ctx)
+	if err != nil || labels["UC3333333333333333333333"] != "Pink Floyd" {
+		t.Fatalf("expected hydrated Pink Floyd label, got (%+v, %v)", labels, err)
+	}
+
+	// Subscriptions() continues returning canonical refs cleanly for RSS feeds.
+	subs, err := s.Subscriptions(ctx)
+	if err != nil || !slices.Equal(subs, []string{"UC1111111111111111111111", "UC2222222222222222222222", "@gopher", "UC3333333333333333333333"}) {
+		t.Fatalf("Subscriptions() = (%v, %v)", subs, err)
+	}
+}
+
 func TestTSVStoreLikedSeparateFromSaved(t *testing.T) {
 	ctx := context.Background()
 	s := NewTSVStore(t.TempDir())

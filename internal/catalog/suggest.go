@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	defaultSuggestURL     = "https://suggestqueries-clients6.youtube.com/complete/search?client=firefox&ds=yt&q="
+	defaultSuggestURL     = "https://suggestqueries.google.com/complete/search?client=firefox&ds=yt&q="
 	defaultSuggestTimeout = 2 * time.Second
 	maxSuggestResults     = 6
 	maxSuggestCacheSize   = 64

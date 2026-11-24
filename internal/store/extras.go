@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/e12jassir/iutui/internal/model"
 )
 
 const (
@@ -256,4 +258,133 @@ func readSearchHistoryFile(path string) ([]string, error) {
 		}
 	}
 	return out, scanner.Err()
+}
+
+const musicStatsFile = "music_stats.json"
+
+// TrackStat stores cumulative local playback engagement for a single video ID.
+type TrackStat struct {
+	VideoID      string    `json:"video_id"`
+	Title        string    `json:"title,omitempty"`
+	Artist       string    `json:"artist,omitempty"`
+	Duration     string    `json:"duration,omitempty"`
+	Plays        int       `json:"plays"`
+	Completes    int       `json:"completes"`
+	Skips        int       `json:"skips"`
+	LastPlayedAt time.Time `json:"last_played_at"`
+}
+
+// ListeningStats persists per-track local plays, completions, and fast skips
+// inside StateDir/music_stats.json.
+type ListeningStats struct {
+	StateDir string
+	mu       sync.Mutex
+}
+
+// NewListeningStats constructs a ListeningStats store rooted at stateDir.
+func NewListeningStats(stateDir string) *ListeningStats {
+	return &ListeningStats{StateDir: stateDir}
+}
+
+func (l *ListeningStats) path() string {
+	if l == nil || strings.TrimSpace(l.StateDir) == "" {
+		return ""
+	}
+	return filepath.Join(l.StateDir, musicStatsFile)
+}
+
+// Snapshot returns a copy of all locally recorded track stats.
+func (l *ListeningStats) Snapshot() map[string]TrackStat {
+	p := l.path()
+	if p == "" {
+		return nil
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	m, err := readMusicStatsFile(p)
+	if err != nil || len(m) == 0 {
+		return nil
+	}
+	out := make(map[string]TrackStat, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
+// RecordPlay increments Plays and updates metadata for v.
+func (l *ListeningStats) RecordPlay(v model.Video) error {
+	return l.mutate(v, func(st *TrackStat) {
+		st.Plays++
+		st.LastPlayedAt = time.Now().UTC()
+	})
+}
+
+// RecordComplete increments Completes and updates metadata for v.
+func (l *ListeningStats) RecordComplete(v model.Video) error {
+	return l.mutate(v, func(st *TrackStat) {
+		st.Completes++
+		st.LastPlayedAt = time.Now().UTC()
+	})
+}
+
+// RecordSkip increments Skips and updates metadata for v.
+func (l *ListeningStats) RecordSkip(v model.Video) error {
+	return l.mutate(v, func(st *TrackStat) {
+		st.Skips++
+	})
+}
+
+func (l *ListeningStats) mutate(v model.Video, fn func(*TrackStat)) error {
+	id := strings.TrimSpace(v.ID)
+	p := l.path()
+	if id == "" || p == "" {
+		return nil
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	m, err := readMusicStatsFile(p)
+	if err != nil {
+		return err
+	}
+	if m == nil {
+		m = make(map[string]TrackStat)
+	}
+	st := m[id]
+	st.VideoID = id
+	if strings.TrimSpace(v.Title) != "" {
+		st.Title = strings.TrimSpace(v.Title)
+	}
+	if ch := strings.TrimSpace(v.Channel); ch != "" && !strings.EqualFold(ch, "YouTube") {
+		st.Artist = ch
+	}
+	if d := strings.TrimSpace(v.Duration); d != "" && d != "-" {
+		st.Duration = d
+	}
+	fn(&st)
+	m[id] = st
+	data, err := json.Marshal(m)
+	if err != nil {
+		return err
+	}
+	return writeBytesAtomic(p, data)
+}
+
+func readMusicStatsFile(path string) (map[string]TrackStat, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return nil, nil
+	}
+	var m map[string]TrackStat
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return nil, nil
+	}
+	return m, nil
 }

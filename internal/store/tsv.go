@@ -195,6 +195,11 @@ func (s *TSVStore) RecordHistory(ctx context.Context, v model.Video) error {
 	return writeVideosAtomic(path, updated)
 }
 
+type subscriptionEntry struct {
+	Ref   string
+	Label string
+}
+
 // Subscriptions returns the channel references listed in subscriptions.tsv.
 func (s *TSVStore) Subscriptions(ctx context.Context) ([]string, error) {
 	if err := ctx.Err(); err != nil {
@@ -206,9 +211,41 @@ func (s *TSVStore) Subscriptions(ctx context.Context) ([]string, error) {
 	return s.readSubscriptions(filepath.Join(s.StateDir, subscriptionsFile))
 }
 
+// SubscriptionLabels returns optional human-readable display names stored alongside
+// channel references in subscriptions.tsv.
+func (s *TSVStore) SubscriptionLabels(ctx context.Context) (map[string]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	entries, err := s.readSubscriptionEntries(filepath.Join(s.StateDir, subscriptionsFile))
+	if err != nil {
+		return nil, err
+	}
+	if len(entries) == 0 {
+		return nil, nil
+	}
+	labels := make(map[string]string)
+	for _, e := range entries {
+		if e.Label != "" {
+			labels[e.Ref] = e.Label
+		}
+	}
+	return labels, nil
+}
+
 // ToggleSubscription adds channelRef to subscriptions.tsv if absent (returning true)
 // or removes matching entries case-insensitively if already present (returning false).
 func (s *TSVStore) ToggleSubscription(ctx context.Context, channelRef string) (bool, error) {
+	return s.ToggleSubscriptionLabeled(ctx, channelRef, "")
+}
+
+// ToggleSubscriptionLabeled adds channelRef with an optional display label (stored in
+// column 2 of subscriptions.tsv) if absent, or removes matching entries case-insensitively,
+// preserving labels on all other subscriptions.
+func (s *TSVStore) ToggleSubscriptionLabeled(ctx context.Context, channelRef, label string) (bool, error) {
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
@@ -216,20 +253,24 @@ func (s *TSVStore) ToggleSubscription(ctx context.Context, channelRef string) (b
 	if ref == "" {
 		return false, errors.New("channel reference is required")
 	}
+	lbl := sanitizeField(label)
+	if strings.EqualFold(lbl, ref) {
+		lbl = ""
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	path := filepath.Join(s.StateDir, subscriptionsFile)
-	existing, err := s.readSubscriptions(path)
+	existing, err := s.readSubscriptionEntries(path)
 	if err != nil {
 		return false, err
 	}
 
 	found := false
-	updated := make([]string, 0, len(existing)+1)
+	updated := make([]subscriptionEntry, 0, len(existing)+1)
 	for _, sub := range existing {
-		if strings.EqualFold(strings.TrimSpace(sub), ref) {
+		if strings.EqualFold(strings.TrimSpace(sub.Ref), ref) {
 			found = true
 			continue
 		}
@@ -238,20 +279,80 @@ func (s *TSVStore) ToggleSubscription(ctx context.Context, channelRef string) (b
 
 	subscribed := !found
 	if subscribed {
-		updated = append(updated, ref)
+		updated = append(updated, subscriptionEntry{Ref: ref, Label: lbl})
 	}
 
-	var buf bytes.Buffer
-	for _, sub := range updated {
-		fmt.Fprintf(&buf, "%s\n", sanitizeField(sub))
-	}
-	if err := writeBytesAtomic(path, buf.Bytes()); err != nil {
+	if err := writeSubscriptionEntries(path, updated); err != nil {
 		return false, err
 	}
 	return subscribed, nil
 }
 
+// SetSubscriptionLabel persists a display label for an existing subscription in
+// subscriptions.tsv when the label is non-empty and differs from ref.
+func (s *TSVStore) SetSubscriptionLabel(ctx context.Context, channelRef, label string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	ref := sanitizeField(channelRef)
+	lbl := sanitizeField(label)
+	if ref == "" || lbl == "" || strings.EqualFold(lbl, ref) {
+		return nil
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	path := filepath.Join(s.StateDir, subscriptionsFile)
+	entries, err := s.readSubscriptionEntries(path)
+	if err != nil {
+		return err
+	}
+	changed := false
+	for i := range entries {
+		if strings.EqualFold(strings.TrimSpace(entries[i].Ref), ref) {
+			if entries[i].Label != lbl {
+				entries[i].Label = lbl
+				changed = true
+			}
+		}
+	}
+	if !changed {
+		return nil
+	}
+	return writeSubscriptionEntries(path, entries)
+}
+
+func writeSubscriptionEntries(path string, entries []subscriptionEntry) error {
+	var buf bytes.Buffer
+	for _, sub := range entries {
+		ref := sanitizeField(sub.Ref)
+		lbl := sanitizeField(sub.Label)
+		if ref == "" {
+			continue
+		}
+		if lbl != "" && !strings.EqualFold(lbl, ref) {
+			fmt.Fprintf(&buf, "%s\t%s\n", ref, lbl)
+		} else {
+			fmt.Fprintf(&buf, "%s\n", ref)
+		}
+	}
+	return writeBytesAtomic(path, buf.Bytes())
+}
+
 func (s *TSVStore) readSubscriptions(path string) ([]string, error) {
+	entries, err := s.readSubscriptionEntries(path)
+	if err != nil || len(entries) == 0 {
+		return nil, err
+	}
+	subs := make([]string, 0, len(entries))
+	for _, e := range entries {
+		subs = append(subs, e.Ref)
+	}
+	return subs, nil
+}
+
+func (s *TSVStore) readSubscriptionEntries(path string) ([]subscriptionEntry, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -261,19 +362,24 @@ func (s *TSVStore) readSubscriptions(path string) ([]string, error) {
 	}
 	defer f.Close()
 
-	var subs []string
+	var subs []subscriptionEntry
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		// Support both single-column and tab-separated rows.
+		ref := line
+		label := ""
 		if idx := strings.IndexByte(line, '\t'); idx >= 0 {
-			line = strings.TrimSpace(line[:idx])
+			ref = strings.TrimSpace(line[:idx])
+			label = strings.TrimSpace(line[idx+1:])
+			if tab2 := strings.IndexByte(label, '\t'); tab2 >= 0 {
+				label = strings.TrimSpace(label[:tab2])
+			}
 		}
-		if line != "" {
-			subs = append(subs, line)
+		if ref != "" {
+			subs = append(subs, subscriptionEntry{Ref: ref, Label: label})
 		}
 	}
 	if err := scanner.Err(); err != nil {

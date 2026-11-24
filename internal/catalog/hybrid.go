@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/e12jassir/iutui/internal/model"
 )
@@ -19,6 +20,8 @@ type HybridCatalog struct {
 	Feeds                 *BashCatalog
 	Direct                *YTDLPCatalog
 	SubscriptionsProvider func(context.Context) ([]string, error)
+	LocalMusicProvider    func(context.Context) (LocalMusicData, error)
+	LocalMusicBaseURL     string
 	RSSClient             *http.Client
 	DisableCookieAuthSubs bool
 
@@ -79,6 +82,26 @@ func (h *HybridCatalog) loadFeed(ctx context.Context, tab model.Tab, refresh boo
 
 	if tab == model.TabSubscriptions && h.SubscriptionsProvider != nil {
 		return h.subscriptionsFeed(ctx, refresh)
+	}
+	if tab == model.TabMusic && h.LocalMusicProvider != nil {
+		if data, err := h.LocalMusicProvider(ctx); err == nil {
+			var cacheDir string
+			var cacheTTL time.Duration
+			feedSize := 30
+			if h.Direct != nil {
+				cacheDir = h.Direct.CacheDir
+				cacheTTL = h.Direct.CacheTTL
+				if h.Direct.FeedSize > 0 {
+					feedSize = h.Direct.FeedSize
+				}
+			}
+			if videos, handled, localErr := BuildLocalMusicFeed(ctx, data, cacheDir, cacheTTL, refresh, feedSize, h.RSSClient, h.LocalMusicBaseURL); handled && localErr == nil && len(videos) > 0 {
+				return videos, nil
+			}
+		}
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 	}
 
 	var directErr error
