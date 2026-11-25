@@ -1353,14 +1353,26 @@ func applyHyprlandPiP(ctx context.Context, pid int, enable bool) {
 		return
 	}
 	target := fmt.Sprintf("pid:%d", pid)
+
+	// Hyprland >= 0.57 uses Lua eval syntax for window dispatchers.
+	var luaCode string
+	if enable {
+		luaCode = fmt.Sprintf(`hl.dispatch(hl.dsp.window.float({window=%q})); hl.dispatch(hl.dsp.window.pin({window=%q}))`, target, target)
+	} else {
+		luaCode = fmt.Sprintf(`hl.dispatch(hl.dsp.window.pin({window=%q})); hl.dispatch(hl.dsp.window.float({window=%q}))`, target, target)
+	}
+	if err := exec.CommandContext(ctx, hyprctl, "eval", luaCode).Run(); err == nil {
+		return
+	}
+
+	// Fallback for legacy Hyprland (< 0.57) batch dispatcher syntax.
 	var batch string
 	if enable {
 		batch = fmt.Sprintf("dispatch setfloating %s; dispatch pin %s; dispatch resizewindowpixel exact 480 270,%s", target, target, target)
 	} else {
 		batch = fmt.Sprintf("dispatch pin %s; dispatch settiled %s", target, target)
 	}
-	cmd := exec.CommandContext(ctx, hyprctl, "--batch", batch)
-	_ = cmd.Run()
+	_ = exec.CommandContext(ctx, hyprctl, "--batch", batch).Run()
 }
 
 // Playlist queries mpv's "playlist" property and returns the active playlist entries.
