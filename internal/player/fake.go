@@ -35,6 +35,8 @@ type FakeEngine struct {
 	cookieJar    string
 	chapters     []Chapter
 	playlist     []PlaylistItem
+	SubtitlesOn  bool
+	PiPOn        bool
 }
 
 // NewFakeEngine creates a new FakeEngine with default initial status.
@@ -414,6 +416,30 @@ func (f *FakeEngine) ToggleLoop(_ context.Context) (bool, error) {
 	f.status.LoopFile = !f.status.LoopFile
 	f.broadcastLocked(f.status)
 	return f.status.LoopFile, nil
+}
+
+// CycleSubtitles records the CycleSubtitles call and toggles SubtitlesOn.
+func (f *FakeEngine) CycleSubtitles(_ context.Context) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, FakeCall{Method: "CycleSubtitles"})
+	if f.err != nil {
+		return f.SubtitlesOn, f.err
+	}
+	f.SubtitlesOn = !f.SubtitlesOn
+	return f.SubtitlesOn, nil
+}
+
+// TogglePiP records the TogglePiP call and toggles PiPOn.
+func (f *FakeEngine) TogglePiP(_ context.Context) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, FakeCall{Method: "TogglePiP"})
+	if f.err != nil {
+		return f.PiPOn, f.err
+	}
+	f.PiPOn = !f.PiPOn
+	return f.PiPOn, nil
 }
 
 // Playlist records the call and returns a copy of the configured fake playlist.

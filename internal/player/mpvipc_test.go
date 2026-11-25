@@ -4307,3 +4307,200 @@ func TestIPCClient_EndFileErrorOnDirectStreamFallsBackToWatchURL(t *testing.T) {
 		t.Fatalf("expected one-shot fallback recovery (no loop), got %v", gotAfter)
 	}
 }
+
+func TestPlayFromUsesIPCLoadfileWithStart(t *testing.T) {
+	var mu sync.Mutex
+	var gotStart string
+	var loadCount int
+	var srv *testMPVServer
+	srv = startTestMPVServer(t, func(conn net.Conn, cmd []any, reqID int64) {
+		if len(cmd) >= 1 && fmt.Sprint(cmd[0]) == "loadfile" {
+			mu.Lock()
+			loadCount++
+			if len(cmd) >= 5 {
+				if opts, ok := cmd[4].(map[string]any); ok {
+					if s, ok := opts["start"].(string); ok {
+						gotStart = s
+					}
+				}
+			}
+			mu.Unlock()
+		}
+		_ = srv.SendJSON(conn, map[string]any{"request_id": reqID, "error": "success"})
+	})
+
+	bin := writeFakeYTDLP(t, "printf 'https://rr4---sn-0ox.googlevideo.com/videoplayback?c=IOS\\n'\n")
+	client := NewIPCClient(
+		WithSocketPath(srv.sockPath),
+		WithCommandTimeout(time.Second),
+		WithFadeDuration(0),
+		WithLaunchDefaults(LaunchOpts{
+			SocketPath:   srv.sockPath,
+			AudioOnly:    true,
+			Mode:         "audio",
+			YtdlpBin:     bin,
+			FastPlayback: true,
+		}),
+	)
+	defer client.Close()
+	client.SetAutoplay(false)
+
+	select {
+	case <-srv.accepts:
+	case <-time.After(time.Second):
+		t.Fatal("server did not accept connection")
+	}
+
+	if err := client.PlayFrom(context.Background(), model.Video{ID: "resumeVid01", Title: "Resume Test"}, "audio", 42.5); err != nil {
+		t.Fatalf("PlayFrom failed: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if loadCount != 1 {
+		t.Fatalf("expected 1 IPC loadfile command, got %d", loadCount)
+	}
+	if gotStart != "42.5" {
+		t.Fatalf("expected loadfile start=\"42.5\", got %q", gotStart)
+	}
+}
+
+func TestCycleSubtitles(t *testing.T) {
+	var mu sync.Mutex
+	subVis := false
+	sid := ""
+	var srv *testMPVServer
+	srv = startTestMPVServer(t, func(conn net.Conn, cmd []any, reqID int64) {
+		if len(cmd) >= 1 {
+			switch fmt.Sprint(cmd[0]) {
+			case "get_property":
+				if len(cmd) >= 2 && fmt.Sprint(cmd[1]) == "sub-visibility" {
+					mu.Lock()
+					val := subVis
+					mu.Unlock()
+					_ = srv.SendJSON(conn, map[string]any{"request_id": reqID, "data": val, "error": "success"})
+					return
+				}
+			case "set_property":
+				if len(cmd) >= 3 {
+					mu.Lock()
+					switch fmt.Sprint(cmd[1]) {
+					case "sub-visibility":
+						if b, ok := cmd[2].(bool); ok {
+							subVis = b
+						}
+					case "sid":
+						if s, ok := cmd[2].(string); ok {
+							sid = s
+						}
+					}
+					mu.Unlock()
+				}
+			}
+		}
+		_ = srv.SendJSON(conn, map[string]any{"request_id": reqID, "error": "success"})
+	})
+
+	client := NewIPCClient(WithSocketPath(srv.sockPath), WithCommandTimeout(time.Second))
+	defer client.Close()
+
+	select {
+	case <-srv.accepts:
+	case <-time.After(time.Second):
+		t.Fatal("server did not accept connection")
+	}
+
+	on, err := client.CycleSubtitles(context.Background())
+	if err != nil {
+		t.Fatalf("CycleSubtitles(on) failed: %v", err)
+	}
+	if !on {
+		t.Fatal("expected CycleSubtitles to return true")
+	}
+	mu.Lock()
+	if !subVis || sid != "auto" {
+		mu.Unlock()
+		t.Fatalf("expected subVis=true, sid=\"auto\", got subVis=%v sid=%q", subVis, sid)
+	}
+	mu.Unlock()
+
+	on, err = client.CycleSubtitles(context.Background())
+	if err != nil {
+		t.Fatalf("CycleSubtitles(off) failed: %v", err)
+	}
+	if on {
+		t.Fatal("expected CycleSubtitles to return false")
+	}
+	mu.Lock()
+	if subVis {
+		mu.Unlock()
+		t.Fatal("expected subVis=false after second toggle")
+	}
+	mu.Unlock()
+}
+
+func TestTogglePiP(t *testing.T) {
+	var mu sync.Mutex
+	ontop := false
+	var srv *testMPVServer
+	srv = startTestMPVServer(t, func(conn net.Conn, cmd []any, reqID int64) {
+		if len(cmd) >= 1 {
+			switch fmt.Sprint(cmd[0]) {
+			case "get_property":
+				if len(cmd) >= 2 && fmt.Sprint(cmd[1]) == "ontop" {
+					mu.Lock()
+					val := ontop
+					mu.Unlock()
+					_ = srv.SendJSON(conn, map[string]any{"request_id": reqID, "data": val, "error": "success"})
+					return
+				}
+			case "set_property":
+				if len(cmd) >= 3 && fmt.Sprint(cmd[1]) == "ontop" {
+					mu.Lock()
+					if b, ok := cmd[2].(bool); ok {
+						ontop = b
+					}
+					mu.Unlock()
+				}
+			}
+		}
+		_ = srv.SendJSON(conn, map[string]any{"request_id": reqID, "error": "success"})
+	})
+
+	client := NewIPCClient(WithSocketPath(srv.sockPath), WithCommandTimeout(time.Second))
+	defer client.Close()
+
+	select {
+	case <-srv.accepts:
+	case <-time.After(time.Second):
+		t.Fatal("server did not accept connection")
+	}
+
+	on, err := client.TogglePiP(context.Background())
+	if err != nil {
+		t.Fatalf("TogglePiP(on) failed: %v", err)
+	}
+	if !on {
+		t.Fatal("expected TogglePiP to return true")
+	}
+	mu.Lock()
+	if !ontop {
+		mu.Unlock()
+		t.Fatal("expected ontop=true")
+	}
+	mu.Unlock()
+
+	on, err = client.TogglePiP(context.Background())
+	if err != nil {
+		t.Fatalf("TogglePiP(off) failed: %v", err)
+	}
+	if on {
+		t.Fatal("expected TogglePiP to return false")
+	}
+	mu.Lock()
+	if ontop {
+		mu.Unlock()
+		t.Fatal("expected ontop=false after second toggle")
+	}
+	mu.Unlock()
+}

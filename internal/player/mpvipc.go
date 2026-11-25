@@ -1304,6 +1304,39 @@ func (c *IPCClient) ToggleLoop(ctx context.Context) (bool, error) {
 	return next, nil
 }
 
+// CycleSubtitles toggles mpv's sub-visibility property and ensures sid=auto when enabling.
+func (c *IPCClient) CycleSubtitles(ctx context.Context) (bool, error) {
+	var cur bool
+	if resp, err := c.sendCommand(ctx, "get_property", "sub-visibility"); err == nil {
+		if b, ok := resp.Data.(bool); ok {
+			cur = b
+		}
+	}
+	next := !cur
+	if _, err := c.sendCommand(ctx, "set_property", "sub-visibility", next); err != nil {
+		return false, err
+	}
+	if next {
+		_, _ = c.sendCommand(ctx, "set_property", "sid", "auto")
+	}
+	return next, nil
+}
+
+// TogglePiP toggles mpv's ontop property for Picture-in-Picture / floating mode.
+func (c *IPCClient) TogglePiP(ctx context.Context) (bool, error) {
+	var cur bool
+	if resp, err := c.sendCommand(ctx, "get_property", "ontop"); err == nil {
+		if b, ok := resp.Data.(bool); ok {
+			cur = b
+		}
+	}
+	next := !cur
+	if _, err := c.sendCommand(ctx, "set_property", "ontop", next); err != nil {
+		return false, err
+	}
+	return next, nil
+}
+
 // Playlist queries mpv's "playlist" property and returns the active playlist entries.
 func (c *IPCClient) Playlist(ctx context.Context) ([]PlaylistItem, error) {
 	resp, err := c.sendCommand(ctx, "get_property", "playlist")

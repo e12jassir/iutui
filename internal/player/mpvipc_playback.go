@@ -2,6 +2,7 @@ package player
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -505,7 +506,7 @@ func (c *IPCClient) playOnSingleMPV(ctx, waitCtx context.Context, seq uint64, v 
 		return ctx.Err()
 	}
 
-	if startPos <= 0.5 && !startPaused && c.tryPlayViaIPC(waitCtx, seq, v, plan) {
+	if !startPaused && c.tryPlayViaIPC(waitCtx, seq, v, plan, startPos) {
 		c.step3Mu.Unlock()
 		return nil
 	}
@@ -588,7 +589,7 @@ func (c *IPCClient) playOnSingleMPV(ctx, waitCtx context.Context, seq uint64, v 
 	return nil
 }
 
-func (c *IPCClient) tryPlayViaIPC(waitCtx context.Context, seq uint64, v model.Video, plan resolvedPlayTarget) bool {
+func (c *IPCClient) tryPlayViaIPC(waitCtx context.Context, seq uint64, v model.Video, plan resolvedPlayTarget, startPos float64) bool {
 	if !c.isConnected() {
 		return false
 	}
@@ -638,8 +639,12 @@ func (c *IPCClient) tryPlayViaIPC(waitCtx context.Context, seq uint64, v model.V
 	c.armDirectStreamFallback(seq, v, plan)
 
 	var err error
+	startOpt := "none"
+	if startPos > 0.5 {
+		startOpt = fmt.Sprintf("%.1f", startPos)
+	}
 	perFileOpts := map[string]any{
-		"start": "none",
+		"start": startOpt,
 	}
 	if v.Title != "" {
 		perFileOpts["force-media-title"] = v.Title
