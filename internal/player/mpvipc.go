@@ -1337,6 +1337,8 @@ func (c *IPCClient) TogglePiP(ctx context.Context) (bool, error) {
 	if _, err := c.sendCommand(ctx, "set_property", "ontop", next); err != nil {
 		return false, err
 	}
+	_, _ = c.sendCommand(ctx, "set_property", "border", !next)
+	_, _ = c.sendCommand(ctx, "set_property", "keepaspect-window", true)
 	if os.Getenv("HYPRLAND_INSTANCE_SIGNATURE") != "" {
 		if resp, err := c.sendCommand(ctx, "get_property", "pid"); err == nil {
 			if pidFloat, ok := resp.Data.(float64); ok && pidFloat > 0 {
@@ -1357,7 +1359,7 @@ func applyHyprlandPiP(ctx context.Context, pid int, enable bool) {
 	// Hyprland >= 0.57 uses Lua eval syntax for window dispatchers.
 	var luaCode string
 	if enable {
-		luaCode = fmt.Sprintf(`hl.dispatch(hl.dsp.window.float({window=%q})); hl.dispatch(hl.dsp.window.pin({window=%q}))`, target, target)
+		luaCode = fmt.Sprintf(`hl.dispatch(hl.dsp.window.float({window=%q})); hl.dispatch(hl.dsp.window.pin({window=%q})); hl.dispatch(hl.dsp.window.resize({window=%q, size="exact 480 270"}))`, target, target, target)
 	} else {
 		luaCode = fmt.Sprintf(`hl.dispatch(hl.dsp.window.pin({window=%q})); hl.dispatch(hl.dsp.window.float({window=%q}))`, target, target)
 	}
