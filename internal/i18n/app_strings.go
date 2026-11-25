@@ -110,6 +110,10 @@ type AppStrings struct {
 	ToastRepeatOff          string
 	ToastVideoEnabled       string
 	ToastAudioOnly          string
+	ToastSubtitlesOn        string
+	ToastSubtitlesOff       string
+	ToastPiPOn              string
+	ToastPiPOff             string
 
 	// Actions toasts & messages
 	ToastDownloadsUnconfigured string
@@ -250,6 +254,10 @@ func esAppStrings() AppStrings {
 		ToastRepeatOff:          "🔁 Repetir: DESACTIVADO",
 		ToastVideoEnabled:       "🎬 Video activado",
 		ToastAudioOnly:          "🎧 Solo audio (sin ventana)",
+		ToastSubtitlesOn:        "Subtítulos activados (CC)",
+		ToastSubtitlesOff:       "Subtítulos desactivados",
+		ToastPiPOn:              "Picture-in-Picture activado (siempre arriba)",
+		ToastPiPOff:             "Picture-in-Picture desactivado",
 
 		ToastDownloadsUnconfigured: "Descargas no configuradas",
 		ToastDownloading:           "⬇ Descargando: {title}",
@@ -389,6 +397,10 @@ func enAppStrings() AppStrings {
 		ToastRepeatOff:          "🔁 Repeat: OFF",
 		ToastVideoEnabled:       "🎬 Video enabled",
 		ToastAudioOnly:          "🎧 Audio only (no window)",
+		ToastSubtitlesOn:        "Subtitles enabled (CC)",
+		ToastSubtitlesOff:       "Subtitles disabled",
+		ToastPiPOn:              "Picture-in-Picture enabled (always on top)",
+		ToastPiPOff:             "Picture-in-Picture disabled",
 
 		ToastDownloadsUnconfigured: "Downloads not configured",
 		ToastDownloading:           "⬇ Downloading: {title}",

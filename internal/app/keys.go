@@ -179,6 +179,10 @@ func (s *State) handleKey(msg tea.KeyMsg) (*State, tea.Cmd) {
 			return s.CycleTheme()
 		case "x", "V":
 			return s.ToggleVideoMode()
+		case "C":
+			return s, s.toggleSubtitlesCmd()
+		case "P":
+			return s, s.togglePiPCmd()
 		}
 		return s, nil
 	}
@@ -410,6 +414,10 @@ func (s *State) handleKey(msg tea.KeyMsg) (*State, tea.Cmd) {
 		return s.PlaySelected("video")
 	case "x", "V":
 		return s.ToggleVideoMode()
+	case "C":
+		return s, s.toggleSubtitlesCmd()
+	case "P":
+		return s, s.togglePiPCmd()
 	case "m":
 		return s.PlaySelected("mix")
 	case "w":
@@ -428,7 +436,7 @@ func (s *State) handleKey(msg tea.KeyMsg) (*State, tea.Cmd) {
 		return s.CycleQuality()
 	case "f", "F":
 		return s.OpenQualityModal(), nil
-	case "o", "O", "C":
+	case "o", "O":
 		return s.OpenChapters()
 	case "l", "L":
 		if key == "l" && s.Focus == FocusSidebar {

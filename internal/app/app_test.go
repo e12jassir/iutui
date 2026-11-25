@@ -1347,6 +1347,38 @@ func TestV040ShortcutsVideoSponsorThemeChannelSubsChaptersLyrics(t *testing.T) {
 		t.Fatalf("expected %q toast after second V, got %q", s.Catalog().App.ToastVideoEnabled, s.Toast)
 	}
 
+	// 1b. Live subtitles toggle via 'C'
+	s, cmd = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'C'}})
+	for _, msg := range collectNonTickMsgs(cmd, 150*time.Millisecond) {
+		s, _ = s.Update(msg)
+	}
+	if !eng.SubtitlesOn || s.Toast != s.Catalog().App.ToastSubtitlesOn {
+		t.Fatalf("expected SubtitlesOn=true and %q toast after C, got SubtitlesOn=%v toast=%q", s.Catalog().App.ToastSubtitlesOn, eng.SubtitlesOn, s.Toast)
+	}
+	s, cmd = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'C'}})
+	for _, msg := range collectNonTickMsgs(cmd, 150*time.Millisecond) {
+		s, _ = s.Update(msg)
+	}
+	if eng.SubtitlesOn || s.Toast != s.Catalog().App.ToastSubtitlesOff {
+		t.Fatalf("expected SubtitlesOn=false and %q toast after second C, got SubtitlesOn=%v toast=%q", s.Catalog().App.ToastSubtitlesOff, eng.SubtitlesOn, s.Toast)
+	}
+
+	// 1c. Picture-in-Picture toggle via 'P'
+	s, cmd = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'P'}})
+	for _, msg := range collectNonTickMsgs(cmd, 150*time.Millisecond) {
+		s, _ = s.Update(msg)
+	}
+	if !eng.PiPOn || s.Toast != s.Catalog().App.ToastPiPOn {
+		t.Fatalf("expected PiPOn=true and %q toast after P, got PiPOn=%v toast=%q", s.Catalog().App.ToastPiPOn, eng.PiPOn, s.Toast)
+	}
+	s, cmd = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'P'}})
+	for _, msg := range collectNonTickMsgs(cmd, 150*time.Millisecond) {
+		s, _ = s.Update(msg)
+	}
+	if eng.PiPOn || s.Toast != s.Catalog().App.ToastPiPOff {
+		t.Fatalf("expected PiPOn=false and %q toast after second P, got PiPOn=%v toast=%q", s.Catalog().App.ToastPiPOff, eng.PiPOn, s.Toast)
+	}
+
 	// 2. SponsorBlock toggle via 'B'
 	s, cmd = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'B'}})
 	_ = collectNonTickMsgs(cmd, 150*time.Millisecond)
@@ -1405,8 +1437,8 @@ func TestV040ShortcutsVideoSponsorThemeChannelSubsChaptersLyrics(t *testing.T) {
 		t.Fatalf("expected Esc from ViewChannel to return to ViewHome, got %v", s.View)
 	}
 
-	// 6. Chapters modal via 'C', navigate with 'j', seek with Enter
-	s, cmd = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'C'}})
+	// 6. Chapters modal via 'o', navigate with 'j', seek with Enter
+	s, cmd = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'o'}})
 	for _, msg := range collectNonTickMsgs(cmd, 150*time.Millisecond) {
 		s, _ = s.Update(msg)
 	}

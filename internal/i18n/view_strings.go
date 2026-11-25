@@ -103,6 +103,7 @@ type ViewStrings struct {
 	HelpPlayAudio    string
 	HelpPlayChapters string
 	HelpPlaySync     string
+	HelpPlaySubsPiP  string
 	HelpSecSys       string
 	HelpSysAutoplay  string
 	HelpSysTheme     string
@@ -216,6 +217,7 @@ func esViewStrings() ViewStrings {
 		HelpPlayAudio:    "Solo audio · Mix Radio",
 		HelpPlayChapters: "Capítulos · Letras · Calidad",
 		HelpPlaySync:     "Sync letra ±0.5s · Fuente CC",
+		HelpPlaySubsPiP:  "Subtítulos CC · Picture-in-Picture",
 		HelpSecSys:       "SISTEMA & AJUSTES",
 		HelpSysAutoplay:  "Activar/desactivar Autoplay",
 		HelpSysTheme:     "SponsorBlock · Cambiar tema",
@@ -340,6 +342,7 @@ func enViewStrings() ViewStrings {
 		HelpPlayAudio:    "Audio only · Mix Radio",
 		HelpPlayChapters: "Chapters · Lyrics · Quality",
 		HelpPlaySync:     "Lyrics sync ±0.5s · CC source",
+		HelpPlaySubsPiP:  "Subtitles CC · Picture-in-Picture",
 		HelpSecSys:       "SYSTEM & SETTINGS",
 		HelpSysAutoplay:  "Toggle Autoplay",
 		HelpSysTheme:     "SponsorBlock · Switch theme",

@@ -938,3 +938,43 @@ func (s *State) ToggleSponsorBlock() (*State, tea.Cmd) {
 	}
 	return s, tea.Batch(s.toastCmd(msg), saveCmd)
 }
+
+func (s *State) toggleSubtitlesCmd() tea.Cmd {
+	type subtitleCycler interface {
+		CycleSubtitles(context.Context) (bool, error)
+	}
+	sc, ok := s.Deps.Engine.(subtitleCycler)
+	if !ok {
+		return s.toastCmd(s.Catalog().App.ToastHotSwapUnavailable)
+	}
+	return func() tea.Msg {
+		on, err := sc.CycleSubtitles(s.appCtx)
+		if err != nil {
+			return ActionResultMsg{Err: err}
+		}
+		if on {
+			return ActionResultMsg{Info: s.Catalog().App.ToastSubtitlesOn}
+		}
+		return ActionResultMsg{Info: s.Catalog().App.ToastSubtitlesOff}
+	}
+}
+
+func (s *State) togglePiPCmd() tea.Cmd {
+	type pipToggler interface {
+		TogglePiP(context.Context) (bool, error)
+	}
+	pt, ok := s.Deps.Engine.(pipToggler)
+	if !ok {
+		return s.toastCmd(s.Catalog().App.ToastHotSwapUnavailable)
+	}
+	return func() tea.Msg {
+		on, err := pt.TogglePiP(s.appCtx)
+		if err != nil {
+			return ActionResultMsg{Err: err}
+		}
+		if on {
+			return ActionResultMsg{Info: s.Catalog().App.ToastPiPOn}
+		}
+		return ActionResultMsg{Info: s.Catalog().App.ToastPiPOff}
+	}
+}

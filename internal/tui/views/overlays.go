@@ -282,6 +282,7 @@ func renderHelpOverlay(s *app.State, width, height int, _ theme.Theme, pal rende
 				{keys: "x / V · m", desc: vs.HelpPlayAudio},
 				{keys: "o / l · f / c", desc: vs.HelpPlayChapters},
 				{keys: "z/Z · y", desc: vs.HelpPlaySync},
+				{keys: "C / P", desc: vs.HelpPlaySubsPiP},
 			},
 		},
 		{
