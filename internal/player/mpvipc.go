@@ -10,6 +10,7 @@ import (
 	"math"
 	"net"
 	"os"
+	"os/exec"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1323,6 +1324,8 @@ func (c *IPCClient) CycleSubtitles(ctx context.Context) (bool, error) {
 }
 
 // TogglePiP toggles mpv's ontop property for Picture-in-Picture / floating mode.
+// On Hyprland (Wayland), where client-side ontop is ignored by the compositor,
+// it also dispatches native hyprctl float/pin/resize commands for mpv's PID.
 func (c *IPCClient) TogglePiP(ctx context.Context) (bool, error) {
 	var cur bool
 	if resp, err := c.sendCommand(ctx, "get_property", "ontop"); err == nil {
@@ -1334,7 +1337,30 @@ func (c *IPCClient) TogglePiP(ctx context.Context) (bool, error) {
 	if _, err := c.sendCommand(ctx, "set_property", "ontop", next); err != nil {
 		return false, err
 	}
+	if os.Getenv("HYPRLAND_INSTANCE_SIGNATURE") != "" {
+		if resp, err := c.sendCommand(ctx, "get_property", "pid"); err == nil {
+			if pidFloat, ok := resp.Data.(float64); ok && pidFloat > 0 {
+				applyHyprlandPiP(ctx, int(pidFloat), next)
+			}
+		}
+	}
 	return next, nil
+}
+
+func applyHyprlandPiP(ctx context.Context, pid int, enable bool) {
+	hyprctl, err := exec.LookPath("hyprctl")
+	if err != nil {
+		return
+	}
+	target := fmt.Sprintf("pid:%d", pid)
+	var batch string
+	if enable {
+		batch = fmt.Sprintf("dispatch setfloating %s; dispatch pin %s; dispatch resizewindowpixel exact 480 270,%s", target, target, target)
+	} else {
+		batch = fmt.Sprintf("dispatch pin %s; dispatch settiled %s", target, target)
+	}
+	cmd := exec.CommandContext(ctx, hyprctl, "--batch", batch)
+	_ = cmd.Run()
 }
 
 // Playlist queries mpv's "playlist" property and returns the active playlist entries.
