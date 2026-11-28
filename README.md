@@ -20,7 +20,7 @@
 
 <br />
 
-`iutui` (`v0.5.3`) is a single-binary YouTube TUI and CLI built in pure Go around `mpv` JSON IPC and `yt-dlp`. It starts playback in under three seconds without cookies, renders inline HD thumbnails natively in pure Go (Kitty graphics in Kitty/Ghostty and 24-bit ANSI quadrant blocks in truecolor terminals), publishes MPRIS2 desktop media controls on Linux, and runs background downloads with offline local playback.
+Search and play YouTube from your terminal. Use Linux media keys to control playback, or download a track and listen offline. `iutui` (`v0.5.3`) is a keyboard-first TUI and CLI built in Go around `mpv` and `yt-dlp`.
 
 ## Quick Install
 
@@ -34,7 +34,7 @@ Auto-detects Linux/macOS (`amd64`/`arm64`), verifies SHA-256 checksums, and auto
 
 Download `.deb`, `.rpm`, or `.tar.gz` archives for `linux` or `darwin` (`amd64` or `arm64`) from [GitHub Releases](https://github.com/e12jassir/iutui/releases) (`.deb` and `.rpm` declare `mpv` and `yt-dlp` dependencies automatically).
 
-**With Go (`1.24+`)**
+**With Go (`1.27.3+`)**
 
 ```sh
 go install github.com/e12jassir/iutui/cmd/iutui@latest
@@ -52,6 +52,14 @@ Verify runtime dependencies, browser cookie status, and socket paths with:
 ```sh
 iutui doctor
 ```
+
+## Play your first track
+
+1. Run `iutui`, press `/`, enter a search, and press `Enter`.
+2. Highlight a result and press `Enter` to play it. To download a result for offline playback, highlight it and press `d`.
+3. If playback does not start, run `iutui doctor` to check dependencies and paths. A first online play can take longer than a cached track because YouTube stream URLs must be resolved before audio can start.
+
+For audio-only playback of a known YouTube URL, use `iutui play -a '<youtube-url>'`.
 
 ## Architecture
 
@@ -71,7 +79,7 @@ Single-video playback resolves through a cookieless `player_client=android` path
 
 | Area | Behavior |
 |---|---|
-| **Sub-3s Playback & Prefetch** | Cookieless `player_client=android` stream resolution paired with async lookahead prefetching and smooth `volume-gain` audio fades on pause/resume, track switches, and queue transitions. |
+| **Playback & Prefetch** | Cookieless `player_client=android` stream resolution paired with async lookahead prefetching and smooth `volume-gain` audio fades on pause/resume, track switches, and queue transitions. |
 | **Linux MPRIS2 D-Bus** | Exports track metadata, position, playback rate, and transport controls over `org.mpris.MediaPlayer2.iutui` for `playerctl`, lock screens, and media keys. |
 | **Live Queue & Autocomplete** | Inspect and edit the active `mpv` queue with `u`; search with `/` using cursor-based editing and live YouTube suggestions (`Tab` to complete). |
 | **Speed, Loop & Auto-Resume** | Adjust playback rate from `0.5x` to `2.0x` (`{` / `}` / `0`), toggle single-track repeat (`R`), and resume videos of 15 minutes or longer automatically via `resume.json`. |
