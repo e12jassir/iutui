@@ -120,6 +120,7 @@ type YTDLPCatalog struct {
 	FeedSize       int
 	SearchSize     int
 	CookieJarPath  string
+	ExtraArgs      []string
 	OnCookiesStale func()
 	Meta           *MetadataEnricher
 
@@ -143,6 +144,11 @@ func (c *YTDLPCatalog) SetFeedSize(n int) {
 	c.cfgMu.Lock()
 	c.FeedSize = n
 	c.cfgMu.Unlock()
+}
+
+// FeedSizeLimit returns the configured playlist item limit for feed fetches (default 30).
+func (c *YTDLPCatalog) FeedSizeLimit() int {
+	return c.feedSize()
 }
 
 func (c *YTDLPCatalog) feedSize() int {
@@ -207,6 +213,11 @@ func (c *YTDLPCatalog) SetCacheTTL(d time.Duration) {
 	}
 }
 
+// CacheTTLDuration returns the configured cache TTL and whether caching was explicitly disabled.
+func (c *YTDLPCatalog) CacheTTLDuration() (time.Duration, bool) {
+	return c.cacheTTLConfig()
+}
+
 func (c *YTDLPCatalog) cacheTTLConfig() (time.Duration, bool) {
 	if c == nil {
 		return 0, true
@@ -228,6 +239,11 @@ func (c *YTDLPCatalog) SetCookieJar(path string) {
 	c.cfgMu.Unlock()
 }
 
+// CookieJar returns the configured cookie jar path in a thread-safe manner.
+func (c *YTDLPCatalog) CookieJar() string {
+	return c.cookieJarPath()
+}
+
 func (c *YTDLPCatalog) cookieJarPath() string {
 	if c == nil {
 		return ""
@@ -236,6 +252,36 @@ func (c *YTDLPCatalog) cookieJarPath() string {
 	p := c.CookieJarPath
 	c.cfgMu.RUnlock()
 	return p
+}
+
+// SetExtraArgs updates additional yt-dlp CLI flags appended to feed, search, and channel requests.
+func (c *YTDLPCatalog) SetExtraArgs(args []string) {
+	if c == nil {
+		return
+	}
+	var copied []string
+	for _, a := range args {
+		if s := strings.TrimSpace(a); s != "" {
+			copied = append(copied, s)
+		}
+	}
+	c.cfgMu.Lock()
+	c.ExtraArgs = copied
+	c.cfgMu.Unlock()
+}
+
+func (c *YTDLPCatalog) extraArgs() []string {
+	if c == nil {
+		return nil
+	}
+	c.cfgMu.RLock()
+	var copied []string
+	if len(c.ExtraArgs) > 0 {
+		copied = make([]string, len(c.ExtraArgs))
+		copy(copied, c.ExtraArgs)
+	}
+	c.cfgMu.RUnlock()
+	return copied
 }
 
 func (c *YTDLPCatalog) notifyCookiesStale() {
@@ -329,11 +375,13 @@ func (c *YTDLPCatalog) Feed(ctx context.Context, tab model.Tab) ([]model.Video, 
 				bgCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 				defer cancel()
 				if fresh, err := c.fetchTabVideos(bgCtx, tab, target); err == nil && len(fresh) > 0 {
-					c.feedMu.Lock()
-					if c.feedGeneration[tab] == generation {
-						_ = writeCacheFile(cachePath, fresh)
+					if _, bgDisabled := c.cacheTTLConfig(); !bgDisabled {
+						c.feedMu.Lock()
+						if c.feedGeneration[tab] == generation {
+							_ = writeCacheFile(cachePath, fresh)
+						}
+						c.feedMu.Unlock()
 					}
-					c.feedMu.Unlock()
 				}
 			}()
 			return videos, nil
@@ -345,7 +393,7 @@ func (c *YTDLPCatalog) Feed(ctx context.Context, tab model.Tab) ([]model.Video, 
 		return nil, err
 	}
 	c.applyCachedMeta(videos)
-	if cachePath != "" && len(videos) > 0 {
+	if cachePath != "" && !cacheDisabled && len(videos) > 0 {
 		c.feedMu.Lock()
 		if c.feedGeneration[tab] == generation {
 			_ = writeCacheFile(cachePath, videos)
@@ -381,7 +429,8 @@ func (c *YTDLPCatalog) RefreshFeed(ctx context.Context, tab model.Tab) ([]model.
 	c.applyCachedMeta(videos)
 
 	cachePath := c.cacheFilePath(cacheFile)
-	if cachePath != "" && len(videos) > 0 {
+	_, cacheDisabled := c.cacheTTLConfig()
+	if cachePath != "" && !cacheDisabled && len(videos) > 0 {
 		c.feedMu.Lock()
 		if c.feedGeneration[tab] == generation {
 			_ = writeCacheFile(cachePath, videos)
@@ -487,6 +536,9 @@ func (c *YTDLPCatalog) fetchTarget(ctx context.Context, target string) ([]model.
 	}
 	if qual := c.quality(); qual > 0 {
 		args = append(args, "-f", BuildFormat(qual))
+	}
+	if extra := c.extraArgs(); len(extra) > 0 {
+		args = append(args, extra...)
 	}
 	args = append(args, target)
 

@@ -3,7 +3,6 @@ package app
 import (
 	"context"
 	"errors"
-	"fmt"
 	"strings"
 	"time"
 
@@ -209,6 +208,7 @@ func (s *State) Init() tea.Cmd {
 
 // Update handles Bubble Tea messages and returns updated state + next command.
 func (s *State) Update(msg tea.Msg) (*State, tea.Cmd) {
+	defer s.syncMouseSnapshot()
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		s.Width = msg.Width
@@ -223,7 +223,7 @@ func (s *State) Update(msg tea.Msg) (*State, tea.Cmd) {
 	case FeedLoadedMsg:
 		s.Syncing = false
 		if msg.Err != nil {
-			return s, s.toastCmd(i18n.Format(s.Catalog().App.ErrLoadTab, map[string]string{"tab": msg.Tab.String(), "err": msg.Err.Error()}))
+			return s, s.toastCmd(i18n.Format(s.Catalog().App.ErrLoadTab, map[string]string{"tab": s.TabName(msg.Tab), "err": msg.Err.Error()}))
 		}
 		s.Feeds[msg.Tab] = msg.Videos
 		labelCmd := s.hydrateSubscriptionLabelsCmd(msg.Videos)
@@ -414,8 +414,9 @@ func (s *State) Update(msg tea.Msg) (*State, tea.Cmd) {
 		if s.ShowQueue && !s.queueRefreshPending {
 			if pc, ok := s.Deps.Engine.(playlistController); ok {
 				s.queueRefreshPending = true
+				ctx := s.appCtx
 				return s, func() tea.Msg {
-					items, err := pc.Playlist(s.appCtx)
+					items, err := pc.Playlist(ctx)
 					return QueueLoadedMsg{Items: items, Err: err}
 				}
 			}
@@ -545,9 +546,9 @@ func (s *State) Update(msg tea.Msg) (*State, tea.Cmd) {
 			}
 			s.Lyrics = lyrics.TrackLyrics{}
 			if errors.Is(msg.Err, lyrics.ErrNotFound) {
-				s.LyricsErr = "Sin letra encontrada"
+				s.LyricsErr = s.Catalog().App.ErrLyricsNotFound
 			} else {
-				s.LyricsErr = fmt.Sprintf("Error de letra: %v", msg.Err)
+				s.LyricsErr = i18n.Format(s.Catalog().App.ErrLyricsFmt, map[string]string{"err": msg.Err.Error()})
 			}
 			return s, nil
 		}
@@ -731,9 +732,11 @@ func (s *State) Update(msg tea.Msg) (*State, tea.Cmd) {
 					}
 					if s.Deps.Store != nil {
 						rec := nextTrack
+						st := s.Deps.Store
+						ctx := s.appCtx
 						stats := s.Deps.ListeningStats
 						historyCmd = func() tea.Msg {
-							_ = s.Deps.Store.RecordHistory(s.appCtx, rec)
+							_ = st.RecordHistory(ctx, rec)
 							if stats != nil {
 								_ = stats.RecordPlay(rec)
 							}
@@ -771,6 +774,7 @@ func (s *State) Update(msg tea.Msg) (*State, tea.Cmd) {
 					s.MPVPlaylist[i].Current = (matchIdx == msg.Status.PlaylistPos)
 				}
 			}
+			s.maybeNotifyStatusTrack(msg.Status)
 		}
 		if msg.Status.IsRunning && msg.Status.Title != "" && msg.Status.Title != s.lastTrackTitle {
 			if s.lastTrackTitle != "" && time.Since(s.LastInteractionAt) > 12*time.Second {
@@ -786,8 +790,9 @@ func (s *State) Update(msg tea.Msg) (*State, tea.Cmd) {
 			msg.Status.PlaylistCount > 0 && msg.Status.PlaylistCount != len(s.MPVPlaylist) && !s.queueRefreshPending {
 			if pc, ok := s.Deps.Engine.(playlistController); ok {
 				s.queueRefreshPending = true
+				ctx := s.appCtx
 				cmds = append(cmds, func() tea.Msg {
-					items, err := pc.Playlist(s.appCtx)
+					items, err := pc.Playlist(ctx)
 					return QueueLoadedMsg{Items: items, Err: err}
 				})
 			}
@@ -854,11 +859,13 @@ func (s *State) Update(msg tea.Msg) (*State, tea.Cmd) {
 		return s.handleMouse(msg)
 
 	case tea.KeyMsg:
-		filtered, keep := s.escapeGuard.FilterKey(msg)
-		if !keep {
-			return s, nil
+		if !s.programFilterAttached.Load() {
+			filtered, keep := s.escapeGuard.FilterKey(msg)
+			if !keep {
+				return s, nil
+			}
+			msg = filtered
 		}
-		msg = filtered
 		if s.ShowStillWatching {
 			return s.handleStillWatchingKey(msg.String())
 		}

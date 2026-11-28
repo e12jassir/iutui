@@ -175,6 +175,8 @@ func Render(s *app.State, th theme.Theme, tr thumbs.Renderer) string {
 	pal := resolveRenderPalette(s.ThemeName)
 	if pal.custom {
 		th = theme.ThemeFromPalette(pal.theme)
+	} else if strings.TrimSpace(s.ThemeName) != "" {
+		th = theme.DefaultTheme()
 	}
 	if s.Width < minWidth || s.Height < minHeight {
 		return renderTooSmall(s.Width, s.Height, th, pal, s.Catalog().Views)
@@ -198,7 +200,7 @@ func Render(s *app.State, th theme.Theme, tr thumbs.Renderer) string {
 	mainW := remW - lyricsSideW - queueSideW
 
 	mainPane := renderMain(s, th, tr, mainW, middleH, pal)
-	if s.Focus == app.FocusSearch && strings.TrimSpace(s.SearchDraft) != "" && len(s.SearchSuggestions) > 0 {
+	if s.Focus == app.FocusSearch && len(s.SearchSuggestions) > 0 {
 		sugCount := min(6, len(s.SearchSuggestions))
 		sugH := sugCount + 2
 		if middleH-sugH < 4 {
@@ -312,7 +314,7 @@ func dropLeftColumns(s string, cols int) string {
 		if s[i] == '\x1b' {
 			if i+1 < n && s[i+1] == '[' {
 				j := i + 2
-				for j < n && !(s[j] >= 0x40 && s[j] <= 0x7E) {
+				for j < n && (s[j] < 0x40 || s[j] > 0x7E) {
 					j++
 				}
 				if j < n {
@@ -613,10 +615,6 @@ func renderChips(s *app.State, th theme.Theme, width int, pal renderPalette) str
 	} else {
 		chips := app.HomeChips
 		active := s.HomeChip
-		if s.View == app.ViewSearch {
-			chips = app.SearchChips
-			active = s.SearchChip
-		}
 
 		parts := make([]string, 0, len(chips))
 		for i, c := range chips {
@@ -903,31 +901,6 @@ func truncatePlain(s string, maxW int) string {
 		return "…"
 	}
 	return runewidth.Truncate(s, maxW, "…")
-}
-
-func tailPlain(s string, maxW int) string {
-	if maxW <= 0 {
-		return ""
-	}
-	if runewidth.StringWidth(s) <= maxW {
-		return s
-	}
-	if maxW == 1 {
-		return "…"
-	}
-	runes := []rune(s)
-	avail := maxW - 1
-	used := 0
-	start := len(runes)
-	for i := len(runes) - 1; i >= 0; i-- {
-		rw := runewidth.RuneWidth(runes[i])
-		if used+rw > avail {
-			break
-		}
-		used += rw
-		start = i
-	}
-	return "…" + string(runes[start:])
 }
 
 func truncateStyledLine(s string, maxW int) string {

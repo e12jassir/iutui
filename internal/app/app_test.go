@@ -209,7 +209,7 @@ func TestMouseInteractions(t *testing.T) {
 		s.Focus = FocusSearch
 		btnStart, _, _ := s.headerSearchBounds()
 		var cmd tea.Cmd
-		s, cmd = s.Update(tea.MouseMsg{
+		_, cmd = s.Update(tea.MouseMsg{
 			X:      btnStart + 1,
 			Y:      1,
 			Button: tea.MouseButtonLeft,
@@ -260,7 +260,7 @@ func TestMouseInteractions(t *testing.T) {
 		}
 
 		var cmd tea.Cmd
-		s, cmd = s.Update(tea.MouseMsg{
+		_, cmd = s.Update(tea.MouseMsg{
 			X:      col1X,
 			Y:      7,
 			Button: tea.MouseButtonLeft,
@@ -527,7 +527,6 @@ func TestMultiRoundSearchClearsPreviousAndPreventsConcat(t *testing.T) {
 	}
 	s.SetSelection(1)
 	s.ResultScroll = 1
-	s.SearchChip = 1
 
 	// Round 2 via '/': on ViewSearch, '/' prefills active SearchQuery for editing (no leftover draft).
 	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
@@ -557,9 +556,9 @@ func TestMultiRoundSearchClearsPreviousAndPreventsConcat(t *testing.T) {
 	if len(s.SearchResults) != 0 {
 		t.Fatalf("expected previous SearchResults cleared immediately on submit, got %d", len(s.SearchResults))
 	}
-	if !s.SearchPending || s.ResultIdx != 0 || s.ResultScroll != 0 || s.SearchChip != 0 {
-		t.Fatalf("expected pending=true and reset indices, got pending=%v idx=%d scroll=%d chip=%d",
-			s.SearchPending, s.ResultIdx, s.ResultScroll, s.SearchChip)
+	if !s.SearchPending || s.ResultIdx != 0 || s.ResultScroll != 0 {
+		t.Fatalf("expected pending=true and reset indices, got pending=%v idx=%d scroll=%d",
+			s.SearchPending, s.ResultIdx, s.ResultScroll)
 	}
 	s, _ = s.Update(runBatchForSearch(cmd))
 	if len(s.SearchResults) != 1 || s.SearchResults[0].ID != "pf1" {
@@ -748,6 +747,7 @@ func TestMixKeyTriggersMixPlayback(t *testing.T) {
 		t.Parallel()
 		s, cat, eng, _ := newTestState()
 		defer s.Close()
+		s.SetLangPref("es")
 		s, _ = s.Update(FeedLoadedMsg{Tab: model.TabHome, Videos: cat.Feeds[model.TabHome]})
 
 		var cmd tea.Cmd
@@ -781,6 +781,7 @@ func TestMixKeyTriggersMixPlayback(t *testing.T) {
 				t.Parallel()
 				s, _, _, _ := newTestState()
 				defer s.Close()
+				s.SetLangPref("es")
 				s, _ = s.Update(FeedLoadedMsg{
 					Tab:    model.TabHome,
 					Videos: []model.Video{{ID: tc.id, Title: "Track"}},
@@ -993,7 +994,7 @@ func TestCollapsiblePlayerBarAndMouseCoords(t *testing.T) {
 func TestPrefetchLookaheadAndAutoplayFallback(t *testing.T) {
 	spy := newSpyPlayerEngine()
 	cat := &catalog.FakeCatalog{}
-	s := NewState(Dependencies{Catalog: cat, Engine: spy, Store: store.NewFakeStore()})
+	s := NewState(Dependencies{Catalog: cat, Engine: spy, Store: store.NewFakeStore(), InitialLang: "en"})
 	defer s.Close()
 
 	var videos []model.Video
@@ -1028,7 +1029,7 @@ func TestPrefetchLookaheadAndAutoplayFallback(t *testing.T) {
 
 	s.SetSelection(0)
 	var cmd tea.Cmd
-	s, cmd = s.PlaySelected("auto")
+	_, cmd = s.PlaySelected("auto")
 	_ = collectNonTickMsgs(cmd, 150*time.Millisecond)
 	_, autoplayStates, fallback, _ := spy.snapshot()
 	if len(autoplayStates) == 0 || !autoplayStates[len(autoplayStates)-1] {
@@ -1106,7 +1107,7 @@ func TestAnimTickLifecycle(t *testing.T) {
 		t.Fatalf("expected AnimFrame to advance during PlayLoading")
 	}
 	s, _ = s.Update(PlayerStatusMsg{Status: player.Status{IsRunning: true, Title: "Go Concurrency"}})
-	s, cmd = s.Update(AnimTickMsg(time.Now()))
+	_, cmd = s.Update(AnimTickMsg(time.Now()))
 	if cmd != nil {
 		t.Fatal("expected AnimTickMsg to stop ticking after PlayerStatusMsg{IsRunning: true}")
 	}
@@ -1119,7 +1120,7 @@ func TestStillWatchingTriggersAfterAutoplayLimitAndResumes(t *testing.T) {
 			model.TabHome: {{ID: "v0", Title: "Seed Track", Duration: "03:00"}},
 		},
 	}
-	s := NewState(Dependencies{Catalog: cat, Engine: spy, Store: store.NewFakeStore()})
+	s := NewState(Dependencies{Catalog: cat, Engine: spy, Store: store.NewFakeStore(), InitialLang: "en"})
 	defer s.Close()
 	s, _ = s.Update(FeedLoadedMsg{Tab: model.TabHome, Videos: cat.Feeds[model.TabHome]})
 
@@ -1311,6 +1312,7 @@ func TestV040ShortcutsVideoSponsorThemeChannelSubsChaptersLyrics(t *testing.T) {
 		Engine:              eng,
 		Store:               st,
 		LyricsClient:        lrc,
+		InitialLang:         "en",
 		InitialSponsorBlock: &sbInit,
 		OnThemeChange: func(name string) error {
 			cbMu.Lock()
@@ -1494,9 +1496,10 @@ func TestApp_MouseHoverQualityModalAndLowercaseKeys(t *testing.T) {
 	var mu sync.Mutex
 
 	s := NewState(Dependencies{
-		Catalog: cat,
-		Engine:  eng,
-		Store:   store.NewFakeStore(),
+		Catalog:     cat,
+		Engine:      eng,
+		Store:       store.NewFakeStore(),
+		InitialLang: "es",
 		OnQualityChange: func(q int) error {
 			mu.Lock()
 			savedQ = append(savedQ, q)
@@ -2375,6 +2378,7 @@ func TestPhase2_SmartResumeLongVsShort(t *testing.T) {
 		},
 		Engine:      eng2,
 		ResumeStore: res,
+		InitialLang: "es",
 	})
 	defer s2.Close()
 	s2, _ = s2.Update(FeedLoadedMsg{Tab: model.TabHome, Videos: []model.Video{longVid}})
@@ -2403,8 +2407,9 @@ func TestPhase2_DownloadProgressAndOfflinePlayback(t *testing.T) {
 		Catalog: &catalog.FakeCatalog{
 			Feeds: map[model.Tab][]model.Video{model.TabHome: {vid}},
 		},
-		Engine:     eng,
-		Downloader: &fakeOfflineDownloader{local: map[string]string{"vidDL01": localFile}},
+		Engine:      eng,
+		Downloader:  &fakeOfflineDownloader{local: map[string]string{"vidDL01": localFile}},
+		InitialLang: "es",
 	})
 	defer s.Close()
 	s, _ = s.Update(FeedLoadedMsg{Tab: model.TabHome, Videos: []model.Video{vid}})
@@ -2847,9 +2852,9 @@ func TestLiveFiltersDownloadAudioCrossNavAndAll16Settings(t *testing.T) {
 		}
 		s, _ = s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}})
 
-		// Adjust all 17 settings and verify state & persistence
-		if rows := s.SettingsRows(); len(rows) != SettingsRowCount || SettingsRowCount != 17 {
-			t.Fatalf("SettingsRows len = %d, SettingsRowCount = %d, want 17", len(rows), SettingsRowCount)
+		// Adjust all 18 settings and verify state & persistence
+		if rows := s.SettingsRows(); len(rows) != SettingsRowCount || SettingsRowCount != 18 {
+			t.Fatalf("SettingsRows len = %d, SettingsRowCount = %d, want 18", len(rows), SettingsRowCount)
 		}
 		for idx := 0; idx < SettingsRowCount; idx++ {
 			s, cmd = s.AdjustSetting(idx, 1)
@@ -2940,7 +2945,7 @@ func (c *refreshSpyCatalog) RefreshFeed(ctx context.Context, tab model.Tab) ([]m
 	c.mu.Lock()
 	c.refreshCalls = append(c.refreshCalls, tab)
 	c.mu.Unlock()
-	return c.FakeCatalog.Feed(ctx, tab)
+	return c.Feed(ctx, tab)
 }
 
 func (c *refreshSpyCatalog) RefreshCalls() []model.Tab {
@@ -3520,7 +3525,7 @@ func TestApp_AutoplayTrack3PrevGoesToTrack2ThenTrack1NeverSearchResults(t *testi
 	// Select 2nd search result or 1st and play Signos -> in bug, Prev used search index!
 	s.SetSelection(0)
 	var cmd tea.Cmd
-	s, cmd = s.PlaySelected("auto")
+	_, cmd = s.PlaySelected("auto")
 	for _, m := range collectNonTickMsgs(cmd, 100*time.Millisecond) {
 		s, _ = s.Update(m)
 	}
@@ -3778,7 +3783,7 @@ func TestApp_FastSkipTriggersSessionFeedbackAndNotDoubleTap(t *testing.T) {
 	// Track 2 played 180s (>= 60s) -> NextTrack MUST trigger RecordCompletedTrack.
 	s.CurrentPlaying = model.Video{ID: "fast0000003", Title: "Full Listen", Channel: "Good Artist"}
 	s.PlayerStatus = player.Status{IsRunning: true, Title: "Full Listen", TimePos: 180, Duration: 240, PlaylistCount: 4, PlaylistPos: 2}
-	s, _ = s.NextTrack()
+	_, _ = s.NextTrack()
 	if len(eng.completes) != 1 || eng.completes[0].ID != "fast0000003" {
 		t.Fatalf("expected RecordCompletedTrack for 180s listen, got completes=%+v", eng.completes)
 	}
@@ -4118,4 +4123,63 @@ func TestSetLangPrefEnglishSettingsAndToast(t *testing.T) {
 	if !strings.HasPrefix(s.Toast, "Hide Shorts: ") {
 		t.Fatalf("Toast = %q, want prefix %q", s.Toast, "Hide Shorts: ")
 	}
+}
+
+func TestBubbleTeaProgramFilterConcurrentRaceStress(t *testing.T) {
+	s, _, eng, _ := newTestState()
+	defer s.Close()
+	s.Width, s.Height = 140, 40
+
+	filter := NewBubbleTeaProgramFilter(s)
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				_ = filter(nil, tea.MouseMsg{X: 40, Y: 10, Action: tea.MouseActionMotion})
+				_ = filter(nil, tea.MouseMsg{X: 80, Y: 18, Action: tea.MouseActionMotion})
+				_ = filter(nil, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+			}
+		}
+	}()
+
+	videos := []model.Video{
+		{ID: "raceVid0001", Title: "Track 1", Channel: "ChanA", Duration: "03:30"},
+		{ID: "raceVid0002", Title: "Track 2", Channel: "ChanB", Duration: "04:10"},
+		{ID: "raceVid0003", Title: "Track 3", Channel: "ChanC", IsLive: true},
+	}
+
+	for i := 0; i < 80; i++ {
+		s, _ = s.Update(FeedLoadedMsg{Tab: model.TabHome, Videos: videos})
+		s, _ = s.Update(ToggledSaveMsg{Video: videos[0], Saved: i%2 == 0})
+		s, _ = s.Update(CookiesReadyMsg{JarPath: "/tmp/cookies.txt", ReloadFeed: true})
+		s, _ = s.Update(FeedLoadedMsg{Tab: model.TabHome, Videos: videos})
+		s.HomeChip = i % len(HomeChips)
+		s.SetSelection(i % len(videos))
+		subCmd := s.toggleSubtitlesCmd()
+		pipCmd := s.togglePiPCmd()
+		go func(c1, c2 tea.Cmd) {
+			if c1 != nil {
+				_ = c1()
+			}
+			if c2 != nil {
+				_ = c2()
+			}
+		}(subCmd, pipCmd)
+		if i%2 == 0 {
+			s.SetLangPref("en")
+		} else {
+			s.SetLangPref("es")
+		}
+		_ = eng
+	}
+
+	close(stop)
+	wg.Wait()
 }

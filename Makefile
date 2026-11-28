@@ -7,7 +7,7 @@ LEGACY_BINS := yt yt-fmt yt-thumb-preview yt-tui ytx
 
 build:
 	@mkdir -p bin
-	@go build -o bin/iutui ./cmd/iutui
+	@go build -ldflags="-s -w" -o bin/iutui ./cmd/iutui
 
 clean:
 	@rm -f bin/iutui bin/ytx

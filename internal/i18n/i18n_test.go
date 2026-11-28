@@ -9,7 +9,7 @@ import (
 func checkStructStrings(t *testing.T, lang string, v reflect.Value, path string) {
 	t.Helper()
 	switch v.Kind() {
-	case reflect.Ptr:
+	case reflect.Pointer:
 		if v.IsNil() {
 			t.Fatalf("%s: nil pointer at %s", lang, path)
 		}

@@ -89,11 +89,37 @@ func (n *nativeThumbs) Backend() thumbs.Backend {
 	return n.backend
 }
 
-func (n *nativeThumbs) RenderBrand(width, height int) string {
-	if n.Backend() != thumbs.BackendKitty {
-		return ""
-	}
-	return tui.RenderBrandLogo(width, height)
+type syncOutputWriter struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+func (s *syncOutputWriter) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.w.Write(p)
+}
+
+type systemAdapter struct {
+	sys platform.System
+}
+
+func (a systemAdapter) OpenURL(url string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return a.sys.OpenURL(ctx, url)
+}
+
+func (a systemAdapter) CopyText(text string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return a.sys.CopyText(ctx, text)
+}
+
+func (a systemAdapter) Notify(title, body string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return a.sys.Notify(ctx, title, body)
 }
 
 func newRootCmd() *cobra.Command {
@@ -370,6 +396,7 @@ func runTUI(paths platform.Paths) error {
 	cfgPath := filepath.Join(paths.ConfigDir, "config")
 	cfg, _ := config.Load(cfgPath)
 	tui.SetThumbQuality(cfg.ThumbQuality)
+	tui.SetPrefetchLimit(cfg.Prefetch)
 	cookieJar := resolveCookieJar(cfg, paths)
 	bootCtx, bootCancel := context.WithCancel(context.Background())
 	defer bootCancel()
@@ -385,6 +412,8 @@ func runTUI(paths platform.Paths) error {
 	ytdlpCat := catalog.NewYTDLPCatalog(paths.CacheDir, time.Duration(cfg.CacheTTL)*time.Second, cfg.YtdlpBin)
 	ytdlpCat.FeedSize = cfg.FeedSize
 	ytdlpCat.SearchSize = cfg.SearchSize
+	ytdlpCat.SetQuality(cfg.Quality)
+	ytdlpCat.SetExtraArgs(cfg.YtdlpArgs)
 	catalogCookieJar := cookieJar
 	if catalogCookieJar == "" && !isCookiesDisabled(cfg.Cookies) && paths.CacheDir != "" {
 		catalogCookieJar = filepath.Join(paths.CacheDir, "cookies.txt")
@@ -407,7 +436,7 @@ func runTUI(paths platform.Paths) error {
 	}
 	eng := player.NewIPCClient(
 		player.WithSocketPath(paths.SocketPath),
-		player.WithRadioClient(player.NewRadioClient()),
+		player.WithRadioClient(player.NewRadioClient(player.WithRadioCookiesPath(cookieJar))),
 		player.WithLaunchDefaults(player.LaunchOpts{
 			Mode:          cfg.DefaultMode,
 			SocketPath:    paths.SocketPath,
@@ -416,21 +445,27 @@ func runTUI(paths platform.Paths) error {
 			Speed:         cfg.Speed,
 			CookieJarPath: cookieJar,
 			YtdlpBin:      cfg.YtdlpBin,
+			YtdlpArgs:     cfg.YtdlpArgs,
 			FastPlayback:  true,
 		}),
 	)
-	defer eng.Close()
+	defer func() { _ = eng.Close() }()
+	eng.SetPrefetchLimit(cfg.Prefetch)
 	eng.SetSponsorBlock(cfg.SponsorBlock)
 	eng.SetAutoplay(cfg.Autoplay)
 	eng.CleanupOrphanSocket()
 	go eng.WarmUp()
 	dl := download.NewManager(paths.StateDir, dlDir, cfg.YtdlpBin)
+	dl.SetCookieJar(cookieJar)
+	dl.SetQuality(cfg.Quality)
+	dl.SetExtraArgs(cfg.YtdlpArgs)
 	resumeStore := store.NewResumeStore(paths.StateDir)
 	searchHist := store.NewSearchHistory(paths.StateDir)
 	suggestClient := catalog.NewSuggestClient()
 	thumbRenderer := newNativeThumbs()
 
 	sbEnabled := cfg.SponsorBlock
+	notifyEnabled := cfg.Notify
 	hideShorts := cfg.HideShorts
 	interleave := cfg.Interleave
 	autoplay := cfg.Autoplay
@@ -446,8 +481,9 @@ func runTUI(paths platform.Paths) error {
 		}
 		ytdlpCat.SetCookieJar(jar)
 		eng.SetCookieJar(jar)
+		dl.SetCookieJar(jar)
 		if reloadFeed && paths.CacheDir != "" {
-			for _, name := range []string{"feed_home.json", "feed_music.json", "feed_subs.json"} {
+			for _, name := range []string{"feed_home.json", "feed_music.json", "feed_music_local.json", "feed_subs.json"} {
 				_ = os.Remove(filepath.Join(paths.CacheDir, name))
 			}
 		}
@@ -485,6 +521,9 @@ func runTUI(paths platform.Paths) error {
 		SearchHistory:        searchHist,
 		ResumeStore:          resumeStore,
 		ListeningStats:       musicStats,
+		System:               systemAdapter{sys: platform.NewSystem()},
+		InitialHome:          cfg.Home,
+		InitialNotify:        &notifyEnabled,
 		InitialQuality:       cfg.Quality,
 		InitialAudioOnly:     cfg.DefaultMode == "audio",
 		InitialDefaultMode:   cfg.DefaultMode,
@@ -506,6 +545,7 @@ func runTUI(paths platform.Paths) error {
 		AppVersion:           version,
 		OnQualityChange: func(q int) error {
 			ytdlpCat.SetQuality(q)
+			dl.SetQuality(q)
 			return config.SaveVal(cfgPath, "YT_QUALITY", strconv.Itoa(q))
 		},
 		OnAudioOnlyChange: func(audioOnly bool) error {
@@ -540,6 +580,11 @@ func runTUI(paths platform.Paths) error {
 			case "YT_THUMB_QUALITY":
 				tui.SetThumbQuality(val)
 				tui.ClearThumbCache()
+			case "YT_PREFETCH":
+				if n, err := strconv.Atoi(val); err == nil && n >= 0 {
+					tui.SetPrefetchLimit(n)
+					eng.SetPrefetchLimit(n)
+				}
 			case "YT_FEED_SIZE":
 				if n, err := strconv.Atoi(val); err == nil && n > 0 {
 					ytdlpCat.SetFeedSize(n)
@@ -560,6 +605,7 @@ func runTUI(paths platform.Paths) error {
 					ytdlpCat.SetCookieJar("")
 					cat.SetDisableCookieAuthSubs(true)
 					eng.SetCookieJar("")
+					dl.SetCookieJar("")
 				} else {
 					cookiesDisabled.Store(false)
 					nextJar := resolveCookieJar(cfgNext, paths)
@@ -570,6 +616,7 @@ func runTUI(paths platform.Paths) error {
 					ytdlpCat.SetCookieJar(catJar)
 					cat.SetDisableCookieAuthSubs(false)
 					eng.SetCookieJar(nextJar)
+					dl.SetCookieJar(nextJar)
 					if nextJar != "" {
 						go func() {
 							notifyCookiesReady(nextJar, true)
@@ -587,11 +634,16 @@ func runTUI(paths platform.Paths) error {
 			return nil
 		},
 	})
+	defer state.Close()
 
 	initTheme := theme.DefaultTheme()
 	if cfg.Theme != "" && !strings.EqualFold(cfg.Theme, "youtube-dark") {
 		initTheme = theme.ThemeFromPalette(theme.ByName(cfg.Theme))
 	}
+
+	ttyOut := &syncOutputWriter{w: os.Stdout}
+	tui.SetTTYWriter(ttyOut)
+	defer tui.SetTTYWriter(nil)
 
 	p = tea.NewProgram(
 		teaModel{
@@ -599,6 +651,7 @@ func runTUI(paths platform.Paths) error {
 			theme:  initTheme,
 			thumbs: thumbRenderer,
 		},
+		tea.WithOutput(ttyOut),
 		tea.WithAltScreen(),
 		tea.WithMouseAllMotion(),
 		tea.WithFilter(app.NewBubbleTeaProgramFilter(state)),
@@ -653,22 +706,40 @@ func runTUI(paths platform.Paths) error {
 			_ = eng.Pause(ctx)
 		},
 	})
-	defer mpris.Close()
+	defer func() { _ = mpris.Close() }()
 	defer mprisCancel()
 	if mpris.Active() {
 		slog.Info("mpris bridge status", "active", true)
 		mprisCh := eng.Subscribe(mprisCtx)
 		go func() {
 			for st := range mprisCh {
+				trackID := st.VideoID
+				if trackID == "" {
+					trackID = st.Title
+				}
+				artist := ""
+				if a, _, ok := strings.Cut(st.Title, " - "); ok {
+					artist = strings.TrimSpace(a)
+				}
+				artURL := ""
+				if st.VideoID != "" {
+					if localThumb := tui.GetThumbnailFile(st.VideoID); localThumb != "" {
+						artURL = "file://" + localThumb
+					} else {
+						artURL = "https://i.ytimg.com/vi/" + st.VideoID + "/hqdefault.jpg"
+					}
+				}
 				mpris.UpdateStatus(platform.MPRISStatus{
 					IsRunning: st.IsRunning,
 					Paused:    st.Paused,
 					Title:     st.Title,
+					Artist:    artist,
+					ArtURL:    artURL,
 					Duration:  st.Duration,
 					Position:  st.TimePos,
 					Volume:    st.Volume,
 					Rate:      st.Speed,
-					TrackID:   st.Title,
+					TrackID:   trackID,
 				})
 			}
 		}()
@@ -703,7 +774,6 @@ func runTUI(paths platform.Paths) error {
 			if p != nil {
 				p.Quit()
 			}
-			state.Close()
 		case <-sigDone:
 		}
 	}()
@@ -725,6 +795,7 @@ func runQuickSelector(paths platform.Paths) error {
 	bashCat := catalog.NewBashCatalog(paths.CacheDir, paths.StateDir, "")
 	ytdlpCat := catalog.NewYTDLPCatalog(paths.CacheDir, time.Duration(cfg.CacheTTL)*time.Second, cfg.YtdlpBin)
 	ytdlpCat.CookieJarPath = cookieJar
+	ytdlpCat.SetExtraArgs(cfg.YtdlpArgs)
 	cat := catalog.NewHybridCatalog(bashCat, ytdlpCat)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -734,7 +805,7 @@ func runQuickSelector(paths platform.Paths) error {
 	if err != nil {
 		return err
 	}
-	chosen, ok, err := quick.Run(videos)
+	chosen, ok, err := quick.RunWithLang(videos, cfg.Lang)
 	if err != nil || !ok {
 		return err
 	}
@@ -750,6 +821,7 @@ func runQuickSelector(paths platform.Paths) error {
 		Speed:         cfg.Speed,
 		CookieJarPath: cookieJar,
 		YtdlpBin:      cfg.YtdlpBin,
+		YtdlpArgs:     cfg.YtdlpArgs,
 		FastPlayback:  true,
 	})
 }
@@ -790,6 +862,7 @@ func newPlayCmd() *cobra.Command {
 				Speed:         cfg.Speed,
 				CookieJarPath: cookieJar,
 				YtdlpBin:      cfg.YtdlpBin,
+				YtdlpArgs:     cfg.YtdlpArgs,
 				FastPlayback:  true,
 			})
 		},
@@ -873,29 +946,35 @@ func newTransportCmd(use, short string, fn func() error) *cobra.Command {
 
 func newSubscribeCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "subscribe <channel-id-or-url>",
+		Use:   "subscribe <channel-id-handle-or-url>",
 		Short: "Subscribe to a YouTube channel via RSS",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			paths := platform.ResolvePaths()
-			feedURL := catalog.ChannelFeedURL(args[0])
-			if feedURL == "" {
-				return fmt.Errorf("invalid channel reference: %s", args[0])
+			cfg, _ := config.Load(filepath.Join(paths.ConfigDir, "config"))
+			cid, label, err := catalog.ResolveChannelReference(cmd.Context(), cfg.YtdlpBin, args[0])
+			if err != nil {
+				return fmt.Errorf("invalid channel reference %q: %w", args[0], err)
 			}
-			if err := os.MkdirAll(paths.StateDir, 0o755); err != nil {
-				return err
-			}
-			subsPath := filepath.Join(paths.StateDir, "subscriptions.tsv")
-			f, err := os.OpenFile(subsPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+			st := store.NewTSVStore(paths.StateDir)
+			existing, err := st.Subscriptions(cmd.Context())
 			if err != nil {
 				return err
 			}
-			defer f.Close()
-			_, err = fmt.Fprintf(f, "%s\n", args[0])
-			if err == nil {
-				fmt.Fprintf(cmd.OutOrStdout(), "subscribed: %s\n", args[0])
+			for _, sub := range existing {
+				if strings.EqualFold(strings.TrimSpace(sub), cid) {
+					if label != "" {
+						_ = st.SetSubscriptionLabel(cmd.Context(), cid, label)
+					}
+					_, _ = fmt.Fprintf(cmd.OutOrStdout(), "subscribed: %s\n", cid)
+					return nil
+				}
 			}
-			return err
+			if _, err := st.ToggleSubscriptionLabeled(cmd.Context(), cid, label); err != nil {
+				return err
+			}
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "subscribed: %s\n", cid)
+			return nil
 		},
 	}
 }

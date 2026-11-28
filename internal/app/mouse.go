@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/e12jassir/iutui/internal/i18n"
 	"github.com/e12jassir/iutui/internal/model"
 	"github.com/mattn/go-runewidth"
 )
@@ -119,44 +120,442 @@ func (s *State) handleMouse(msg tea.MouseMsg) (*State, tea.Cmd) {
 	return s, nil
 }
 
+type mouseHitSnapshot struct {
+	width             int
+	height            int
+	view              ViewMode
+	focus             FocusArea
+	hasPlayerBar      bool
+	showHelp          bool
+	showStillWatching bool
+	showSettings      bool
+	settingsIdx       int
+	settingsLeftX     int
+	settingsTopY      int
+	settingsBoxW      int
+	settingsBoxH      int
+	settingsScroll    int
+	settingsVisBodyH  int
+	settingsLines     []SettingsDisplayLine
+	showQualityModal  bool
+	qualityIdx        int
+	qualityOptsCount  int
+	showQueue         bool
+	queueIdx          int
+	queueScroll       int
+	playlistLen       int
+	showChapters      bool
+	chapterIdx        int
+	chaptersLen       int
+	showLyrics        bool
+	suggestIdx        int
+	suggestionsLen    int
+	visibleLen        int
+	activeListIdx     int
+	activeListScroll  int
+	scrollOffset      int
+}
+
+func (s *State) buildMouseSnapshot() *mouseHitSnapshot {
+	snap := &mouseHitSnapshot{
+		width:             s.Width,
+		height:            s.Height,
+		view:              s.View,
+		focus:             s.Focus,
+		hasPlayerBar:      s.HasPlayerBar(),
+		showHelp:          s.ShowHelp,
+		showStillWatching: s.ShowStillWatching,
+		showSettings:      s.ShowSettings,
+		settingsIdx:       s.SettingsIdx,
+		showQualityModal:  s.ShowQualityModal,
+		qualityIdx:        s.QualityIdx,
+		qualityOptsCount:  len(QualityOptions),
+		showQueue:         s.ShowQueue,
+		queueIdx:          s.QueueIdx,
+		queueScroll:       s.QueueScroll,
+		playlistLen:       len(s.MPVPlaylist),
+		showChapters:      s.ShowChapters,
+		chapterIdx:        s.ChapterIdx,
+		chaptersLen:       len(s.Chapters),
+		showLyrics:        s.ShowLyrics,
+		suggestIdx:        s.SuggestIdx,
+		suggestionsLen:    len(s.SearchSuggestions),
+		visibleLen:        len(s.VisibleItems()),
+		activeListIdx:     s.ActiveListIndex(),
+		activeListScroll:  s.ActiveListScroll(),
+		scrollOffset:      s.ScrollOffset,
+	}
+	if s.ShowSettings {
+		snap.settingsLeftX, snap.settingsTopY, snap.settingsBoxW, snap.settingsBoxH,
+			snap.settingsScroll, snap.settingsVisBodyH, snap.settingsLines = s.SettingsModalWindow()
+	}
+	return snap
+}
+
+func (s *State) syncMouseSnapshot() {
+	if s == nil {
+		return
+	}
+	s.mouseSnap.Store(s.buildMouseSnapshot())
+}
+
+func (s *State) wouldMouseMotionChangeAtomic(x, y int) bool {
+	if s == nil {
+		return false
+	}
+	snap := s.mouseSnap.Load()
+	if snap == nil {
+		return true
+	}
+	return snap.wouldMotionChange(x, y)
+}
+
+func (snap *mouseHitSnapshot) sidebarWidth() int {
+	if snap.width >= fullSidebarMinW {
+		return fullSidebarW
+	}
+	if snap.width >= miniGuideMinW {
+		return miniGuideW
+	}
+	return 0
+}
+
+func (snap *mouseHitSnapshot) lyricsSideWidth() int {
+	if !snap.showLyrics || snap.width < miniGuideMinW {
+		return 0
+	}
+	remW := snap.width - snap.sidebarWidth()
+	lyricsSideW := min(44, max(28, remW/3))
+	if remW-lyricsSideW < 36 {
+		return 0
+	}
+	return lyricsSideW
+}
+
+func (snap *mouseHitSnapshot) queueSideWidth() int {
+	if !snap.showQueue || snap.width < miniGuideMinW {
+		return 0
+	}
+	remW := snap.width - snap.sidebarWidth()
+	queueSideW := min(46, max(32, remW/3))
+	if remW-queueSideW < 36 {
+		return 0
+	}
+	return queueSideW
+}
+
+func (snap *mouseHitSnapshot) mainInnerWidth() int {
+	remW := snap.width - snap.sidebarWidth() - snap.lyricsSideWidth() - snap.queueSideWidth()
+	return max(10, remW-2)
+}
+
+func (snap *mouseHitSnapshot) mainOriginX() int {
+	return snap.sidebarWidth() + 1
+}
+
+func (snap *mouseHitSnapshot) gridCols() int {
+	cols := (snap.mainInnerWidth() + 2) / 32
+	if cols < 1 {
+		return 1
+	}
+	return cols
+}
+
+func (snap *mouseHitSnapshot) gridCardWidth() int {
+	innerMainW := snap.mainInnerWidth()
+	cols := snap.gridCols()
+	if innerMainW <= 0 || cols <= 0 {
+		return cardW
+	}
+	w := (innerMainW - (cols-1)*cardGap) / cols
+	if w < cardW {
+		if innerMainW < cardW {
+			return innerMainW
+		}
+		return cardW
+	}
+	return w
+}
+
+func (snap *mouseHitSnapshot) gridCardHeight() int {
+	innerW := max(4, snap.gridCardWidth()-4)
+	thumbH := max(7, min(11, innerW*9/32))
+	return thumbH + 7
+}
+
+func (snap *mouseHitSnapshot) bodyHeight() int {
+	if snap.height <= 0 {
+		return 0
+	}
+	chrome := 5
+	if snap.view == ViewSearch {
+		chrome = 4
+	}
+	if snap.hasPlayerBar {
+		chrome += 5
+	}
+	return max(1, snap.height-chrome)
+}
+
+func (snap *mouseHitSnapshot) settingsModalRowAt(x, y int) (int, bool) {
+	if x < snap.settingsLeftX || x >= snap.settingsLeftX+snap.settingsBoxW || y < snap.settingsTopY || y >= snap.settingsTopY+snap.settingsBoxH {
+		return -1, false
+	}
+	bodyStartY := snap.settingsTopY + 1 + 2
+	rel := y - bodyStartY
+	if rel >= 0 && rel < snap.settingsVisBodyH {
+		linePos := snap.settingsScroll + rel
+		if linePos >= 0 && linePos < len(snap.settingsLines) && snap.settingsLines[linePos].SettingIdx >= 0 {
+			return snap.settingsLines[linePos].SettingIdx, true
+		}
+	}
+	return -1, true
+}
+
+func (snap *mouseHitSnapshot) qualityModalRowAt(x, y int) (int, bool) {
+	boxW := min(68, max(38, snap.width-8))
+	boxH := snap.qualityOptsCount + 6
+	leftX := (snap.width - boxW) / 2
+	topY := (snap.height - boxH) / 2
+	optStartY := topY + 3
+	if x < leftX || x >= leftX+boxW || y < topY || y >= topY+boxH {
+		return -1, false
+	}
+	optIdx := y - optStartY
+	if optIdx >= 0 && optIdx < snap.qualityOptsCount {
+		return optIdx, true
+	}
+	return -1, true
+}
+
+func (snap *mouseHitSnapshot) queueSideRowAt(x, y int) (int, bool, bool) {
+	panelW := snap.queueSideWidth()
+	if panelW <= 0 {
+		return -1, false, false
+	}
+	panelX := snap.width - panelW
+	topY := 3
+	panelH := snap.height - topY
+	if snap.hasPlayerBar {
+		panelH -= 5
+	}
+	if panelH < 4 {
+		panelH = 4
+	}
+	visItems := queueSideVisibleCount(panelH)
+	maxStart := max(0, snap.playlistLen-visItems)
+	start := snap.queueScroll
+	if start < 0 {
+		start = 0
+	} else if start > maxStart {
+		start = maxStart
+	}
+	end := min(snap.playlistLen, start+visItems)
+	if x < panelX || x >= panelX+panelW || y < topY || y >= topY+panelH {
+		return -1, false, false
+	}
+	if y == topY+1 && x >= panelX+panelW-6 && x <= panelX+panelW-2 {
+		return -1, true, true
+	}
+	itemAreaTop := topY + 3
+	if y >= itemAreaTop && y < topY+panelH-2 {
+		itemIdx := start + (y-itemAreaTop)/4
+		if itemIdx >= start && itemIdx < end {
+			return itemIdx, true, false
+		}
+	}
+	return -1, true, false
+}
+
+func (snap *mouseHitSnapshot) queueModalRowAt(x, y int) (int, bool) {
+	n := snap.playlistLen
+	maxVisible := max(4, min(n, snap.height-10))
+	if n == 0 {
+		maxVisible = 1
+	}
+	maxStart := max(0, n-maxVisible)
+	start := snap.queueScroll
+	if start < 0 {
+		start = 0
+	} else if start > maxStart {
+		start = maxStart
+	}
+	end := min(n, start+maxVisible)
+	visRows := max(1, end-start)
+	boxW := min(72, max(38, snap.width-8))
+	boxH := visRows + 6
+	leftX := (snap.width - boxW) / 2
+	topY := (snap.height - boxH) / 2
+	optStartY := topY + 3
+	if x < leftX || x >= leftX+boxW || y < topY || y >= topY+boxH {
+		return -1, false
+	}
+	rel := y - optStartY
+	if rel >= 0 && start+rel < end {
+		return start + rel, true
+	}
+	return -1, true
+}
+
+func (snap *mouseHitSnapshot) chaptersModalRowAt(x, y int) (int, bool) {
+	maxVisible := max(4, min(snap.chaptersLen, snap.height-10))
+	start := 0
+	if snap.chapterIdx >= maxVisible {
+		start = snap.chapterIdx - maxVisible + 1
+	}
+	end := min(snap.chaptersLen, start+maxVisible)
+	boxW := min(66, max(34, snap.width-8))
+	boxH := (end - start) + 6
+	leftX := (snap.width - boxW) / 2
+	topY := (snap.height - boxH) / 2
+	optStartY := topY + 3
+	if x < leftX || x >= leftX+boxW || y < topY || y >= topY+boxH {
+		return -1, false
+	}
+	rel := y - optStartY
+	if rel >= 0 && start+rel < end {
+		return start + rel, true
+	}
+	return -1, true
+}
+
+func (snap *mouseHitSnapshot) suggestionRowAt(x, y int) (int, bool) {
+	if snap.focus != FocusSearch || snap.suggestionsLen == 0 {
+		return -1, false
+	}
+	sideW := snap.sidebarWidth()
+	panelW := snap.mainInnerWidth() + 2
+	sugCount := min(6, snap.suggestionsLen)
+	sugH := sugCount + 2
+	maxBody := snap.height - 3
+	if snap.hasPlayerBar {
+		maxBody -= 5
+	}
+	if maxBody-sugH < 4 {
+		sugH = max(0, maxBody-4)
+	}
+	if sugH < 3 {
+		return -1, false
+	}
+	if x < sideW || x >= sideW+panelW || y < 3 || y >= 3+sugH {
+		return -1, false
+	}
+	rel := y - 4
+	maxItems := min(snap.suggestionsLen, sugH-2)
+	if rel >= 0 && rel < maxItems {
+		return rel, true
+	}
+	return -1, true
+}
+
+func (snap *mouseHitSnapshot) videoIndexAt(x, y int) (int, bool) {
+	topY := 5
+	if snap.view == ViewSearch {
+		topY = 4
+	}
+	if y < topY || snap.visibleLen == 0 {
+		return 0, false
+	}
+	mainX := snap.mainOriginX()
+	innerW := snap.mainInnerWidth()
+	if x < mainX || x >= mainX+innerW {
+		return 0, false
+	}
+	relY := y - topY
+	bodyH := snap.bodyHeight()
+	if bodyH <= 0 || relY >= bodyH {
+		return 0, false
+	}
+	if snap.view == ViewSearch || snap.view == ViewChannel {
+		visibleCount := max(1, bodyH/searchRowH)
+		if bodyH-visibleCount*searchRowH >= searchRowH/3 {
+			visibleCount++
+		}
+		rowOffset := relY / searchRowH
+		if rowOffset < 0 || rowOffset >= visibleCount {
+			return 0, false
+		}
+		startIdx := max(0, snap.activeListScroll)
+		idx := startIdx + rowOffset
+		if idx >= 0 && idx < snap.visibleLen {
+			return idx, true
+		}
+		return 0, false
+	}
+	cols := snap.gridCols()
+	cW := snap.gridCardWidth()
+	stepW := cW + cardGap
+	relX := x - mainX
+	col := relX / stepW
+	if col < 0 || col >= cols || relX%stepW >= cW {
+		return 0, false
+	}
+	cH := snap.gridCardHeight()
+	visibleRows := max(1, bodyH/cH)
+	if bodyH-visibleRows*cH >= cH/3 {
+		visibleRows++
+	}
+	rowOffset := relY / cH
+	if rowOffset < 0 || rowOffset >= visibleRows {
+		return 0, false
+	}
+	startRow := max(0, snap.scrollOffset)
+	row := startRow + rowOffset
+	idx := row*cols + col
+	if idx >= 0 && idx < snap.visibleLen {
+		return idx, true
+	}
+	return 0, false
+}
+
+func (snap *mouseHitSnapshot) wouldMotionChange(x, y int) bool {
+	if snap.showHelp || snap.showStillWatching {
+		return false
+	}
+	if snap.showSettings {
+		idx, inside := snap.settingsModalRowAt(x, y)
+		return inside && idx >= 0 && idx != snap.settingsIdx
+	}
+	if snap.showQualityModal {
+		idx, inside := snap.qualityModalRowAt(x, y)
+		return inside && idx >= 0 && idx != snap.qualityIdx
+	}
+	if snap.showQueue {
+		if qW := snap.queueSideWidth(); qW > 0 {
+			if idx, inside, _ := snap.queueSideRowAt(x, y); inside {
+				return idx >= 0 && idx != snap.queueIdx
+			}
+		} else {
+			idx, inside := snap.queueModalRowAt(x, y)
+			return inside && idx >= 0 && idx != snap.queueIdx
+		}
+	}
+	if snap.showChapters {
+		idx, inside := snap.chaptersModalRowAt(x, y)
+		return inside && idx >= 0 && idx != snap.chapterIdx
+	}
+	if snap.focus == FocusSearch {
+		idx, inside := snap.suggestionRowAt(x, y)
+		return inside && idx >= 0 && idx != snap.suggestIdx
+	}
+	idx, ok := snap.videoIndexAt(x, y)
+	if !ok {
+		return false
+	}
+	return snap.focus != FocusMain || idx != snap.activeListIdx
+}
+
 // WouldMouseMotionChange reports whether a MouseActionMotion event at (x, y)
 // would change hover selection or modal cursor state, allowing the program
 // event filter to skip redundant no-op motion redraws while preserving behavior.
 func (s *State) WouldMouseMotionChange(x, y int) bool {
-	if s.ShowHelp || s.ShowStillWatching {
+	if s == nil {
 		return false
 	}
-	if s.ShowSettings {
-		idx, inside := s.settingsModalRowAt(x, y)
-		return inside && idx >= 0 && idx != s.SettingsIdx
+	if s.programFilterAttached.Load() {
+		return s.wouldMouseMotionChangeAtomic(x, y)
 	}
-	if s.ShowQualityModal {
-		idx, inside := s.qualityModalRowAt(x, y)
-		return inside && idx >= 0 && idx != s.QualityIdx
-	}
-	if s.ShowQueue {
-		if qW := s.QueueSideWidth(); qW > 0 {
-			if idx, inside, _ := s.queueSideRowAt(x, y); inside {
-				return idx >= 0 && idx != s.QueueIdx
-			}
-		} else {
-			idx, inside := s.queueModalRowAt(x, y)
-			return inside && idx >= 0 && idx != s.QueueIdx
-		}
-	}
-	if s.ShowChapters {
-		idx, inside := s.chaptersModalRowAt(x, y)
-		return inside && idx >= 0 && idx != s.ChapterIdx
-	}
-	if s.Focus == FocusSearch {
-		idx, inside := s.suggestionRowAt(x, y)
-		return inside && idx >= 0 && idx != s.SuggestIdx
-	}
-	idx, ok := s.videoIndexAt(x, y, false)
-	if !ok {
-		return false
-	}
-	return s.Focus != FocusMain || idx != s.ActiveListIndex()
+	return s.buildMouseSnapshot().wouldMotionChange(x, y)
 }
 
 func (s *State) handleMouseMotion(x, y int) *State {
@@ -264,7 +663,7 @@ func (s *State) handleLeftClick(x, y int) (*State, tea.Cmd) {
 			if cp, ok := s.Deps.Engine.(chaptersProvider); ok {
 				return s, s.engineCmd(func(ctx context.Context) error {
 					return cp.SeekAbsolute(ctx, ch.Time)
-				}, "⏩ Capítulo: "+ch.Title)
+				}, i18n.Format(s.Catalog().App.ToastChapterFmt, map[string]string{"title": ch.Title}))
 			}
 		}
 		return s, nil
@@ -342,7 +741,7 @@ func (s *State) handleLeftClick(x, y int) (*State, tea.Cmd) {
 
 	// Clicking outside top search panel and suggestion dropdown blurs search focus
 	if s.Focus == FocusSearch {
-		hadSuggestions := len(s.SearchSuggestions) > 0 && strings.TrimSpace(s.SearchDraft) != ""
+		hadSuggestions := len(s.SearchSuggestions) > 0
 		if s.suggestCancel != nil {
 			s.suggestCancel()
 		}
@@ -397,9 +796,9 @@ func (s *State) handleLeftClick(x, y int) (*State, tea.Cmd) {
 			case x >= layout.NextX0 && x <= layout.NextX1:
 				return s.NextTrack()
 			case layout.ShowVol && x >= layout.VolDownX0 && x <= layout.VolDownX1:
-				return s, s.engineCmd(func(ctx context.Context) error { return s.Deps.Engine.AddVolume(ctx, -5) }, "Vol -5%")
+				return s, s.engineCmd(func(ctx context.Context) error { return s.Deps.Engine.AddVolume(ctx, -5) }, i18n.Format(s.Catalog().App.ToastVolumeDown, map[string]string{"delta": "5%"}))
 			case layout.ShowVol && x >= layout.VolUpX0 && x <= layout.VolUpX1:
-				return s, s.engineCmd(func(ctx context.Context) error { return s.Deps.Engine.AddVolume(ctx, 5) }, "Vol +5%")
+				return s, s.engineCmd(func(ctx context.Context) error { return s.Deps.Engine.AddVolume(ctx, 5) }, i18n.Format(s.Catalog().App.ToastVolumeUp, map[string]string{"delta": "5%"}))
 			}
 		}
 		return s, nil
@@ -466,7 +865,7 @@ func (s *State) handleLeftClick(x, y int) (*State, tea.Cmd) {
 		chips := HomeChips
 		cx := mainX + 1
 		for i, c := range chips {
-			cw := runewidth.StringWidth(c.Label) + 2 // Padding(0, 1)
+			cw := runewidth.StringWidth(s.ChipLabel(c.Label)) + 2 // Padding(0, 1)
 			if x >= cx && x < cx+cw {
 				s.HomeChip = i
 				s.SelectedIdx = 0

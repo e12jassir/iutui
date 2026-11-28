@@ -56,6 +56,7 @@ func resetThumbTestState() {
 
 	SetThumbCacheDir("")
 	SetThumbQuality("max")
+	SetPrefetchLimit(6)
 	SetThumbHTTPClient(nil)
 	SetThumbBaseURL("")
 	SetOnThumbReady(nil)
@@ -217,14 +218,14 @@ func TestGetThumbnailFileLookupOrder(t *testing.T) {
 		t.Fatalf("undersized file returned %q, want empty", got)
 	}
 
-	hqPath := writeThumbFixture(t, cacheDir, clean, "hqdefault", bytes.Repeat([]byte("h"), 1200))
-	if got := GetThumbnailFile(id); got != hqPath {
-		t.Fatalf("got %q, want hqdefault %q", got, hqPath)
-	}
-
 	mqPath := writeThumbFixture(t, cacheDir, clean, "mqdefault", bytes.Repeat([]byte("m"), 1200))
 	if got := GetThumbnailFile(id); got != mqPath {
 		t.Fatalf("got %q, want mqdefault %q", got, mqPath)
+	}
+
+	hqPath := writeThumbFixture(t, cacheDir, clean, "hqdefault", bytes.Repeat([]byte("h"), 1200))
+	if got := GetThumbnailFile(id); got != hqPath {
+		t.Fatalf("got %q, want hqdefault %q", got, hqPath)
 	}
 
 	maxPath := writeThumbFixture(t, cacheDir, clean, "maxresdefault", bytes.Repeat([]byte("x"), 3200))
@@ -525,7 +526,7 @@ func TestThumbCacheLRUEviction(t *testing.T) {
 	}
 }
 
-func TestKittyModeUploadPlaceholdersBrandLogoAndLRUEviction(t *testing.T) {
+func TestKittyModeUploadPlaceholdersAndLRUEviction(t *testing.T) {
 	cacheDir := setupThumbTest(t)
 	t.Setenv("TERM", "xterm-kitty")
 	t.Setenv("YT_PREVIEW", "kitty")
@@ -537,35 +538,7 @@ func TestKittyModeUploadPlaceholdersBrandLogoAndLRUEviction(t *testing.T) {
 	ttyBuf := &safeTTYBuffer{}
 	setTTYWriter(ttyBuf)
 
-	// 1. Brand logo renders via Kitty virtual placement and stays pinned.
-	if got := RenderBrandLogo(0, 3); got != "" {
-		t.Fatalf("RenderBrandLogo(0,3) = %q, want empty", got)
-	}
-	if got := RenderBrandLogo(65, 3); got != "" {
-		t.Fatalf("RenderBrandLogo(65,3) = %q, want empty", got)
-	}
-	brandOut := RenderBrandLogo(10, 3)
-	brandLines := strings.Split(brandOut, "\n")
-	if len(brandLines) != 3 {
-		t.Fatalf("brand logo rows = %d, want 3", len(brandLines))
-	}
-	if !strings.ContainsRune(brandOut, 0x10EEEE) {
-		t.Fatalf("expected U+10EEEE placeholders in RenderBrandLogo output")
-	}
-	brandUploadSeq := fmt.Sprintf("\x1b_Ga=T,U=1,q=2,f=100,i=%d,c=10,r=3,C=1,m=", brandImgID)
-	if !strings.Contains(ttyBuf.String(), brandUploadSeq) {
-		t.Fatalf("expected brand upload APC sequence %q in TTY output", brandUploadSeq)
-	}
-	// Second RenderBrandLogo call hits cache without transmitting again.
-	beforeLen := len(ttyBuf.String())
-	if again := RenderBrandLogo(10, 3); again != brandOut {
-		t.Fatalf("cached RenderBrandLogo mismatch")
-	}
-	if len(ttyBuf.String()) != beforeLen {
-		t.Fatalf("RenderBrandLogo re-uploaded on cache hit")
-	}
-
-	// 2. Test Kitty upload + ready callback + placeholder cache hit with 4:3 PNG.
+	// Test Kitty upload + ready callback + placeholder cache hit with 4:3 PNG.
 	readyCh := make(chan string, 128)
 	SetOnThumbReady(func(videoID string) {
 		readyCh <- videoID
@@ -617,7 +590,6 @@ func TestKittyModeUploadPlaceholdersBrandLogoAndLRUEviction(t *testing.T) {
 	uploadPrefixFirst := fmt.Sprintf("\x1b_Ga=T,U=1,q=2,f=100,i=%d,c=10,r=5,C=1,m=", firstImgID)
 	uploadPrefixLast := fmt.Sprintf("\x1b_Ga=T,U=1,q=2,f=100,i=%d,c=10,r=5,C=1,m=", lastImgID)
 	deleteFirst := fmt.Sprintf("\x1b_Ga=d,d=i,i=%d,q=2\x1b\\", firstImgID)
-	deleteBrand := fmt.Sprintf("\x1b_Ga=d,d=i,i=%d,q=2\x1b\\", brandImgID)
 
 	if !strings.Contains(ttyOut, uploadPrefixFirst) {
 		t.Fatalf("missing Kitty upload APC escape for first image (%d)", firstImgID)
@@ -628,21 +600,11 @@ func TestKittyModeUploadPlaceholdersBrandLogoAndLRUEviction(t *testing.T) {
 	if !strings.Contains(ttyOut, deleteFirst) {
 		t.Fatalf("expected Kitty LRU eviction delete escape %q", deleteFirst)
 	}
-	if strings.Contains(ttyOut, deleteBrand) {
-		t.Fatalf("pinned brandImgID (%d) must not be evicted", brandImgID)
-	}
 	if got := kittyLRU.unpinnedLen(); got != maxKittyImages {
 		t.Fatalf("kittyLRU.unpinnedLen() = %d, want %d", got, maxKittyImages)
 	}
 
-	// Brand logo must still be cached and pinned without re-uploading.
 	ttyBuf.Reset()
-	if got := RenderBrandLogo(10, 3); got != brandOut {
-		t.Fatalf("RenderBrandLogo after 97 video uploads did not return cached brand logo")
-	}
-	if ttyBuf.String() != "" {
-		t.Fatalf("pinned brand logo triggered unexpected TTY write: %q", ttyBuf.String())
-	}
 
 	// Re-rendering evicted kittyvid_000 must detect eviction from kittyLRU and re-upload cleanly,
 	// evicting kittyvid_001 in turn.
@@ -687,9 +649,6 @@ func TestKittyUploadTTYAvailabilityAndErrors(t *testing.T) {
 
 	if err := uploadKittyImage(12345, path, 10, 5); err == nil {
 		t.Fatal("expected error when TTY is unavailable")
-	}
-	if RenderBrandLogo(8, 3) != "" {
-		t.Fatal("expected RenderBrandLogo to return empty string when TTY is unavailable")
 	}
 
 	// Failing ttyWriter during transmitKittyPNG must not record image in kittyLRU.
@@ -740,15 +699,12 @@ func TestSetThumbQualityAndClearThumbCache(t *testing.T) {
 		t.Fatalf("invalid quality should fall back to max, got %q", got)
 	}
 
-	// Verify ClearThumbCache evicts video entries from thumbCacheLRU & kittyLRU while keeping pinned brandImgID.
+	// Verify ClearThumbCache evicts unpinned video entries from thumbCacheLRU & kittyLRU.
 	ttyBuf := &safeTTYBuffer{}
 	setTTYWriter(ttyBuf)
 	t.Setenv("KITTY_WINDOW_ID", "1")
 	t.Setenv("TERM", "xterm-kitty")
 
-	if brand := RenderBrandLogo(10, 3); !strings.ContainsRune(brand, 0x10EEEE) {
-		t.Fatalf("expected pinned brand logo placeholder, got %q", brand)
-	}
 	pngThumb := makeTestPNG(t, 32, 18, func(x, y int) color.RGBA {
 		return color.RGBA{R: 120, G: 90, B: 200, A: 255}
 	})
@@ -765,23 +721,13 @@ func TestSetThumbQualityAndClearThumbCache(t *testing.T) {
 	if _, ok := thumbCacheLRU.get("qvid002_8x4_k=true"); ok {
 		t.Fatal("expected ClearThumbCache to evict video entry from thumbCacheLRU")
 	}
-	if _, ok := thumbCacheLRU.get("__brand_logo_10x3"); !ok {
-		t.Fatal("expected ClearThumbCache to keep pinned brand logo in thumbCacheLRU")
-	}
 	if kittyLRU.touch(vidImgID) {
 		t.Fatal("expected ClearThumbCache to evict unpinned video image from kittyLRU")
 	}
-	if !kittyLRU.touch(brandImgID) {
-		t.Fatal("expected ClearThumbCache to keep pinned brandImgID in kittyLRU")
-	}
 	delVid := fmt.Sprintf("\x1b_Ga=d,d=i,i=%d,q=2\x1b\\", vidImgID)
-	delBrand := fmt.Sprintf("\x1b_Ga=d,d=i,i=%d,q=2\x1b\\", brandImgID)
 	out := ttyBuf.String()
 	if !strings.Contains(out, delVid) {
 		t.Fatalf("expected Kitty delete sequence %q for video image, got %q", delVid, out)
-	}
-	if strings.Contains(out, delBrand) {
-		t.Fatalf("ClearThumbCache must not delete pinned brandImgID (%q)", delBrand)
 	}
 }
 

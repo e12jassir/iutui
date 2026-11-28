@@ -101,12 +101,14 @@ func FetchYouTubeCaptions(ctx context.Context, httpClient *http.Client, endpoint
 		endpoint = defaultYouTubePlayerURL
 	}
 
+	normLang := normalizeCaptionLang(prefLang)
+
 	reqBody, err := json.Marshal(ytPlayerRequest{
 		Context: ytPlayerContext{
 			Client: ytPlayerClient{
 				ClientName:    "ANDROID",
 				ClientVersion: "20.10.38",
-				HL:            "es",
+				HL:            normLang,
 				GL:            "CO",
 			},
 		},
@@ -229,11 +231,29 @@ func FetchYouTubeCaptions(ctx context.Context, httpClient *http.Client, endpoint
 	}, nil
 }
 
-func selectCaptionTrack(tracks []ytCaptionTrack, prefLang string) (ytCaptionTrack, bool) {
-	pref := strings.TrimSpace(prefLang)
-	if pref == "" {
-		pref = "es"
+func normalizeCaptionLang(raw string) string {
+	s := strings.ToLower(strings.TrimSpace(raw))
+	if s == "" || s == "auto" {
+		return "es"
 	}
+	if idx := strings.IndexAny(s, "-_."); idx > 0 {
+		s = s[:idx]
+	}
+	switch s {
+	case "en":
+		return "en"
+	case "es":
+		return "es"
+	default:
+		if len(s) >= 2 && len(s) <= 3 {
+			return s
+		}
+		return "es"
+	}
+}
+
+func selectCaptionTrack(tracks []ytCaptionTrack, prefLang string) (ytCaptionTrack, bool) {
+	pref := normalizeCaptionLang(prefLang)
 
 	bestScore := -1
 	var best ytCaptionTrack

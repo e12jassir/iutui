@@ -611,14 +611,380 @@ printf '{"id":"liveSet1111","title":"Live Result","channel":"Tester","duration":
 					cat.SetCookieJar("")
 					h.SetDisableCookieAuthSubs(true)
 				}
-				_ = cat.feedSize()
+				_ = cat.FeedSizeLimit()
 				_ = cat.searchSize()
-				_, _ = cat.cacheTTLConfig()
-				_ = cat.cookieJarPath()
+				_, _ = cat.CacheTTLDuration()
+				_ = cat.CookieJar()
 				_ = cat.quality()
 				_ = h.disableCookieAuthSubs()
 			}
 		}(g)
 	}
 	wg.Wait()
+}
+
+func TestHybridCatalog_ConcurrentFeedAndLiveSettersRace(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{
+			"contents": {
+				"playlistPanelRenderer": {
+					"contents": [
+						{
+							"playlistPanelVideoRenderer": {
+								"videoId": "raceTrack01",
+								"title": {"runs": [{"text": "Persiana Americana"}]},
+								"longBylineText": {"runs": [{"text": "Soda Stereo"}]},
+								"lengthText": {"runs": [{"text": "4:52"}]}
+							}
+						}
+					]
+				}
+			}
+		}`))
+	}))
+	defer srv.Close()
+
+	tmp := t.TempDir()
+	bin := writeFakeYTDLP(t, tmp, `printf '{"id":"raceHome001","title":"Race Home","channel":"Chan","duration":180}\n'`)
+	direct := NewYTDLPCatalog(filepath.Join(tmp, "cache"), time.Minute, bin)
+	defer direct.Wait()
+
+	var history []model.Video
+	for i := 1; i <= 6; i++ {
+		history = append(history, model.Video{
+			ID:       fmt.Sprintf("seedRace%03d", i),
+			Title:    fmt.Sprintf("Track %d", i),
+			Channel:  fmt.Sprintf("Artist %d", i),
+			Duration: "03:30",
+		})
+	}
+
+	h := NewHybridCatalog(nil, direct)
+	h.RSSClient = srv.Client()
+	h.LocalMusicBaseURL = srv.URL
+	h.LocalMusicProvider = func(context.Context) (LocalMusicData, error) {
+		return LocalMusicData{History: history}, nil
+	}
+
+	var wg sync.WaitGroup
+	for g := 0; g < 4; g++ {
+		wg.Add(2)
+		go func(id int) {
+			defer wg.Done()
+			for i := 0; i < 15; i++ {
+				direct.SetFeedSize(20 + (id+i)%5*10)
+				if i%2 == 0 {
+					direct.SetCacheTTL(time.Duration(i+1) * time.Second)
+				} else {
+					direct.SetCacheTTL(0)
+				}
+				direct.SetExtraArgs([]string{"--geo-bypass"})
+			}
+		}(g)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 10; i++ {
+				_, _ = h.Feed(context.Background(), model.TabMusic)
+				_, _ = h.Feed(context.Background(), model.TabHome)
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+func TestHybridCatalog_TabMusicAuthenticatedDoesNotEclipseFEmusicHome(t *testing.T) {
+	tmp := t.TempDir()
+	jar := writeTestYTMusicCookieJar(t, tmp, true)
+
+	ytmBrowseJSON := `{
+		"responseContext": {"mainAppWebResponseContext": {"loggedOut": false}},
+		"contents": {
+			"singleColumnBrowseResultsRenderer": {
+				"tabs": [{
+					"tabRenderer": {
+						"content": {
+							"sectionListRenderer": {
+								"contents": [{
+									"musicShelfRenderer": {
+										"contents": [
+											{
+												"musicResponsiveListItemRenderer": {
+													"playlistItemData": {"videoId": "ytmHome0001"},
+													"flexColumns": [
+														{"musicResponsiveListItemFlexColumnRenderer": {"text": {"runs": [{"text": "Zoom"}]}}},
+														{"musicResponsiveListItemFlexColumnRenderer": {"text": {"runs": [{"text": "Soda Stereo"}]}}}
+													],
+													"fixedColumns": [
+														{"musicResponsiveListItemFixedColumnRenderer": {"text": {"runs": [{"text": "3:26"}]}}}
+													]
+												}
+											},
+											{
+												"musicResponsiveListItemRenderer": {
+													"playlistItemData": {"videoId": "sharedDup01"},
+													"flexColumns": [
+														{"musicResponsiveListItemFlexColumnRenderer": {"text": {"runs": [{"text": "Shared Song"}]}}},
+														{"musicResponsiveListItemFlexColumnRenderer": {"text": {"runs": [{"text": "Cerati"}]}}}
+													],
+													"fixedColumns": [
+														{"musicResponsiveListItemFixedColumnRenderer": {"text": {"runs": [{"text": "4:00"}]}}}
+													]
+												}
+											}
+										]
+									}
+								}]
+							}
+						}
+					}
+				}]
+			}
+		}
+	}`
+
+	localRadioSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{
+			"contents": {
+				"playlistPanelRenderer": {
+					"contents": [
+						{
+							"playlistPanelVideoRenderer": {
+								"videoId": "sharedDup01",
+								"title": {"runs": [{"text": "Shared Song"}]},
+								"longBylineText": {"runs": [{"text": "Cerati"}]},
+								"lengthText": {"runs": [{"text": "4:00"}]},
+								"navigationEndpoint": {"watchEndpoint": {"videoId": "sharedDup01", "watchEndpointMusicSupportedConfigs": {"watchEndpointMusicConfig": {"musicVideoType": "MUSIC_VIDEO_TYPE_ATV"}}}}
+							}
+						},
+						{
+							"playlistPanelVideoRenderer": {
+								"videoId": "localDisc02",
+								"title": {"runs": [{"text": "Puente"}]},
+								"longBylineText": {"runs": [{"text": "Gustavo Cerati"}]},
+								"lengthText": {"runs": [{"text": "4:33"}]},
+								"navigationEndpoint": {"watchEndpoint": {"videoId": "localDisc02", "watchEndpointMusicSupportedConfigs": {"watchEndpointMusicConfig": {"musicVideoType": "MUSIC_VIDEO_TYPE_ATV"}}}}
+							}
+						}
+					]
+				}
+			}
+		}`))
+	}))
+	defer localRadioSrv.Close()
+
+	var ytmHomeHits int
+	var mu sync.Mutex
+	ytmSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		ytmHomeHits++
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(ytmBrowseJSON))
+	}))
+	defer ytmSrv.Close()
+
+	var history []model.Video
+	for i := 1; i <= 6; i++ {
+		history = append(history, model.Video{
+			ID:       fmt.Sprintf("histMus000%d", i),
+			Title:    fmt.Sprintf("Favorite %d", i),
+			Channel:  fmt.Sprintf("Band %d", i),
+			Duration: "03:40",
+		})
+	}
+
+	bin := writeFakeYTDLP(t, tmp, `exit 1`)
+	direct := NewYTDLPCatalog(filepath.Join(tmp, "cache"), 5*time.Minute, bin)
+	direct.SetCookieJar(jar)
+	direct.musicEndpoint = ytmSrv.URL
+	direct.musicHTTPClient = ytmSrv.Client()
+	defer direct.Wait()
+
+	h := NewHybridCatalog(nil, direct)
+	h.RSSClient = localRadioSrv.Client()
+	h.LocalMusicBaseURL = localRadioSrv.URL
+	h.LocalMusicProvider = func(context.Context) (LocalMusicData, error) {
+		return LocalMusicData{History: history}, nil
+	}
+
+	videos, err := h.Feed(context.Background(), model.TabMusic)
+	if err != nil {
+		t.Fatalf("Feed(TabMusic) error: %v", err)
+	}
+	mu.Lock()
+	hits := ytmHomeHits
+	mu.Unlock()
+	if hits == 0 {
+		t.Fatal("expected FEmusic_home to be queried when valid cookies are configured, got 0 hits")
+	}
+	if len(videos) == 0 || videos[0].ID != "ytmHome0001" {
+		t.Fatalf("expected FEmusic_home track ytmHome0001 first, got %+v", videos)
+	}
+
+	seen := make(map[string]int)
+	for _, v := range videos {
+		seen[v.ID]++
+	}
+	if seen["ytmHome0001"] != 1 || seen["sharedDup01"] != 1 || seen["localDisc02"] != 1 {
+		t.Fatalf("expected merged unique tracks from both FEmusic_home and local music without duplicates, got counts=%v videos=%+v", seen, videos)
+	}
+}
+
+func TestCacheDisabledSkipsWritingFeedJSONAndExtraArgsInjected(t *testing.T) {
+	t.Run("SetCacheTTL(0) prevents Feed, RefreshFeed, and BuildLocalMusicFeed from writing feed_*.json", func(t *testing.T) {
+		tmp := t.TempDir()
+		cacheDir := filepath.Join(tmp, "cache")
+		bin := writeFakeYTDLP(t, tmp, `printf '{"id":"nocache0001","title":"No Cache","channel":"Chan","duration":120}\n'`)
+
+		cat := NewYTDLPCatalog(cacheDir, 5*time.Minute, bin)
+		cat.SetCacheTTL(0)
+		defer cat.Wait()
+
+		if _, err := cat.Feed(context.Background(), model.TabHome); err != nil {
+			t.Fatalf("Feed(TabHome) error: %v", err)
+		}
+		if _, err := cat.RefreshFeed(context.Background(), model.TabHome); err != nil {
+			t.Fatalf("RefreshFeed(TabHome) error: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(cacheDir, "feed_home.json")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("expected feed_home.json NOT to be written when cacheDisabled=true, stat err=%v", err)
+		}
+
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(`{"contents":{"playlistPanelRenderer":{"contents":[{"playlistPanelVideoRenderer":{"videoId":"locNoCache1","title":{"runs":[{"text":"Track"}]},"longBylineText":{"runs":[{"text":"Artist"}]},"lengthText":{"runs":[{"text":"3:30"}]}}}]}}}`))
+		}))
+		defer srv.Close()
+
+		var history []model.Video
+		for i := 1; i <= 5; i++ {
+			history = append(history, model.Video{
+				ID:       fmt.Sprintf("locSeed000%d", i),
+				Title:    fmt.Sprintf("Seed %d", i),
+				Channel:  fmt.Sprintf("Artist %d", i),
+				Duration: "03:20",
+			})
+		}
+		h := NewHybridCatalog(nil, cat)
+		h.RSSClient = srv.Client()
+		h.LocalMusicBaseURL = srv.URL
+		h.LocalMusicProvider = func(context.Context) (LocalMusicData, error) {
+			return LocalMusicData{History: history}, nil
+		}
+		if _, err := h.Feed(context.Background(), model.TabMusic); err != nil {
+			t.Fatalf("Hybrid Feed(TabMusic) error: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(cacheDir, localMusicCacheFile)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("expected %s NOT to be written when cacheDisabled=true, stat err=%v", localMusicCacheFile, err)
+		}
+	})
+
+	t.Run("SetExtraArgs injects extra flags into fetchTarget and ChannelVideos", func(t *testing.T) {
+		tmp := t.TempDir()
+		argsFile := filepath.Join(tmp, "args.txt")
+		script := fmt.Sprintf(
+			"args_file=%s\n: > \"$args_file\"\nfor a in \"$@\"; do\n\tprintf '%%s\\0' \"$a\" >> \"$args_file\"\ndone\nprintf '{\"id\":\"extra111111\",\"title\":\"Extra\",\"channel\":\"Chan\",\"duration\":100}\\n'\n",
+			shellQuote(argsFile),
+		)
+		bin := writeFakeYTDLP(t, tmp, script)
+		cat := NewYTDLPCatalog(filepath.Join(tmp, "cache"), time.Minute, bin)
+		cat.SetExtraArgs([]string{"--js-runtimes", "deno", "--geo-bypass"})
+		defer cat.Wait()
+
+		if _, err := cat.Search(context.Background(), "pink floyd"); err != nil {
+			t.Fatalf("Search error: %v", err)
+		}
+		searchArgs := readRecordedArgs(t, argsFile)
+		if !hasArgPair(searchArgs, "--js-runtimes", "deno") || !slices.Contains(searchArgs, "--geo-bypass") {
+			t.Fatalf("expected extra args in Search call, got %v", searchArgs)
+		}
+		if lastArg(searchArgs) != "ytsearch20:pink floyd" {
+			t.Fatalf("expected target last in Search call, got %q", lastArg(searchArgs))
+		}
+
+		if _, err := cat.ChannelVideos(context.Background(), model.Video{ChannelID: "UC_x5XG1OV2P6uZZ5FSM9Ttw"}, 10); err != nil {
+			t.Fatalf("ChannelVideos error: %v", err)
+		}
+		chanArgs := readRecordedArgs(t, argsFile)
+		if !hasArgPair(chanArgs, "--js-runtimes", "deno") || !slices.Contains(chanArgs, "--geo-bypass") {
+			t.Fatalf("expected extra args in ChannelVideos call, got %v", chanArgs)
+		}
+		if lastArg(chanArgs) != "https://www.youtube.com/channel/UC_x5XG1OV2P6uZZ5FSM9Ttw/videos" {
+			t.Fatalf("expected target last in ChannelVideos call, got %q", lastArg(chanArgs))
+		}
+	})
+}
+
+func TestResolveChannelReference(t *testing.T) {
+	t.Run("extracts UC ID directly without invoking yt-dlp", func(t *testing.T) {
+		tmp := t.TempDir()
+		called := filepath.Join(tmp, "called")
+		bin := writeFakeYTDLP(t, tmp, fmt.Sprintf("touch %s\nexit 1\n", shellQuote(called)))
+
+		for _, raw := range []string{
+			"UC_x5XG1OV2P6uZZ5FSM9Ttw",
+			"  https://www.youtube.com/channel/UC_x5XG1OV2P6uZZ5FSM9Ttw/videos  ",
+			"youtube.com/feeds/videos.xml?channel_id=UC_x5XG1OV2P6uZZ5FSM9Ttw",
+		} {
+			cid, label, err := ResolveChannelReference(context.Background(), bin, raw)
+			if err != nil {
+				t.Fatalf("ResolveChannelReference(%q) unexpected error: %v", raw, err)
+			}
+			if cid != "UC_x5XG1OV2P6uZZ5FSM9Ttw" || label != "" {
+				t.Fatalf("ResolveChannelReference(%q) = (%q, %q), want (UC_x5XG1OV2P6uZZ5FSM9Ttw, \"\")", raw, cid, label)
+			}
+		}
+		if _, err := os.Stat(called); !errors.Is(err, os.ErrNotExist) {
+			t.Fatal("expected yt-dlp NOT to be called for direct UC references")
+		}
+	})
+
+	t.Run("resolves @handle,/@handle URL, /c/, and /user/ via yt-dlp --dump-single-json", func(t *testing.T) {
+		tmp := t.TempDir()
+		argsFile := filepath.Join(tmp, "args.txt")
+		script := fmt.Sprintf(
+			"args_file=%s\n: > \"$args_file\"\nfor a in \"$@\"; do\n\tprintf '%%s\\0' \"$a\" >> \"$args_file\"\ndone\nprintf '{\"channel_id\":\"UCsodaStereo111111111111\",\"channel\":\"Soda Stereo\",\"uploader\":\"Soda Stereo Oficial\"}\\n'\n",
+			shellQuote(argsFile),
+		)
+		bin := writeFakeYTDLP(t, tmp, script)
+
+		cases := []struct {
+			raw     string
+			wantURL string
+		}{
+			{raw: "@SodaStereo", wantURL: "https://www.youtube.com/@SodaStereo"},
+			{raw: "https://www.youtube.com/@SodaStereo/videos", wantURL: "https://www.youtube.com/@SodaStereo/videos"},
+			{raw: "youtube.com/c/SodaStereo", wantURL: "https://www.youtube.com/c/SodaStereo"},
+			{raw: "https://m.youtube.com/user/SodaStereoVEVO/", wantURL: "https://www.youtube.com/user/SodaStereoVEVO"},
+		}
+		for _, tc := range cases {
+			cid, label, err := ResolveChannelReference(context.Background(), bin, tc.raw)
+			if err != nil {
+				t.Fatalf("ResolveChannelReference(%q) error: %v", tc.raw, err)
+			}
+			if cid != "UCsodaStereo111111111111" || label != "Soda Stereo" {
+				t.Fatalf("ResolveChannelReference(%q) = (%q, %q), want (UCsodaStereo111111111111, Soda Stereo)", tc.raw, cid, label)
+			}
+			args := readRecordedArgs(t, argsFile)
+			wantFlags := []string{"--no-warnings", "--playlist-items", "1", "--flat-playlist", "--dump-single-json", tc.wantURL}
+			if !slices.Equal(args, wantFlags) {
+				t.Fatalf("ResolveChannelReference(%q) args = %v, want %v", tc.raw, args, wantFlags)
+			}
+		}
+	})
+
+	t.Run("falls back to uploader and entries[0] and respects context timeout", func(t *testing.T) {
+		tmp := t.TempDir()
+		bin := writeFakeYTDLP(t, tmp, `printf '{"entries":[{"channel_id":"UCpinkFloyd2222222222222","uploader":"Pink Floyd"}]}\n'`)
+		cid, label, err := ResolveChannelReference(context.Background(), bin, "@PinkFloyd")
+		if err != nil || cid != "UCpinkFloyd2222222222222" || label != "Pink Floyd" {
+			t.Fatalf("got (%q, %q, %v), want (UCpinkFloyd2222222222222, Pink Floyd, nil)", cid, label, err)
+		}
+
+		slowBin := writeFakeYTDLP(t, tmp, `sleep 5`)
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		defer cancel()
+		if _, _, err := ResolveChannelReference(ctx, slowBin, "@SlowChan"); !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("expected context.DeadlineExceeded, got %v", err)
+		}
+	})
 }

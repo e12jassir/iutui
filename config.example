@@ -8,8 +8,8 @@ YT_HIDE_SHORTS=1            # 1 = hide Shorts
 YT_INTERLEAVE=1             # 1 = mix channels in "home" so none floods the list
 YT_HOME=auto                # auto | foryou | music | subs | later | history | search
 
-# ── speed ────────────────────────────────────────────────
-YT_CACHE_TTL=900            # seconds a feed is considered fresh (stale data still shows instantly)
+# ── speed & caching ──────────────────────────────────────
+YT_CACHE_TTL=900            # seconds a feed is considered fresh (0 = disable feed & search caching)
 YT_COOKIE_TTL=21600         # seconds between reads of your browser's cookie database
 YT_PREFETCH=24              # thumbnails pre-downloaded in parallel (0 = off)
 YT_THUMB_QUALITY=max        # max (HD maxresdefault with hq fallback) | hq | mq
@@ -18,10 +18,8 @@ YT_THUMB_QUALITY=max        # max (HD maxresdefault with hq fallback) | hq | mq
 YT_DEFAULT_MODE=window      # window | pip | fs | audio
 YT_QUALITY=720              # max video height (0 = no limit, 1080, 720, 480, 360)
 YT_AUDIO_VOLUME=75          # initial mpv volume (0-150)
-YT_SPEED=1.0                # playback speed (0.5 - 2.0)
+YT_SPEED=1.0                # initial playback speed (0.5 - 2.0, adjustable live with [ and ])
 YT_AUTOPLAY=1               # 1 = auto-advance to related / next track, 0 = off
-YT_MUSIC_MODE=bg            # bg (background detached + notification) | term (foreground interactive)
-YT_PLAYBACK=auto            # auto (native direct, pipe fallback on 403) | direct | pipe
 YT_SPONSORBLOCK=1           # 1 = skip sponsor/selfpromo segments automatically via mpv IPC, 0 = off
 
 # ── login (cookies) ──────────────────────────────────────
@@ -32,12 +30,10 @@ YT_BROWSERS="zen firefox librewolf brave chromium chrome"   # detection order
 
 # ── interface & downloads ────────────────────────────────
 YT_THEME=youtube-dark       # youtube-dark | catppuccin | tokyonight | gruvbox | kanagawa | terminal
-YT_LANG=auto                # auto | es | en
+YT_LANG=auto                # UI & captions language: auto (detect from locale) | es (Spanish) | en (English)
 YT_PREVIEW=auto             # auto (Kitty HD in Ghostty/Kitty, pure-Go 24-bit ANSI blocks elsewhere) | kitty | chafa | none
-YT_HEIGHT=95%
-YT_NOTIFY=1
-# YT_BROWSER_CMD=firefox    # open-in-browser command (default: $BROWSER, xdg-open or open)
+YT_NOTIFY=1                 # 1 = desktop notifications on background track changes & finished downloads, 0 = off
 # YT_DOWNLOAD_DIR=~/Videos
-# YT_DOWNLOAD_AUDIO=0       # 1 = download audio-only (mp3/m4a), 0 = video
-# YT_YTDLP_ARGS="--js-runtimes deno"   # extra yt-dlp flags
-# YT_FZF_OPTS=""
+# YT_DOWNLOAD_AUDIO=0       # 1 = download audio-only (mp3), 0 = video
+# YT_YTDLP=yt-dlp           # custom yt-dlp binary path
+# YT_YTDLP_ARGS="--js-runtimes deno"   # extra yt-dlp flags for catalog, streams, and downloads

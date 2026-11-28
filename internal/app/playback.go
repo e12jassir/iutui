@@ -95,6 +95,64 @@ var QualityOptions = []QualityOption{
 	{Label: "Solo Audio", Desc: "Sin ventana de video (~50 MB/h)", Quality: 720, AudioOnly: true},
 }
 
+// QualityOptions returns the localized resolution / data-saver / audio-only presets for the active catalog.
+func (s *State) QualityOptions() []QualityOption {
+	as := s.Catalog().App
+	return []QualityOption{
+		{Label: as.QualOptMaxLabel, Desc: as.QualOptMaxDesc, Quality: 0, AudioOnly: false},
+		{Label: as.QualOpt1080Label, Desc: as.QualOpt1080Desc, Quality: 1080, AudioOnly: false},
+		{Label: as.QualOpt720Label, Desc: as.QualOpt720Desc, Quality: 720, AudioOnly: false},
+		{Label: as.QualOpt360Label, Desc: as.QualOpt360Desc, Quality: 360, AudioOnly: false},
+		{Label: as.QualOptAudioLabel, Desc: as.QualOptAudioDesc, Quality: 720, AudioOnly: true},
+	}
+}
+
+func (s *State) fireTrackNotification(id, title string) {
+	title = strings.TrimSpace(title)
+	if seed := model.MixSeedVideoID(id); seed != "" {
+		id = seed
+	} else {
+		id = strings.TrimSpace(id)
+	}
+	if title == "" {
+		return
+	}
+	s.lastNotifiedID = id
+	s.lastNotifiedTitle = title
+	if !s.Notify || s.Deps.System == nil {
+		return
+	}
+	sys := s.Deps.System
+	go func() {
+		_ = sys.Notify("iutui", title)
+	}()
+}
+
+func (s *State) maybeNotifyStatusTrack(st player.Status) {
+	curID := strings.TrimSpace(s.CurrentPlaying.ID)
+	if curID == "" {
+		curID = strings.TrimSpace(st.VideoID)
+	}
+	if seed := model.MixSeedVideoID(curID); seed != "" {
+		curID = seed
+	}
+	curTitle := strings.TrimSpace(s.CurrentPlaying.Title)
+	if curTitle == "" {
+		curTitle = strings.TrimSpace(st.Title)
+	}
+	if curTitle == "" {
+		return
+	}
+	if curID != "" && s.lastNotifiedID != "" {
+		if curID == s.lastNotifiedID {
+			return
+		}
+	} else if curTitle == s.lastNotifiedTitle {
+		return
+	}
+	s.fireTrackNotification(curID, curTitle)
+}
+
 var qualityPresets = []int{0, 1080, 720, 480, 360}
 
 func (s *State) upcomingFallbackIDs(limit int) []string {
@@ -126,9 +184,10 @@ func (s *State) ToggleAutoplay() (*State, tea.Cmd) {
 	if ac, ok := s.Deps.Engine.(autoplayConfigurer); ok {
 		ac.SetAutoplay(s.Autoplay)
 	}
-	msg := "⏹ Autoplay: OFF"
+	as := s.Catalog().App
+	msg := as.ToastAutoplayOff
 	if s.Autoplay {
-		msg = "🔁 Autoplay: ON"
+		msg = as.ToastAutoplayOn
 	}
 	return s, tea.Batch(s.toastCmd(msg), s.saveBoolConfigCmd("YT_AUTOPLAY", s.Autoplay))
 }
@@ -180,6 +239,7 @@ func (s *State) indexOfVisibleVideo(id string) int {
 }
 
 func (s *State) playVideo(v model.Video, mode string) (*State, tea.Cmd) {
+	defer s.syncMouseSnapshot()
 	if s.Deps.Engine == nil {
 		return s, nil
 	}
@@ -272,31 +332,36 @@ func (s *State) playVideo(v model.Video, mode string) (*State, tea.Cmd) {
 		s.Feeds[model.TabHistory] = updated
 	}
 
-	toastMsg := "▶ Abriendo en mpv: " + v.Title
+	as := s.Catalog().App
+	toastMsg := i18n.Format(as.ToastOpenMPV, map[string]string{"title": v.Title})
 	if mode == "audio" || (mode == "auto" && s.AudioOnly) {
-		toastMsg = "🎧 Solo audio: " + v.Title
+		toastMsg = i18n.Format(as.ToastPlayAudioOnly, map[string]string{"title": v.Title})
 	} else if isMixTarget(v.ID, mode) {
-		toastMsg = "📻 Abriendo Mix: " + v.Title
+		toastMsg = i18n.Format(as.ToastOpenMix, map[string]string{"title": v.Title})
 	} else if offlineLocal {
-		toastMsg = "💾 Sin conexión: " + v.Title
+		toastMsg = i18n.Format(as.ToastPlayOffline, map[string]string{"title": v.Title})
 	}
 	pf, hasPlayFrom := s.Deps.Engine.(playFromStarter)
 	if resumePos > 0 && hasPlayFrom {
-		toastMsg = "⏩ Reanudando en " + formatClockApp(resumePos)
+		toastMsg = i18n.Format(as.ToastResumingAt, map[string]string{"pos": formatClockApp(resumePos)})
 	}
+	s.fireTrackNotification(v.ID, v.Title)
 	toastCmd := s.toastCmd(toastMsg)
+	eng := s.Deps.Engine
+	st := s.Deps.Store
+	ctx := s.appCtx
 	playCmd := func() tea.Msg {
 		var err error
 		if resumePos > 0 && hasPlayFrom {
-			err = pf.PlayFrom(s.appCtx, targetVideo, mode, resumePos)
+			err = pf.PlayFrom(ctx, targetVideo, mode, resumePos)
 		} else {
-			err = s.Deps.Engine.Play(s.appCtx, targetVideo, mode)
+			err = eng.Play(ctx, targetVideo, mode)
 		}
 		if err != nil {
 			return ActionResultMsg{Err: err}
 		}
-		if s.Deps.Store != nil {
-			_ = s.Deps.Store.RecordHistory(s.appCtx, v)
+		if st != nil {
+			_ = st.RecordHistory(ctx, v)
 		}
 		return PlayStartedMsg{}
 	}
@@ -316,7 +381,7 @@ func (s *State) NextTrack() (*State, tea.Cmd) {
 	if s.PlayerStatus.IsRunning && s.PlayerStatus.PlaylistCount > 1 &&
 		s.PlayerStatus.PlaylistPos >= 0 && s.PlayerStatus.PlaylistPos+1 < s.PlayerStatus.PlaylistCount {
 		s.navigatingBack = false
-		return s, s.engineCmd(func(ctx context.Context) error { return s.Deps.Engine.Next(ctx) }, "⏭ Siguiente")
+		return s, s.engineCmd(func(ctx context.Context) error { return s.Deps.Engine.Next(ctx) }, s.Catalog().App.ToastNextTrack)
 	}
 	if len(s.Queue) > 0 {
 		next := s.Queue[0]
@@ -331,7 +396,7 @@ func (s *State) NextTrack() (*State, tea.Cmd) {
 		s.SetSelection(nextIdx)
 		return s.PlaySelected("auto")
 	}
-	return s, s.engineCmd(func(ctx context.Context) error { return s.Deps.Engine.Next(ctx) }, "⏭ Siguiente")
+	return s, s.engineCmd(func(ctx context.Context) error { return s.Deps.Engine.Next(ctx) }, s.Catalog().App.ToastNextTrack)
 }
 
 // PrevTrack returns playback to the previous played track in the active mpv playlist or PlayStack, or restarts the active track.
@@ -339,9 +404,10 @@ func (s *State) PrevTrack() (*State, tea.Cmd) {
 	if s.Deps.Engine == nil {
 		return s, nil
 	}
+	as := s.Catalog().App
 	if s.PlayerStatus.IsRunning && s.PlayerStatus.PlaylistCount > 1 && s.PlayerStatus.PlaylistPos > 0 {
 		s.navigatingBack = true
-		return s, s.engineCmd(func(ctx context.Context) error { return s.Deps.Engine.Prev(ctx) }, "⏮ Anterior")
+		return s, s.engineCmd(func(ctx context.Context) error { return s.Deps.Engine.Prev(ctx) }, as.ToastPrevTrack)
 	}
 	if len(s.PlayStack) > 0 {
 		prev := s.PlayStack[len(s.PlayStack)-1]
@@ -353,14 +419,14 @@ func (s *State) PrevTrack() (*State, tea.Cmd) {
 		return s.playVideo(prev, "auto")
 	}
 	if s.PlayerStatus.IsRunning || s.CurrentPlaying.ID != "" {
-		return s.SeekAbsolutePos(0, "⏮ Inicio de pista")
+		return s.SeekAbsolutePos(0, as.ToastTrackStart)
 	}
 	if items := s.VisibleItems(); len(items) > 1 && s.activeIdx() > 0 {
 		s.SetSelection(s.activeIdx() - 1)
 		s.skipHistoryPush = true
 		return s.PlaySelected("auto")
 	}
-	return s, s.engineCmd(func(ctx context.Context) error { return s.Deps.Engine.Prev(ctx) }, "⏮ Anterior")
+	return s, s.engineCmd(func(ctx context.Context) error { return s.Deps.Engine.Prev(ctx) }, as.ToastPrevTrack)
 }
 
 func (s *State) recordSkipOrCompleteForOutgoing(outgoing model.Video) {
@@ -446,7 +512,7 @@ func (s *State) resolvePlayingVideo(videoID, title string) model.Video {
 					resolvedTitle = strings.TrimSpace(title)
 				}
 				cleanArtist := strings.TrimSpace(it.Artist)
-				if strings.EqualFold(cleanArtist, "YouTube") || strings.EqualFold(cleanArtist, "Mix / Cola") {
+				if strings.EqualFold(cleanArtist, "YouTube") || strings.EqualFold(cleanArtist, "Mix / Cola") || strings.EqualFold(cleanArtist, "Mix / Queue") {
 					cleanArtist = ""
 				}
 				if resolvedTitle != "" || cleanArtist != "" {
@@ -566,6 +632,7 @@ func (s *State) localQueuePlaylist() []player.PlaylistItem {
 
 // ToggleQueue opens or closes the Queue/Mix drawer cleanly.
 func (s *State) ToggleQueue() (*State, tea.Cmd) {
+	defer s.syncMouseSnapshot()
 	if s.ShowQueue {
 		s.ShowQueue = false
 		s.queueRefreshPending = false
@@ -576,6 +643,7 @@ func (s *State) ToggleQueue() (*State, tea.Cmd) {
 
 // OpenQueue opens the live mpv queue drawer/modal and refreshes playlist entries from Engine.
 func (s *State) OpenQueue() (*State, tea.Cmd) {
+	defer s.syncMouseSnapshot()
 	s.ShowHelp = false
 	s.ShowSettings = false
 	s.ShowQualityModal = false
@@ -592,8 +660,9 @@ func (s *State) OpenQueue() (*State, tea.Cmd) {
 		}
 		s.syncQueueScroll()
 		s.queueRefreshPending = true
+		ctx := s.appCtx
 		return s, func() tea.Msg {
-			items, err := pc.Playlist(s.appCtx)
+			items, err := pc.Playlist(ctx)
 			return QueueLoadedMsg{Items: items, Err: err}
 		}
 	}
@@ -613,6 +682,7 @@ func (s *State) PlayQueueSelected() (*State, tea.Cmd) {
 }
 
 func (s *State) playQueueAt(queueIdx int, closeAfter bool) (*State, tea.Cmd) {
+	defer s.syncMouseSnapshot()
 	if queueIdx < 0 || queueIdx >= len(s.MPVPlaylist) {
 		if closeAfter {
 			s.ShowQueue = false
@@ -628,13 +698,14 @@ func (s *State) playQueueAt(queueIdx int, closeAfter bool) (*State, tea.Cmd) {
 		s.ShowQueue = false
 	}
 	if pc, ok := s.Deps.Engine.(playlistController); ok && s.PlayerStatus.IsRunning {
+		as := s.Catalog().App
 		idx := item.Index
 		if idx < 0 {
 			idx = queueIdx
 		}
 		title := item.Title
 		if title == "" {
-			title = fmt.Sprintf("Pista %d", idx+1)
+			title = i18n.Format(as.TrackFallbackN, map[string]string{"n": strconv.Itoa(idx + 1)})
 		}
 		vid := item.VideoID
 		if vid == "" {
@@ -648,17 +719,18 @@ func (s *State) playQueueAt(queueIdx int, closeAfter bool) (*State, tea.Cmd) {
 			if resolved.Title == "" {
 				resolved.Title = title
 			}
-			if resolved.Channel == "" && item.Artist != "" && !strings.EqualFold(item.Artist, "YouTube") && !strings.EqualFold(item.Artist, "Mix / Cola") {
+			if resolved.Channel == "" && item.Artist != "" && !strings.EqualFold(item.Artist, "YouTube") && !strings.EqualFold(item.Artist, "Mix / Cola") && !strings.EqualFold(item.Artist, "Mix / Queue") {
 				resolved.Channel = strings.TrimSpace(item.Artist)
 			}
 			if resolved.Duration == "" {
 				resolved.Duration = strings.TrimSpace(item.Duration)
 			}
 			s.CurrentPlaying = resolved
+			s.fireTrackNotification(resolved.ID, resolved.Title)
 		}
 		return s, s.engineCmd(func(ctx context.Context) error {
 			return pc.PlayPlaylistIndex(ctx, idx)
-		}, "▶ Cola: "+title)
+		}, i18n.Format(as.ToastQueuePlay, map[string]string{"title": title}))
 	}
 	// Fallback when mpv is not running yet: play directly from local s.Queue if matched.
 	for i, v := range s.Queue {
@@ -672,6 +744,7 @@ func (s *State) playQueueAt(queueIdx int, closeAfter bool) (*State, tea.Cmd) {
 
 // RemoveQueueSelected removes the highlighted track from the Queue overlay and mpv playlist.
 func (s *State) RemoveQueueSelected() (*State, tea.Cmd) {
+	defer s.syncMouseSnapshot()
 	if s.QueueIdx < 0 || s.QueueIdx >= len(s.MPVPlaylist) {
 		return s, nil
 	}
@@ -689,12 +762,13 @@ func (s *State) RemoveQueueSelected() (*State, tea.Cmd) {
 	}
 	if pc, ok := s.Deps.Engine.(playlistController); ok && s.PlayerStatus.IsRunning {
 		idx := removed.Index
+		ctx := s.appCtx
 		toast := s.toastCmd(s.Catalog().App.ToastRemovedFromQueue)
 		rmCmd := func() tea.Msg {
-			if err := pc.RemovePlaylistIndex(s.appCtx, idx); err != nil {
+			if err := pc.RemovePlaylistIndex(ctx, idx); err != nil {
 				return ActionResultMsg{Err: err}
 			}
-			items, err := pc.Playlist(s.appCtx)
+			items, err := pc.Playlist(ctx)
 			return QueueLoadedMsg{Items: items, Err: err}
 		}
 		return s, tea.Batch(toast, rmCmd)
@@ -704,6 +778,7 @@ func (s *State) RemoveQueueSelected() (*State, tea.Cmd) {
 
 // ClearQueue clears queued tracks in state and in the active mpv playlist.
 func (s *State) ClearQueue() (*State, tea.Cmd) {
+	defer s.syncMouseSnapshot()
 	s.Queue = nil
 	s.MPVPlaylist = nil
 	s.QueueIdx = 0
@@ -711,7 +786,7 @@ func (s *State) ClearQueue() (*State, tea.Cmd) {
 	if pc, ok := s.Deps.Engine.(playlistController); ok && s.PlayerStatus.IsRunning {
 		return s, s.engineCmd(func(ctx context.Context) error {
 			return pc.ClearPlaylist(ctx)
-		}, "🗑 Cola vaciada")
+		}, s.Catalog().App.ToastQueueCleared)
 	}
 	return s, s.toastCmd(s.Catalog().App.ToastQueueCleared)
 }
@@ -730,7 +805,7 @@ func (s *State) SetPlaybackSpeed(target float64) (*State, tea.Cmd) {
 	target = clampSpeed(target)
 	s.PlayerStatus.Speed = target
 	speedStr := strconv.FormatFloat(target, 'f', -1, 64)
-	label := fmt.Sprintf("⚡ Velocidad %sx", speedStr)
+	label := i18n.Format(s.Catalog().App.ToastSpeedFmt, map[string]string{"speed": speedStr})
 	saveCmd := s.saveConfigCmd("YT_SPEED", speedStr)
 	if sc, ok := s.Deps.Engine.(speedController); ok && s.Deps.Engine != nil {
 		return s, tea.Batch(s.engineCmd(func(ctx context.Context) error {
@@ -751,28 +826,31 @@ func (s *State) ToggleLoop() (*State, tea.Cmd) {
 	}
 	next := !s.PlayerStatus.LoopFile
 	s.PlayerStatus.LoopFile = next
+	ctx := s.appCtx
 	return s, func() tea.Msg {
-		enabled, err := lt.ToggleLoop(s.appCtx)
+		enabled, err := lt.ToggleLoop(ctx)
 		return LoopToggledMsg{Enabled: enabled, Err: err}
 	}
 }
 
 // QualityLabel returns a human-readable badge for the current max vertical resolution or audio-only mode.
 func (s *State) QualityLabel() string {
+	as := s.Catalog().App
 	if s.AudioOnly {
-		return "Solo Audio"
+		return as.BadgeAudioOnly
 	}
 	if s.Quality <= 0 {
 		return "MAX"
 	}
 	if s.Quality <= 360 {
-		return fmt.Sprintf("%dp Ahorro", s.Quality)
+		return i18n.Format(as.BadgeQualitySaver, map[string]string{"q": strconv.Itoa(s.Quality)})
 	}
 	return fmt.Sprintf("%dp", s.Quality)
 }
 
 // OpenQualityModal opens the resolution / data-saver / audio-only selector centered on the current preset.
 func (s *State) OpenQualityModal() *State {
+	defer s.syncMouseSnapshot()
 	s.ShowHelp = false
 	s.ShowSettings = false
 	s.ShowChapters = false
@@ -782,10 +860,11 @@ func (s *State) OpenQualityModal() *State {
 }
 
 func (s *State) currentQualityOptionIndex() int {
+	opts := s.QualityOptions()
 	if s.AudioOnly {
-		return len(QualityOptions) - 1
+		return len(opts) - 1
 	}
-	for i, opt := range QualityOptions {
+	for i, opt := range opts {
 		if !opt.AudioOnly && opt.Quality == s.Quality {
 			return i
 		}
@@ -796,10 +875,12 @@ func (s *State) currentQualityOptionIndex() int {
 // ApplyQualityOption applies preset idx from QualityOptions, updates the engine,
 // persists configuration, and displays a confirmation toast.
 func (s *State) ApplyQualityOption(idx int) (*State, tea.Cmd) {
-	if idx < 0 || idx >= len(QualityOptions) {
+	defer s.syncMouseSnapshot()
+	opts := s.QualityOptions()
+	if idx < 0 || idx >= len(opts) {
 		idx = 2
 	}
-	opt := QualityOptions[idx]
+	opt := opts[idx]
 	s.ShowQualityModal = false
 	return s.applyPlaybackProfile(opt.Quality, opt.AudioOnly, opt.Label)
 }
@@ -813,30 +894,32 @@ func (s *State) applyPlaybackProfile(quality int, audioOnly bool, label string) 
 		s.DefaultMode = "window"
 	}
 
+	as := s.Catalog().App
 	var cmds []tea.Cmd
 	if label == "" {
 		if audioOnly {
-			label = "Solo Audio"
+			label = as.BadgeAudioOnly
 		} else if quality <= 0 {
-			label = "Máxima (best)"
+			label = as.ValQualBestToast
 		} else {
 			label = fmt.Sprintf("%dp", quality)
 		}
 	}
-	toastPrefix := "🎬 Calidad: "
+	toastFmt := as.ToastQualityFmt
 	if audioOnly {
-		toastPrefix = "🎧 Modo: "
+		toastFmt = as.ToastAudioModeFmt
 	}
-	cmds = append(cmds, s.toastCmd(toastPrefix+label))
+	cmds = append(cmds, s.toastCmd(i18n.Format(toastFmt, map[string]string{"label": label})))
 
 	selVid, hasSel := s.SelectedVideo()
 	prefetcher, hasPrefetch := s.Deps.Engine.(streamPrefetcher)
+	ctx := s.appCtx
 
 	if ps, ok := s.Deps.Engine.(playbackProfileSetter); ok {
 		q := quality
 		ao := audioOnly
 		cmds = append(cmds, func() tea.Msg {
-			if err := ps.SetPlaybackProfile(s.appCtx, q, ao); err != nil {
+			if err := ps.SetPlaybackProfile(ctx, q, ao); err != nil {
 				if hasSel && hasPrefetch {
 					prefetcher.Prefetch(selVid)
 				}
@@ -848,7 +931,7 @@ func (s *State) applyPlaybackProfile(quality int, audioOnly bool, label string) 
 			return nil
 		})
 	} else if qs, ok := s.Deps.Engine.(qualitySetter); ok {
-		qs.SetQuality(s.appCtx, quality)
+		qs.SetQuality(ctx, quality)
 		if hasSel && hasPrefetch {
 			prefetcher.Prefetch(selVid)
 		}
@@ -882,11 +965,12 @@ func (s *State) applyPlaybackProfile(quality int, audioOnly bool, label string) 
 // CycleQuality rotates through presets (MAX -> 1080p -> 720p -> 480p -> 360p -> Solo Audio -> MAX),
 // updates the player engine, persists config, and re-prefetches the current item.
 func (s *State) CycleQuality() (*State, tea.Cmd) {
+	as := s.Catalog().App
 	if s.AudioOnly {
-		return s.applyPlaybackProfile(0, false, "Máxima (best)")
+		return s.applyPlaybackProfile(0, false, as.ValQualBestToast)
 	}
 	if s.Quality == qualityPresets[len(qualityPresets)-1] {
-		return s.applyPlaybackProfile(s.Quality, true, "Solo Audio (sin ventana)")
+		return s.applyPlaybackProfile(s.Quality, true, as.ValModeAudio)
 	}
 	next := qualityPresets[0]
 	for i, q := range qualityPresets {
@@ -895,7 +979,7 @@ func (s *State) CycleQuality() (*State, tea.Cmd) {
 			break
 		}
 	}
-	label := "Máxima (best)"
+	label := as.ValQualBestToast
 	if next > 0 {
 		label = fmt.Sprintf("%dp", next)
 	}
@@ -908,8 +992,9 @@ func (s *State) ToggleVideoMode() (*State, tea.Cmd) {
 	if !ok {
 		return s, s.toastCmd(s.Catalog().App.ToastHotSwapUnavailable)
 	}
+	ctx := s.appCtx
 	return s, func() tea.Msg {
-		videoOn, err := vt.ToggleVideoMode(s.appCtx)
+		videoOn, err := vt.ToggleVideoMode(ctx)
 		return VideoModeToggledMsg{VideoOn: videoOn, Err: err}
 	}
 }
@@ -932,9 +1017,10 @@ func (s *State) ToggleSponsorBlock() (*State, tea.Cmd) {
 			return nil
 		}
 	}
-	msg := "🛡 SponsorBlock: OFF"
+	as := s.Catalog().App
+	msg := as.ToastSponsorBlockOff
 	if s.SponsorBlock {
-		msg = "🛡 SponsorBlock: ON"
+		msg = as.ToastSponsorBlockOn
 	}
 	return s, tea.Batch(s.toastCmd(msg), saveCmd)
 }
@@ -943,19 +1029,21 @@ func (s *State) toggleSubtitlesCmd() tea.Cmd {
 	type subtitleCycler interface {
 		CycleSubtitles(context.Context) (bool, error)
 	}
+	cat := s.Catalog()
 	sc, ok := s.Deps.Engine.(subtitleCycler)
 	if !ok {
-		return s.toastCmd(s.Catalog().App.ToastHotSwapUnavailable)
+		return s.toastCmd(cat.App.ToastHotSwapUnavailable)
 	}
+	ctx := s.appCtx
 	return func() tea.Msg {
-		on, err := sc.CycleSubtitles(s.appCtx)
+		on, err := sc.CycleSubtitles(ctx)
 		if err != nil {
 			return ActionResultMsg{Err: err}
 		}
 		if on {
-			return ActionResultMsg{Info: s.Catalog().App.ToastSubtitlesOn}
+			return ActionResultMsg{Info: cat.App.ToastSubtitlesOn}
 		}
-		return ActionResultMsg{Info: s.Catalog().App.ToastSubtitlesOff}
+		return ActionResultMsg{Info: cat.App.ToastSubtitlesOff}
 	}
 }
 
@@ -963,18 +1051,20 @@ func (s *State) togglePiPCmd() tea.Cmd {
 	type pipToggler interface {
 		TogglePiP(context.Context) (bool, error)
 	}
+	cat := s.Catalog()
 	pt, ok := s.Deps.Engine.(pipToggler)
 	if !ok {
-		return s.toastCmd(s.Catalog().App.ToastHotSwapUnavailable)
+		return s.toastCmd(cat.App.ToastHotSwapUnavailable)
 	}
+	ctx := s.appCtx
 	return func() tea.Msg {
-		on, err := pt.TogglePiP(s.appCtx)
+		on, err := pt.TogglePiP(ctx)
 		if err != nil {
 			return ActionResultMsg{Err: err}
 		}
 		if on {
-			return ActionResultMsg{Info: s.Catalog().App.ToastPiPOn}
+			return ActionResultMsg{Info: cat.App.ToastPiPOn}
 		}
-		return ActionResultMsg{Info: s.Catalog().App.ToastPiPOff}
+		return ActionResultMsg{Info: cat.App.ToastPiPOff}
 	}
 }

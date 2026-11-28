@@ -19,7 +19,7 @@ var (
 	envDefaultPattern = regexp.MustCompile(`^\$\{([A-Za-z_][A-Za-z0-9_]*):-([^}]*)\}$`)
 )
 
-// Config holds all YT_* runtime settings for ytx.
+// Config holds all YT_* runtime settings for iutui.
 type Config struct {
 	FeedSize      int
 	SearchSize    int
@@ -29,11 +29,9 @@ type Config struct {
 	Quality       int
 	Speed         float64
 	Autoplay      bool
-	MusicMode     string
 	DownloadAudio bool
 	Prefetch      int
 	DefaultMode   string
-	Playback      string
 	Home          string
 	Lang          string
 	Preview       string
@@ -52,7 +50,7 @@ type Config struct {
 	DownloadDir   string
 }
 
-// Default returns a Config populated with the default values from lib/config.sh.
+// Default returns a Config populated with the default values.
 func Default() Config {
 	return Config{
 		FeedSize:      100,
@@ -63,11 +61,9 @@ func Default() Config {
 		Quality:       720, // Crisp HD with ~3x-12x lower data usage than 1080p60/4K60.
 		Speed:         1.0,
 		Autoplay:      true,
-		MusicMode:     "bg",
 		DownloadAudio: false,
 		Prefetch:      24,
 		DefaultMode:   "window",
-		Playback:      "auto",
 		Home:          "auto",
 		Lang:          "auto",
 		Preview:       "auto",
@@ -202,11 +198,9 @@ var knownKeys = []string{
 	"YT_QUALITY",
 	"YT_SPEED",
 	"YT_AUTOPLAY",
-	"YT_MUSIC_MODE",
 	"YT_DOWNLOAD_AUDIO",
 	"YT_PREFETCH",
 	"YT_DEFAULT_MODE",
-	"YT_PLAYBACK",
 	"YT_HOME",
 	"YT_LANG",
 	"YT_PREVIEW",
@@ -319,8 +313,6 @@ func buildConfig(raw map[string]string) Config {
 	cfg.Speed = asFloatRange(raw["YT_SPEED"], cfg.Speed, 0.5, 2.0)
 
 	cfg.DefaultMode = asEnum(raw["YT_DEFAULT_MODE"], cfg.DefaultMode, "window", "pip", "fs", "audio")
-	cfg.MusicMode = asEnum(raw["YT_MUSIC_MODE"], cfg.MusicMode, "bg", "term")
-	cfg.Playback = asEnum(raw["YT_PLAYBACK"], cfg.Playback, "pipe", "direct", "auto")
 	cfg.Preview = asEnum(raw["YT_PREVIEW"], cfg.Preview, "auto", "kitty", "chafa", "none")
 	cfg.ThumbQuality = asEnum(raw["YT_THUMB_QUALITY"], cfg.ThumbQuality, "max", "hq", "mq")
 	cfg.Cookies = asEnum(raw["YT_COOKIES"], cfg.Cookies, "auto", "off")

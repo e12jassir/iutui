@@ -79,13 +79,13 @@ Single-video playback resolves through a cookieless `player_client=android` path
 
 | Area | Behavior |
 |---|---|
-| **Playback & Prefetch** | Cookieless `player_client=android` stream resolution paired with async lookahead prefetching and smooth `volume-gain` audio fades on pause/resume, track switches, and queue transitions. |
-| **Linux MPRIS2 D-Bus** | Exports track metadata, position, playback rate, and transport controls over `org.mpris.MediaPlayer2.iutui` for `playerctl`, lock screens, and media keys. |
-| **Live Queue & Autocomplete** | Inspect and edit the active `mpv` queue with `u`; search with `/` using cursor-based editing and live YouTube suggestions (`Tab` to complete). |
-| **Speed, Loop & Auto-Resume** | Adjust playback rate from `0.5x` to `2.0x` (`{` / `}` / `0`), toggle single-track repeat (`R`), and resume videos of 15 minutes or longer automatically via `resume.json`. |
-| **Offline Downloads & Feeds** | Background downloads (`d`) show percentage, speed, and ETA, and play directly from disk when opened offline. Sync the **Music** tab with authenticated YouTube Music (`FEmusic_home` via browser cookies) with automatic public fallback when logged out, and manage Watch Later (`w`), Liked (`W`), and local RSS subscriptions (`s`) with no account. |
-| **SponsorBlock, Lyrics & Data Saver** | Skip sponsor segments via `B`, view 3-layer synced lyrics and YouTube captions (`L` — pure-Go YouTube InnerTube `captionTracks` + duration-aware `LRCLIB`, live sync adjustment `z`/`Z`/`Y`, source toggle `y`) and jumpable chapters (`o` / `C`), cycle presets (`f` / `c`), or switch live between video and audio-only (`V` / `x`). |
-| **Themes, Settings & Diagnostics** | Configure 16 live settings in Settings Studio (`S`), cycle across `youtube-dark`, `catppuccin`, `tokyonight`, `gruvbox`, `kanagawa`, and `terminal` (`t`), respect `NO_COLOR`, and write JSON `slog` traces via `--debug-log`. |
+| **Playback & Prefetch** | Fast `player_client=android;player_skip=webpage,configs` stream resolution paired with coalesced priority lookups, live `mpv` playlist CDN hot-swapping on track transitions, and smooth `volume-gain` audio fades. |
+| **Linux MPRIS2 D-Bus** | Exports track metadata, artist, cover art, position, playback rate, and transport controls over `org.mpris.MediaPlayer2.iutui` for `playerctl`, lock screens, and media keys. |
+| **Live Queue & Autocomplete** | Inspect and edit the active `mpv` queue with `u`; search with `/` using cursor-based editing, persisted search history, and live YouTube suggestions (`Tab` to complete). |
+| **Speed, Loop & Auto-Resume** | Adjust playback rate from `0.5x` to `2.0x` (`{` / `}` / `0`), toggle single-track repeat (`R`), and resume watched videos automatically via `resume.json` with IPC `start=` reuse. |
+| **Offline Downloads & Feeds** | Background downloads (`d`) show percentage, speed, and ETA, and play directly from disk when opened offline. Sync the **Music** tab with authenticated YouTube Music (`FEmusic_home` via browser cookies) blended with smart local curation, and manage Watch Later (`w`), Liked (`W`), and local RSS subscriptions (`s`, including `@handles`) with no account. |
+| **SponsorBlock, Lyrics & Data Saver** | Skip sponsor segments via `B`, view 3-layer synced lyrics and YouTube captions (`L` — pure-Go YouTube InnerTube `captionTracks` + duration-aware `LRCLIB`, live sync adjustment `z`/`Z`/`Y`, source toggle `y`), toggle `mpv` subtitles (`C`) or Picture-in-Picture (`P`), jump chapters (`o`), cycle presets (`f` / `c`), or switch live between video and audio-only (`V` / `x`). |
+| **Themes, i18n, Settings & Diagnostics** | Bilingual `es`/`en` UI (`YT_LANG`), 18 live settings in Settings Studio (`S`), 6 built-in themes (`youtube-dark`, `catppuccin`, `tokyonight`, `gruvbox`, `kanagawa`, `terminal` via `t`), `NO_COLOR` support, and JSON `slog` traces via `--debug-log`. |
 
 ## Requirements
 
@@ -131,16 +131,17 @@ Mouse clicks and scrolling work across cards, sidebar tabs, overlays, and the pl
 | `m` | Play YouTube Mix Radio | `q` | Enqueue video to `mpv` playlist |
 | `Space` | Pause or resume playback | `u` | Open Live Queue overlay |
 | `n` / `p` | Next or previous item in queue | `d` | Download video in background |
-| `,` / `.` (`<` / `>`) | Seek `-10s` / `+10s` | `o` / `O` / `C` | Open interactive chapters overlay |
-| `-` / `+` (`=`) | Volume `-5%` / `+5%` | `l` / `L` | Toggle synced lyrics / YouTube captions |
-| `z` / `Z` / `Y` | Shift lyrics sync `-0.5s` / `+0.5s` / reset | `y` | Switch lyrics source (YouTube CC ↔ LRCLIB) |
+| `,` / `.` (`<` / `>`) | Seek `-10s` / `+10s` | `o` | Open interactive chapters overlay |
+| `-` / `+` (`=`) | Volume `-5%` / `+5%` | `C` / `P` | Toggle `mpv` CC subtitles / Picture-in-Picture |
+| `l` / `L` | Toggle synced lyrics / YouTube captions | `O` / `Ctrl+O` | Open video in default browser |
+| `z` / `Z` / `Y` | Shift lyrics sync `-0.5s` / `+0.5s` / reset | `y` | Copy video URL (or switch lyrics source when `L` open) |
 | `{` / `}` / `0` | Speed `-0.25x` / `+0.25x` / `1.0x` | `b` / `B` | Toggle SponsorBlock skipping |
 | `R` | Toggle single-track loop | `t` / `T` | Cycle color theme |
 | `/` (`Tab` / `↓` / `↑`) | Focus search and cycle suggestions | `f` / `F` | Open Quality & Audio-Only modal |
 | `[` / `]` | Cycle local filter chips | `c` | Cycle quality (`MAX`/`1080p`/`720p`/`480p`/`360p`/Audio) |
 | `1`..`5` | Quick-switch main tabs | `A` | Toggle continuous Autoplay |
 | `Tab` | Switch focus between view and sidebar | `r` | Force refresh current view |
-| `S` | Toggle Settings Studio (16 live settings) | `?` | Open help overlay |
+| `S` | Toggle Settings Studio (18 live settings) | `?` | Open help overlay |
 | `Esc` | Close overlay or return focus | `Q` | Quit `iutui` |
 
 </details>

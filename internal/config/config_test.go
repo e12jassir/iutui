@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
+	"strings"
 	"testing"
 )
 
@@ -25,7 +27,7 @@ func TestDefault(t *testing.T) {
 	if cfg.AudioVolume != 75 || cfg.Quality != 720 || cfg.Prefetch != 24 || cfg.Speed != 1.0 {
 		t.Fatalf("unexpected media numeric defaults: %+v", cfg)
 	}
-	if cfg.MusicMode != "bg" || cfg.DefaultMode != "window" || cfg.Playback != "auto" {
+	if cfg.DefaultMode != "window" {
 		t.Fatalf("unexpected mode defaults: %+v", cfg)
 	}
 	if cfg.Home != "auto" || cfg.Lang != "auto" || cfg.Preview != "auto" || cfg.ThumbQuality != "max" {
@@ -89,8 +91,8 @@ func TestLoadParsing(t *testing.T) {
 			content: `
 # leading comment
   YT_DEFAULT_MODE="pip" # double quoted with comment
-YT_MUSIC_MODE='term' # single quoted with comment
-YT_PLAYBACK=direct # unquoted with comment
+YT_PREVIEW='kitty' # single quoted with comment
+YT_THUMB_QUALITY=hq # unquoted with comment
 YT_HOME=custom#hash # hash without leading space is kept
 NON_YT_KEY=ignored
 not_a_key_value_line
@@ -99,11 +101,11 @@ not_a_key_value_line
 				if cfg.DefaultMode != "pip" {
 					t.Errorf("DefaultMode = %q, want %q", cfg.DefaultMode, "pip")
 				}
-				if cfg.MusicMode != "term" {
-					t.Errorf("MusicMode = %q, want %q", cfg.MusicMode, "term")
+				if cfg.Preview != "kitty" {
+					t.Errorf("Preview = %q, want %q", cfg.Preview, "kitty")
 				}
-				if cfg.Playback != "direct" {
-					t.Errorf("Playback = %q, want %q", cfg.Playback, "direct")
+				if cfg.ThumbQuality != "hq" {
+					t.Errorf("ThumbQuality = %q, want %q", cfg.ThumbQuality, "hq")
 				}
 				if cfg.Home != "custom#hash" {
 					t.Errorf("Home = %q, want %q", cfg.Home, "custom#hash")
@@ -198,8 +200,6 @@ YT_AUDIO_VOLUME=85
 			name: "invalid enum and bool values fall back to defaults",
 			content: `
 YT_DEFAULT_MODE=invalid
-YT_MUSIC_MODE=nope
-YT_PLAYBACK=stream
 YT_PREVIEW=sixel
 YT_THUMB_QUALITY=ultra
 YT_COOKIES=always
@@ -212,12 +212,6 @@ YT_BROWSERS="firefox brave"
 			check: func(t *testing.T, cfg Config) {
 				if cfg.DefaultMode != "window" {
 					t.Errorf("DefaultMode = %q, want window", cfg.DefaultMode)
-				}
-				if cfg.MusicMode != "bg" {
-					t.Errorf("MusicMode = %q, want bg", cfg.MusicMode)
-				}
-				if cfg.Playback != "auto" {
-					t.Errorf("Playback = %q, want auto", cfg.Playback)
 				}
 				if cfg.Preview != "auto" {
 					t.Errorf("Preview = %q, want auto", cfg.Preview)
@@ -512,5 +506,59 @@ func TestLoadLangEnum(t *testing.T) {
 				t.Errorf("Lang = %q, want %q", cfg.Lang, tc.want)
 			}
 		})
+	}
+}
+
+func TestConfigExampleMatchesKnownKeysAndNoLegacyFields(t *testing.T) {
+	clearYTEnv(t)
+
+	typ := reflect.TypeOf(Config{})
+	for _, legacyField := range []string{"MusicMode", "Playback"} {
+		if _, exists := typ.FieldByName(legacyField); exists {
+			t.Errorf("legacy bash field %q should be removed from Config", legacyField)
+		}
+	}
+	for _, legacyKey := range []string{"YT_MUSIC_MODE", "YT_PLAYBACK", "YT_HEIGHT", "YT_BROWSER_CMD", "YT_FZF_OPTS"} {
+		if slices.Contains(knownKeys, legacyKey) {
+			t.Errorf("legacy/ghost key %q should not be in knownKeys", legacyKey)
+		}
+	}
+
+	examplePath := filepath.Join("..", "..", "config.example")
+	raw, err := os.ReadFile(examplePath)
+	if err != nil {
+		t.Fatalf("read config.example: %v", err)
+	}
+	content := string(raw)
+	for _, ghost := range []string{"YT_HEIGHT", "YT_BROWSER_CMD", "YT_FZF_OPTS", "YT_MUSIC_MODE", "YT_PLAYBACK"} {
+		if strings.Contains(content, ghost) {
+			t.Errorf("config.example still contains ghost/legacy key %q", ghost)
+		}
+	}
+	for _, required := range []string{"YT_LANG=", "YT_SPEED=", "YT_HOME=", "YT_PREFETCH=", "YT_NOTIFY=", "YT_YTDLP_ARGS="} {
+		if !strings.Contains(content, required) {
+			t.Errorf("config.example missing documented key %q", required)
+		}
+	}
+
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			trimmed = strings.TrimSpace(strings.TrimPrefix(trimmed, "#"))
+		}
+		if eq := strings.IndexByte(trimmed, '='); eq > 0 {
+			candKey := strings.TrimSpace(trimmed[:eq])
+			if keyPattern.MatchString(candKey) && !slices.Contains(knownKeys, candKey) {
+				t.Errorf("config.example references key %q outside knownKeys", candKey)
+			}
+		}
+	}
+
+	cfg, err := Load(examplePath)
+	if err != nil {
+		t.Fatalf("Load(config.example) error: %v", err)
+	}
+	if !reflect.DeepEqual(cfg, Default()) {
+		t.Fatalf("Load(config.example) = %+v, want Default() %+v", cfg, Default())
 	}
 }

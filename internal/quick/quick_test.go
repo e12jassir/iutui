@@ -276,3 +276,40 @@ func TestView(t *testing.T) {
 		t.Errorf("View() missing empty state:\n%s", m.View())
 	}
 }
+
+func TestQuickViewLocalizationESAndEN(t *testing.T) {
+	videos := []model.Video{
+		{ID: "live1", Title: "24/7 Radio", Channel: "Lofi", IsLive: true},
+		{ID: "vid1", Title: "Signos", Channel: "Soda Stereo", Duration: "05:17"},
+	}
+
+	t.Run("spanish live badge and empty state", func(t *testing.T) {
+		m := NewWithLang(videos, "es")
+		out := m.View()
+		if !strings.Contains(out, "🔴 EN VIVO") {
+			t.Fatalf("expected Spanish live badge '🔴 EN VIVO', got:\n%s", out)
+		}
+		m = sendText(m, "zzzznotfound")
+		if !strings.Contains(m.View(), "Sin coincidencias") {
+			t.Fatalf("expected Spanish empty message 'Sin coincidencias', got:\n%s", m.View())
+		}
+	})
+
+	t.Run("english live badge and empty state", func(t *testing.T) {
+		m := NewWithLang(videos, "en")
+		out := m.View()
+		if !strings.Contains(out, "🔴 LIVE") {
+			t.Fatalf("expected English live badge '🔴 LIVE', got:\n%s", out)
+		}
+		if strings.Contains(out, "EN VIVO") {
+			t.Fatalf("did not expect Spanish 'EN VIVO' in English quick selector:\n%s", out)
+		}
+		m = sendText(m, "zzzznotfound")
+		if !strings.Contains(m.View(), "No matches") {
+			t.Fatalf("expected English empty message 'No matches', got:\n%s", m.View())
+		}
+	})
+
+	// Ensure RunWithLang is exported with the expected signature.
+	_ = RunWithLang
+}

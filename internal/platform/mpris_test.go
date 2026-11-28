@@ -207,7 +207,8 @@ func isValidDBusObjectPath(path string) bool {
 			return false
 		}
 		for _, r := range seg {
-			if !((r >= '0' && r <= '9') || (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || r == '_') {
+			isIdentChar := (r >= '0' && r <= '9') || (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || r == '_'
+			if !isIdentChar {
 				return false
 			}
 		}

@@ -34,19 +34,30 @@ type Model struct {
 	Canceled bool
 	Width    int
 	Height   int
+	LangPref string
 }
 
 // New creates a new quick selector Model initialized with the given videos.
 func New(videos []model.Video) Model {
+	return NewWithLang(videos, "auto")
+}
+
+// NewWithLang creates a new quick selector Model initialized with videos and language preference.
+func NewWithLang(videos []model.Video, langPref string) Model {
 	all := make([]model.Video, len(videos))
 	copy(all, videos)
 
 	filtered := make([]model.Video, len(videos))
 	copy(filtered, videos)
 
+	if strings.TrimSpace(langPref) == "" {
+		langPref = "auto"
+	}
+
 	return Model{
 		Videos:   all,
 		Filtered: filtered,
+		LangPref: langPref,
 	}
 }
 
@@ -158,6 +169,11 @@ func filterVideos(videos []model.Video, query string) []model.Video {
 // and highlighted video list.
 func (m Model) View() string {
 	var b strings.Builder
+	pref := m.LangPref
+	if strings.TrimSpace(pref) == "" {
+		pref = "auto"
+	}
+	vs := i18n.For(i18n.Resolve(pref, os.Getenv)).Views
 
 	b.WriteString(promptStyle.Render("> "))
 	b.WriteString(m.Query)
@@ -167,8 +183,7 @@ func (m Model) View() string {
 	b.WriteByte('\n')
 
 	if len(m.Filtered) == 0 {
-		noMatches := i18n.For(i18n.Resolve("auto", os.Getenv)).Views.QuickNoMatches
-		b.WriteString(emptyStyle.Render(noMatches))
+		b.WriteString(emptyStyle.Render(vs.QuickNoMatches))
 		b.WriteByte('\n')
 		return b.String()
 	}
@@ -192,7 +207,7 @@ func (m Model) View() string {
 
 	for i := start; i < end; i++ {
 		v := m.Filtered[i]
-		line := formatRow(v, m.Width, i == m.Selected)
+		line := formatRow(v, m.Width, i == m.Selected, vs)
 		b.WriteString(line)
 		b.WriteByte('\n')
 	}
@@ -200,13 +215,17 @@ func (m Model) View() string {
 	return b.String()
 }
 
-func formatRow(v model.Video, width int, selected bool) string {
+func formatRow(v model.Video, width int, selected bool, vs i18n.ViewStrings) string {
 	prefix := "  "
 	if selected {
 		prefix = "> "
 	}
 
-	meta := fmt.Sprintf(" — %s [%s]", v.Channel, v.Badge())
+	badge := v.Badge()
+	if v.IsLive && vs.QuickBadgeLive != "" {
+		badge = vs.QuickBadgeLive
+	}
+	meta := fmt.Sprintf(" — %s [%s]", v.Channel, badge)
 	raw := prefix + v.Title + meta
 	if width > 4 {
 		raw = runewidth.Truncate(raw, width, "…")
@@ -237,7 +256,12 @@ func formatRow(v model.Video, width int, selected bool) string {
 // Run launches the interactive quick selector and returns the chosen video,
 // a boolean indicating whether a selection was made (false if canceled), and any error.
 func Run(videos []model.Video) (model.Video, bool, error) {
-	p := tea.NewProgram(New(videos), tea.WithAltScreen())
+	return RunWithLang(videos, "auto")
+}
+
+// RunWithLang launches the interactive quick selector using langPref ("auto", "es", or "en").
+func RunWithLang(videos []model.Video, langPref string) (model.Video, bool, error) {
+	p := tea.NewProgram(NewWithLang(videos, langPref), tea.WithAltScreen())
 	finalModel, err := p.Run()
 	if err != nil {
 		return model.Video{}, false, err

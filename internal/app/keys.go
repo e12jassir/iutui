@@ -8,6 +8,7 @@ import (
 	"unicode"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/e12jassir/iutui/internal/i18n"
 	"github.com/e12jassir/iutui/internal/model"
 )
 
@@ -94,7 +95,7 @@ func (s *State) handleKey(msg tea.KeyMsg) (*State, tea.Cmd) {
 
 	if s.ShowChapters {
 		switch key {
-		case "esc", "C", "q":
+		case "esc", "q", "o", "O":
 			s.ShowChapters = false
 			return s, nil
 		case "j", "down":
@@ -114,7 +115,7 @@ func (s *State) handleKey(msg tea.KeyMsg) (*State, tea.Cmd) {
 				if cp, ok := s.Deps.Engine.(chaptersProvider); ok {
 					return s, s.engineCmd(func(ctx context.Context) error {
 						return cp.SeekAbsolute(ctx, ch.Time)
-					}, "⏩ Capítulo: "+ch.Title)
+					}, i18n.Format(s.Catalog().App.ToastChapterFmt, map[string]string{"title": ch.Title}))
 				}
 			}
 			s.ShowChapters = false
@@ -436,8 +437,10 @@ func (s *State) handleKey(msg tea.KeyMsg) (*State, tea.Cmd) {
 		return s.CycleQuality()
 	case "f", "F":
 		return s.OpenQualityModal(), nil
-	case "o", "O":
+	case "o":
 		return s.OpenChapters()
+	case "O", "ctrl+o":
+		return s.OpenSelectedBrowser()
 	case "l", "L":
 		if key == "l" && s.Focus == FocusSidebar {
 			s.Focus = FocusMain
@@ -456,6 +459,7 @@ func (s *State) handleKey(msg tea.KeyMsg) (*State, tea.Cmd) {
 		if s.ShowLyrics {
 			return s.CycleLyricsSource()
 		}
+		return s.CopySelectedURL()
 	case "Y":
 		if s.ShowLyrics {
 			return s.ResetLyricsOffset()
@@ -473,9 +477,9 @@ func (s *State) handleKey(msg tea.KeyMsg) (*State, tea.Cmd) {
 	case "p":
 		return s.PrevTrack()
 	case "+", "=":
-		return s, s.engineCmd(func(ctx context.Context) error { return s.Deps.Engine.AddVolume(ctx, 5) }, "🔊 Volumen +5%")
+		return s, s.engineCmd(func(ctx context.Context) error { return s.Deps.Engine.AddVolume(ctx, 5) }, i18n.Format(s.Catalog().App.ToastVolumeUp, map[string]string{"delta": "5%"}))
 	case "-":
-		return s, s.engineCmd(func(ctx context.Context) error { return s.Deps.Engine.AddVolume(ctx, -5) }, "🔉 Volumen -5%")
+		return s, s.engineCmd(func(ctx context.Context) error { return s.Deps.Engine.AddVolume(ctx, -5) }, i18n.Format(s.Catalog().App.ToastVolumeDown, map[string]string{"delta": "5%"}))
 	case ".", ">":
 		return s.SeekRelative(10)
 	case ",", "<":
@@ -511,6 +515,7 @@ func (s *State) insertSearchText(ins string) {
 }
 
 func (s *State) openSearchFocus(prefill bool) {
+	defer s.syncMouseSnapshot()
 	s.Focus = FocusSearch
 	s.SearchSuggestions = nil
 	s.SuggestIdx = -1
@@ -525,6 +530,7 @@ func (s *State) openSearchFocus(prefill bool) {
 }
 
 func (s *State) onSearchDraftChanged() tea.Cmd {
+	defer s.syncMouseSnapshot()
 	s.SearchSuggestions = nil
 	s.SuggestIdx = -1
 	if s.suggestCancel != nil {
@@ -598,6 +604,7 @@ func isMixTarget(id, mode string) bool {
 
 // SubmitSearch cancels any in-flight search and starts a new one.
 func (s *State) SubmitSearch() (*State, tea.Cmd) {
+	defer s.syncMouseSnapshot()
 	q := strings.TrimSpace(s.SearchDraft)
 	s.SearchSuggestions = nil
 	s.SuggestIdx = -1
@@ -624,19 +631,20 @@ func (s *State) SubmitSearch() (*State, tea.Cmd) {
 	s.View = ViewSearch
 	s.Focus = FocusMain
 	s.SearchPending = true
-	s.SearchChip = 0
 	s.ResultIdx = 0
 	s.ResultScroll = 0
 
 	ctx, cancel := context.WithTimeout(s.appCtx, searchTimeout)
 	s.searchCancel = cancel
+	catPort := s.Deps.Catalog
+	errNoCatalog := s.Catalog().App.ErrCatalogUnconfigured
 
 	searchCmd := func() tea.Msg {
 		defer cancel()
-		if s.Deps.Catalog == nil {
-			return SearchDoneMsg{Query: q, Seq: seq, Err: errors.New("catálogo no configurado")}
+		if catPort == nil {
+			return SearchDoneMsg{Query: q, Seq: seq, Err: errors.New(errNoCatalog)}
 		}
-		videos, err := s.Deps.Catalog.Search(ctx, q)
+		videos, err := catPort.Search(ctx, q)
 		return SearchDoneMsg{Query: q, Seq: seq, Videos: videos, Err: err}
 	}
 	return s, tea.Batch(searchCmd, s.ensureAnimTick())
@@ -648,6 +656,7 @@ type searchRefresher interface {
 
 // RefreshCurrentSearch bypasses catalog search cache and re-runs the active search query.
 func (s *State) RefreshCurrentSearch() (*State, tea.Cmd) {
+	defer s.syncMouseSnapshot()
 	q := strings.TrimSpace(s.SearchQuery)
 	if q == "" {
 		s.Syncing = true
@@ -663,26 +672,27 @@ func (s *State) RefreshCurrentSearch() (*State, tea.Cmd) {
 	s.View = ViewSearch
 	s.Focus = FocusMain
 	s.SearchPending = true
-	s.SearchChip = 0
 	s.ResultIdx = 0
 	s.ResultScroll = 0
 
 	ctx, cancel := context.WithTimeout(s.appCtx, searchTimeout)
 	s.searchCancel = cancel
+	catPort := s.Deps.Catalog
+	errNoCatalog := s.Catalog().App.ErrCatalogUnconfigured
 
 	searchCmd := func() tea.Msg {
 		defer cancel()
-		if s.Deps.Catalog == nil {
-			return SearchDoneMsg{Query: q, Seq: seq, Err: errors.New("catálogo no configurado")}
+		if catPort == nil {
+			return SearchDoneMsg{Query: q, Seq: seq, Err: errors.New(errNoCatalog)}
 		}
 		var (
 			videos []model.Video
 			err    error
 		)
-		if sr, ok := s.Deps.Catalog.(searchRefresher); ok {
+		if sr, ok := catPort.(searchRefresher); ok {
 			videos, err = sr.RefreshSearch(ctx, q)
 		} else {
-			videos, err = s.Deps.Catalog.Search(ctx, q)
+			videos, err = catPort.Search(ctx, q)
 		}
 		return SearchDoneMsg{Query: q, Seq: seq, Videos: videos, Err: err}
 	}
@@ -705,6 +715,7 @@ func (s *State) activeIdx() int {
 
 // SwitchTab changes the active sidebar tab and loads its feed if needed.
 func (s *State) SwitchTab(tab model.Tab) (*State, tea.Cmd) {
+	defer s.syncMouseSnapshot()
 	s.View = ViewHome
 	s.PrevView = ViewHome
 	s.Focus = FocusMain
@@ -758,6 +769,7 @@ func (s *State) cycleSidebarTab(delta int) (*State, tea.Cmd) {
 
 // CycleChip steps through the Home view's filter chips.
 func (s *State) CycleChip(delta int) *State {
+	defer s.syncMouseSnapshot()
 	if s.View != ViewHome {
 		return s
 	}

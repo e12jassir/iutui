@@ -83,25 +83,8 @@ func (h *HybridCatalog) loadFeed(ctx context.Context, tab model.Tab, refresh boo
 	if tab == model.TabSubscriptions && h.SubscriptionsProvider != nil {
 		return h.subscriptionsFeed(ctx, refresh)
 	}
-	if tab == model.TabMusic && h.LocalMusicProvider != nil {
-		if data, err := h.LocalMusicProvider(ctx); err == nil {
-			var cacheDir string
-			var cacheTTL time.Duration
-			feedSize := 30
-			if h.Direct != nil {
-				cacheDir = h.Direct.CacheDir
-				cacheTTL = h.Direct.CacheTTL
-				if h.Direct.FeedSize > 0 {
-					feedSize = h.Direct.FeedSize
-				}
-			}
-			if videos, handled, localErr := BuildLocalMusicFeed(ctx, data, cacheDir, cacheTTL, refresh, feedSize, h.RSSClient, h.LocalMusicBaseURL); handled && localErr == nil && len(videos) > 0 {
-				return videos, nil
-			}
-		}
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
+	if tab == model.TabMusic {
+		return h.musicFeed(ctx, refresh)
 	}
 
 	var directErr error
@@ -120,9 +103,137 @@ func (h *HybridCatalog) loadFeed(ctx context.Context, tab model.Tab, refresh boo
 	return h.fallbackBashFeed(ctx, tab, refresh, directErr)
 }
 
+func (h *HybridCatalog) musicFeed(ctx context.Context, refresh bool) ([]model.Video, error) {
+	if h.Direct != nil && hasValidCookieFile(h.Direct.CookieJar()) {
+		directVideos, directErr := h.directFeed(ctx, model.TabMusic, refresh)
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+
+		if h.LocalMusicProvider != nil {
+			localVideos, handled, localErr := h.buildLocalMusic(ctx, refresh)
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			if directErr == nil && len(directVideos) > 0 {
+				if handled && localErr == nil && len(localVideos) > 0 {
+					h.Direct.applyCachedMeta(localVideos)
+					return interleaveMusicFeeds(directVideos, localVideos, h.Direct.FeedSizeLimit()), nil
+				}
+				return directVideos, nil
+			}
+			if handled && localErr == nil && len(localVideos) > 0 {
+				h.Direct.applyCachedMeta(localVideos)
+				return localVideos, nil
+			}
+		} else if directErr == nil && len(directVideos) > 0 {
+			return directVideos, nil
+		}
+
+		return h.fallbackBashFeed(ctx, model.TabMusic, refresh, directErr)
+	}
+
+	if h.LocalMusicProvider != nil {
+		if localVideos, handled, localErr := h.buildLocalMusic(ctx, refresh); handled && localErr == nil && len(localVideos) > 0 {
+			if h.Direct != nil {
+				h.Direct.applyCachedMeta(localVideos)
+			}
+			return localVideos, nil
+		}
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+	}
+
+	var directErr error
+	if h.Direct != nil {
+		videos, err := h.directFeed(ctx, model.TabMusic, refresh)
+		if err == nil && len(videos) > 0 {
+			return videos, nil
+		}
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		directErr = err
+	}
+
+	return h.fallbackBashFeed(ctx, model.TabMusic, refresh, directErr)
+}
+
+func (h *HybridCatalog) buildLocalMusic(ctx context.Context, refresh bool) ([]model.Video, bool, error) {
+	if h.LocalMusicProvider == nil {
+		return nil, false, nil
+	}
+	data, err := h.LocalMusicProvider(ctx)
+	if err != nil {
+		return nil, false, err
+	}
+	var cacheDir string
+	var cacheTTL time.Duration
+	feedSize := 30
+	if h.Direct != nil {
+		cacheDir = h.Direct.CacheDir
+		if ttl, disabled := h.Direct.CacheTTLDuration(); !disabled {
+			cacheTTL = ttl
+		}
+		feedSize = h.Direct.FeedSizeLimit()
+	}
+	return BuildLocalMusicFeed(ctx, data, cacheDir, cacheTTL, refresh, feedSize, h.RSSClient, h.LocalMusicBaseURL)
+}
+
+func interleaveMusicFeeds(primary, local []model.Video, limit int) []model.Video {
+	if limit <= 0 {
+		limit = len(primary) + len(local)
+	}
+	seen := make(map[string]struct{}, len(primary)+len(local))
+	out := make([]model.Video, 0, min(limit, len(primary)+len(local)))
+
+	nextUnique := func(list []model.Video, idx *int) (model.Video, bool) {
+		for *idx < len(list) {
+			v := list[*idx]
+			*idx++
+			if v.ID == "" {
+				continue
+			}
+			if _, dup := seen[v.ID]; dup {
+				continue
+			}
+			seen[v.ID] = struct{}{}
+			return v, true
+		}
+		return model.Video{}, false
+	}
+
+	pi, li := 0, 0
+	for len(out) < limit {
+		takeLocal := len(out)%3 == 2
+		if takeLocal {
+			if v, ok := nextUnique(local, &li); ok {
+				out = append(out, v)
+				continue
+			}
+			if v, ok := nextUnique(primary, &pi); ok {
+				out = append(out, v)
+				continue
+			}
+			break
+		}
+		if v, ok := nextUnique(primary, &pi); ok {
+			out = append(out, v)
+			continue
+		}
+		if v, ok := nextUnique(local, &li); ok {
+			out = append(out, v)
+			continue
+		}
+		break
+	}
+	return out
+}
+
 func (h *HybridCatalog) subscriptionsFeed(ctx context.Context, refresh bool) ([]model.Video, error) {
 	var directErr error
-	if !h.disableCookieAuthSubs() && h.Direct != nil && hasValidCookieFile(h.Direct.cookieJarPath()) {
+	if !h.disableCookieAuthSubs() && h.Direct != nil && hasValidCookieFile(h.Direct.CookieJar()) {
 		videos, err := h.directFeed(ctx, model.TabSubscriptions, refresh)
 		if err == nil && len(videos) > 0 {
 			return videos, nil

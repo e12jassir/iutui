@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/e12jassir/iutui/internal/catalog"
@@ -40,6 +41,13 @@ type ResumePositionStore interface {
 	SavePosition(videoID string, position, duration float64) error
 }
 
+// SystemIntegration provides OS-level URL opening, clipboard copy, and desktop notifications.
+type SystemIntegration interface {
+	OpenURL(url string) error
+	CopyText(text string) error
+	Notify(title, body string) error
+}
+
 // ViewMode represents the active top-level screen.
 type ViewMode int
 
@@ -56,7 +64,6 @@ const (
 	FocusMain FocusArea = iota
 	FocusSearch
 	FocusSidebar
-	FocusPlayer
 )
 
 // Chip defines a local filter pill over loaded videos.
@@ -71,14 +78,6 @@ var HomeChips = []Chip{
 	{Label: "En vivo", Match: func(v model.Video, _ *State) bool { return v.IsLive }},
 	{Label: "Guardados", Match: func(v model.Video, s *State) bool { return s.SavedIDs[v.ID] }},
 	{Label: "Vistos", Match: func(v model.Video, s *State) bool { return s.HistoryIDs[v.ID] }},
-}
-
-// SearchChips are the filter pills available in the Search results list view.
-var SearchChips = []Chip{
-	{Label: "Todo", Match: func(model.Video, *State) bool { return true }},
-	{Label: "Videos", Match: func(v model.Video, _ *State) bool { return !v.IsLive }},
-	{Label: "En vivo", Match: func(v model.Video, _ *State) bool { return v.IsLive }},
-	{Label: "No vistos", Match: func(v model.Video, s *State) bool { return !s.HistoryIDs[v.ID] }},
 }
 
 // ChipLabel returns the localized label for a chip's canonical label.
@@ -118,6 +117,9 @@ type Dependencies struct {
 	SearchHistory        SearchHistoryStore
 	ResumeStore          ResumePositionStore
 	ListeningStats       *store.ListeningStats
+	System               SystemIntegration
+	InitialHome          string
+	InitialNotify        *bool
 	InitialQuality       int
 	InitialAudioOnly     bool
 	InitialDefaultMode   string
@@ -148,12 +150,11 @@ type Dependencies struct {
 type State struct {
 	Deps Dependencies
 
-	View       ViewMode
-	PrevView   ViewMode
-	ActiveTab  model.Tab
-	Focus      FocusArea
-	HomeChip   int
-	SearchChip int
+	View      ViewMode
+	PrevView  ViewMode
+	ActiveTab model.Tab
+	Focus     FocusArea
+	HomeChip  int
 
 	Feeds              map[model.Tab][]model.Video
 	SearchResults      []model.Video
@@ -223,6 +224,7 @@ type State struct {
 
 	Autoplay      bool
 	SponsorBlock  bool
+	Notify        bool
 	AudioOnly     bool
 	DefaultMode   string
 	AudioVolume   int
@@ -251,6 +253,8 @@ type State struct {
 	LastInteractionAt        time.Time
 	AutoplayTracksSinceInput int
 	lastTrackTitle           string
+	lastNotifiedID           string
+	lastNotifiedTitle        string
 
 	PlayLoading      bool
 	PlayLoadingTitle string
@@ -258,18 +262,20 @@ type State struct {
 	AnimFrame        int
 	animActive       bool
 
-	searchCancel  context.CancelFunc
-	searchSeq     uint64
-	suggestCancel context.CancelFunc
-	suggestSeq    uint64
-	channelCancel context.CancelFunc
-	channelSeq    uint64
-	lyricsCancel  context.CancelFunc
-	lyricsSeq     uint64
-	statusCh      <-chan player.Status
-	escapeGuard   EscapeGuard
-	appCtx        context.Context
-	appCancel     context.CancelFunc
+	searchCancel          context.CancelFunc
+	searchSeq             uint64
+	suggestCancel         context.CancelFunc
+	suggestSeq            uint64
+	channelCancel         context.CancelFunc
+	channelSeq            uint64
+	lyricsCancel          context.CancelFunc
+	lyricsSeq             uint64
+	statusCh              <-chan player.Status
+	escapeGuard           EscapeGuard
+	mouseSnap             atomic.Pointer[mouseHitSnapshot]
+	programFilterAttached atomic.Bool
+	appCtx                context.Context
+	appCancel             context.CancelFunc
 }
 
 // NewState constructs an initialized application State with injected ports.
@@ -336,14 +342,20 @@ func NewState(deps Dependencies) *State {
 	if deps.InitialDownloadAudio != nil {
 		downloadAudio = *deps.InitialDownloadAudio
 	}
+	notify := false
+	if deps.InitialNotify != nil {
+		notify = *deps.InitialNotify
+	}
+	initTab, initFocus := resolveInitialHome(deps.InitialHome)
 	s := &State{
 		Deps:               deps,
 		View:               ViewHome,
 		PrevView:           ViewHome,
-		ActiveTab:          model.TabHome,
-		Focus:              FocusMain,
+		ActiveTab:          initTab,
+		Focus:              initFocus,
 		Autoplay:           autoplay,
 		SponsorBlock:       sponsorBlock,
+		Notify:             notify,
 		AudioOnly:          deps.InitialAudioOnly || defMode == "audio",
 		DefaultMode:        defMode,
 		AudioVolume:        vol,
@@ -379,7 +391,59 @@ func NewState(deps Dependencies) *State {
 		langPref = "auto"
 	}
 	s.SetLangPref(langPref)
+	if initFocus == FocusSearch {
+		s.openSearchFocus(false)
+	}
+	s.syncMouseSnapshot()
 	return s
+}
+
+func resolveInitialHome(raw string) (model.Tab, FocusArea) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "music":
+		return model.TabMusic, FocusMain
+	case "subs", "subscriptions":
+		return model.TabSubscriptions, FocusMain
+	case "later", "watchlater":
+		return model.TabWatchLater, FocusMain
+	case "liked":
+		return model.TabLiked, FocusMain
+	case "history":
+		return model.TabHistory, FocusMain
+	case "downloads":
+		return model.TabDownloads, FocusMain
+	case "search":
+		return model.TabHome, FocusSearch
+	case "foryou", "home", "auto", "":
+		return model.TabHome, FocusMain
+	default:
+		return model.TabHome, FocusMain
+	}
+}
+
+// TabName returns the localized display name for t in the active catalog.
+func (s *State) TabName(t model.Tab) string {
+	vs := s.Catalog().Views
+	switch t {
+	case model.TabHome:
+		return vs.TabHome
+	case model.TabMusic:
+		return vs.TabMusic
+	case model.TabSubscriptions:
+		return vs.TabSubscriptions
+	case model.TabHistory:
+		return vs.TabHistory
+	case model.TabWatchLater:
+		return vs.TabWatchLater
+	case model.TabPlaylists:
+		return vs.TabPlaylists
+	case model.TabLiked:
+		return vs.TabLiked
+	case model.TabDownloads:
+		return vs.TabDownloads
+	default:
+		return vs.TabUnknown
+	}
 }
 
 // Catalog returns the active i18n catalog, falling back to Spanish if nil.
@@ -392,6 +456,7 @@ func (s *State) Catalog() *i18n.Catalog {
 
 // SetLangPref updates LangPref, resolves Lang from the environment, and refreshes Cat.
 func (s *State) SetLangPref(pref string) {
+	defer s.syncMouseSnapshot()
 	p := strings.ToLower(strings.TrimSpace(pref))
 	if p != "auto" && p != i18n.LangES && p != i18n.LangEN {
 		p = "auto"
@@ -801,6 +866,7 @@ func (s *State) SelectVisible(idx int) {
 }
 
 func (s *State) setSelection(idx int, syncScroll bool) {
+	defer s.syncMouseSnapshot()
 	items := s.VisibleItems()
 	if len(items) == 0 {
 		switch s.View {
@@ -853,6 +919,7 @@ func (s *State) setSelection(idx int, syncScroll bool) {
 // HoverSelection updates the active cursor from mouse hover without triggering
 // stream prefetch storms across items as the cursor glides over the grid/list.
 func (s *State) HoverSelection(idx int) bool {
+	defer s.syncMouseSnapshot()
 	items := s.VisibleItems()
 	if len(items) == 0 {
 		return false

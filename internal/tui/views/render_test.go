@@ -392,8 +392,8 @@ func TestRenderStillWatchingAndSettingsAutoplay(t *testing.T) {
 		s.Autoplay = true
 		outOn := Render(s, th, tr)
 		assertBounds(t, outOn, 120, 36)
-		if !strings.Contains(outOn, "Autoplay [A]:") || !strings.Contains(outOn, "ACTIVADO") {
-			t.Fatalf("expected Autoplay [A]: ACTIVADO in settings overlay, got:\n%s", outOn)
+		if !strings.Contains(outOn, "Autoplay [A]") || !strings.Contains(outOn, "ACTIVADO") {
+			t.Fatalf("expected Autoplay [A] ACTIVADO in settings overlay, got:\n%s", outOn)
 		}
 		s.Autoplay = false
 		outOff := Render(s, th, tr)
@@ -630,11 +630,8 @@ func TestRenderPhase2Features(t *testing.T) {
 		s.SearchDraft = ""
 		outEmpty := Render(s, th, tr)
 		assertBounds(t, outEmpty, 140, 42)
-		if strings.Contains(outEmpty, "Búsquedas recientes") {
-			t.Fatalf("did not expect 'Búsquedas recientes' when SearchDraft empty, got:\n%s", outEmpty)
-		}
-		if strings.Contains(outEmpty, "pink floyd live") {
-			t.Fatalf("did not expect suggestions strip when SearchDraft empty, got:\n%s", outEmpty)
+		if !strings.Contains(outEmpty, "Sugerencias") || !strings.Contains(outEmpty, "pink floyd live") {
+			t.Fatalf("expected search history/suggestions dropdown visible when FocusSearch and SearchDraft empty, got:\n%s", outEmpty)
 		}
 	})
 
@@ -817,7 +814,7 @@ func TestRenderSettingsStudioOverlay(t *testing.T) {
 		out := Render(s, th, tr)
 		s.Close()
 		assertBounds(t, out, sz[0], sz[1])
-		for _, want := range []string{"Configuración", "◆", "1/17", "ⓘ", "[?] Atajos"} {
+		for _, want := range []string{"Configuración", "◆", "1/18", "ⓘ", "[?] Atajos"} {
 			if !strings.Contains(out, want) {
 				t.Fatalf("%dx%d: expected %q in settings studio overlay, got:\n%s", sz[0], sz[1], want, out)
 			}
@@ -832,7 +829,7 @@ func TestRenderSettingsStudioOverlay(t *testing.T) {
 			out := Render(s, th, tr)
 			s.Close()
 			assertBounds(t, out, sz[0], sz[1])
-			for _, want := range []string{"Cookies navegador", "17/17", "Usa cookies de Zen/Firefox"} {
+			for _, want := range []string{"Cookies navegador", "18/18", "Usa cookies de Zen/Firefox"} {
 				if !strings.Contains(out, want) {
 					t.Fatalf("%dx%d: expected %q in scrolled settings overlay, got:\n%s", sz[0], sz[1], want, out)
 				}
@@ -1253,6 +1250,48 @@ func TestRenderEnglishLocale(t *testing.T) {
 		assertBounds(t, out, 120, 36)
 		if !strings.Contains(out, "Settings") {
 			t.Errorf("expected English 'Settings' in Settings overlay")
+		}
+	})
+
+	t.Run("player_bar_queue_and_loading_tab_english", func(t *testing.T) {
+		s := newTestState(app.ViewHome, 140, 36)
+		defer s.Close()
+		s.SetLangPref("en")
+		s.Toast = ""
+		s.PlayerStatus.PlaylistCount = 3
+
+		out := Render(s, th, tr)
+		assertBounds(t, out, 140, 36)
+		if !strings.Contains(out, "󰲸 Queue (3)") {
+			t.Errorf("expected English '󰲸 Queue (3)' badge in player bar, got:\n%s", out)
+		}
+
+		// Syncing TabMusic in English must show "Music", not Spanish "Música".
+		s.ActiveTab = model.TabMusic
+		s.Feeds[model.TabMusic] = nil
+		s.Syncing = true
+		outLoad := Render(s, th, tr)
+		assertBounds(t, outLoad, 140, 36)
+		if !strings.Contains(outLoad, "Loading videos...") || !strings.Contains(outLoad, "\n") {
+			t.Errorf("expected English loading box, got:\n%s", outLoad)
+		}
+		// Main pane loading subtitle should use localized "Music" rather than hardcoded "Música"
+		mainOnly := renderHomeGrid(s, th, tr, 80, 20, resolveRenderPalette(s.ThemeName))
+		if !strings.Contains(mainOnly, "Music") || strings.Contains(mainOnly, "Música") {
+			t.Errorf("expected localized tab subtitle 'Music' instead of 'Música', got:\n%s", mainOnly)
+		}
+	})
+
+	t.Run("hot_switch_back_to_youtube_dark_restores_default_theme", func(t *testing.T) {
+		s := newTestState(app.ViewHome, 120, 36)
+		defer s.Close()
+		s.ThemeName = "youtube-dark"
+
+		catTheme := theme.ThemeFromPalette(theme.ByName("catppuccin"))
+		gotFromCustom := Render(s, catTheme, tr)
+		wantDefault := Render(s, theme.DefaultTheme(), tr)
+		if gotFromCustom != wantDefault {
+			t.Errorf("switching ThemeName back to youtube-dark with custom initial theme did not restore DefaultTheme styles")
 		}
 	})
 }

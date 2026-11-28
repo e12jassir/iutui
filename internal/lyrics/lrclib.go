@@ -146,7 +146,7 @@ func (c *Client) FetchWithOptions(ctx context.Context, videoID, title, channel s
 		if err != nil {
 			return TrackLyrics{}, err
 		}
-		if c.hasValidYTCache(videoID) {
+		if c.hasValidYTCache(videoID, opts.Lang) {
 			lrc.HasAlternate = true
 			lrc.AltSource = SourceYouTube
 		}
@@ -321,7 +321,9 @@ func (c *Client) fetchLRCLib(ctx context.Context, videoID, title, channel string
 }
 
 func (c *Client) fetchYouTubeCached(ctx context.Context, endpoint, videoID, prefLang string) (TrackLyrics, error) {
-	ytKey := "yt:" + strings.TrimSpace(videoID)
+	normLang := normalizeCaptionLang(prefLang)
+	vid := strings.TrimSpace(videoID)
+	ytKey := "yt:" + normLang + ":" + vid
 	if entry, hit := c.getYTCached(ytKey); hit {
 		return cloneTrackLyrics(entry.lyrics), entry.err
 	}
@@ -331,7 +333,7 @@ func (c *Client) fetchYouTubeCached(ctx context.Context, endpoint, videoID, pref
 		httpClient = defaultHTTPClient
 	}
 
-	lyrics, err := FetchYouTubeCaptions(ctx, httpClient, endpoint, strings.TrimSpace(videoID), prefLang)
+	lyrics, err := FetchYouTubeCaptions(ctx, httpClient, endpoint, vid, normLang)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			c.setYTCached(ytKey, cacheEntry{err: ErrNotFound})
@@ -423,9 +425,24 @@ func (c *Client) setYTCached(key string, entry cacheEntry) {
 	c.ytCache[key] = entry
 }
 
-func (c *Client) hasValidYTCache(videoID string) bool {
-	entry, ok := c.getYTCached("yt:" + strings.TrimSpace(videoID))
-	return ok && entry.err == nil && len(entry.lyrics.Synced) > 0
+func (c *Client) hasValidYTCache(videoID, prefLang string) bool {
+	vid := strings.TrimSpace(videoID)
+	if vid == "" {
+		return false
+	}
+	normLang := normalizeCaptionLang(prefLang)
+	if entry, ok := c.getYTCached("yt:" + normLang + ":" + vid); ok && entry.err == nil && len(entry.lyrics.Synced) > 0 {
+		return true
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	suffix := ":" + vid
+	for k, entry := range c.ytCache {
+		if strings.HasPrefix(k, "yt:") && strings.HasSuffix(k, suffix) && entry.err == nil && len(entry.lyrics.Synced) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *Client) hasValidLRCCache(videoID, title, channel string, duration float64) bool {
@@ -486,10 +503,6 @@ func cloneTrackLyrics(in TrackLyrics) TrackLyrics {
 		copy(out.Plain, in.Plain)
 	}
 	return out
-}
-
-func selectBestLyrics(items []lrclibSearchItem) (TrackLyrics, bool) {
-	return selectBestLyricsForDuration(items, 0)
 }
 
 func selectBestLyricsForDuration(items []lrclibSearchItem, targetDuration float64) (TrackLyrics, bool) {

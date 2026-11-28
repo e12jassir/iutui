@@ -20,10 +20,10 @@ func renderHomeGrid(s *app.State, th theme.Theme, tr thumbs.Renderer, width, hei
 	items := s.VisibleItems()
 	if len(items) == 0 {
 		if s.Syncing {
-			return renderLoadingBox(vs.LoadingVideos, s.ActiveTab.String(), s.AnimFrame, width, height, pal)
+			return renderLoadingBox(vs.LoadingVideos, tabLabel(s.ActiveTab, vs), s.AnimFrame, width, height, pal)
 		}
 		if s.HomeChip == 1 && s.LiveLoading[s.ActiveTab] {
-			return renderLoadingBox(vs.LoadingLive, s.ActiveTab.String(), s.AnimFrame, width, height, pal)
+			return renderLoadingBox(vs.LoadingLive, tabLabel(s.ActiveTab, vs), s.AnimFrame, width, height, pal)
 		}
 		msg := vs.EmptyView
 		if s.HomeChip == 1 {

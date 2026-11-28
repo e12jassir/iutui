@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"container/list"
 	"context"
-	_ "embed"
 	"encoding/base64"
 	"fmt"
 	"hash/fnv"
@@ -16,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -28,7 +28,7 @@ import (
 const (
 	maxThumbCacheEntries = 128
 	maxKittyImages       = 96
-	brandImgID           = uint32(0x495554) // "IUT"
+	maxThumbDiskFiles    = 400
 	defaultThumbBaseURL  = "https://i.ytimg.com/vi"
 	maxThumbBytes        = 10 << 20
 )
@@ -192,7 +192,11 @@ var (
 	fetchingMap        = make(map[string]bool)
 	knownLocalThumbs   = make(map[string]bool)
 	failedFetchUntil   = make(map[string]time.Time)
-	fetchSem           = make(chan struct{}, 6)
+	prefetchMu         sync.Mutex
+	prefetchCond       = sync.NewCond(&prefetchMu)
+	prefetchLimit      = 6
+	prefetchActive     int
+	pruneMu            sync.Mutex
 	prepareMu          sync.Mutex
 	preparingMap       = make(map[string]bool)
 	failedPrepareUntil = make(map[string]time.Time)
@@ -343,8 +347,92 @@ func thumbQualityVariants() []string {
 	case "hq":
 		return []string{"hqdefault", "mqdefault"}
 	default:
-		return []string{"maxresdefault", "mqdefault", "hqdefault"}
+		return []string{"maxresdefault", "hqdefault", "mqdefault"}
 	}
+}
+
+// SetPrefetchLimit configures background thumbnail download concurrency.
+// Setting n <= 0 disables background thumbnail downloads (extreme data-saver mode);
+// setting n > 0 clamps concurrency to [1, 12].
+func SetPrefetchLimit(n int) {
+	prefetchMu.Lock()
+	if n <= 0 {
+		prefetchLimit = 0
+	} else {
+		prefetchLimit = min(max(1, n), 12)
+	}
+	prefetchCond.Broadcast()
+	prefetchMu.Unlock()
+}
+
+func acquirePrefetchSlot() bool {
+	prefetchMu.Lock()
+	defer prefetchMu.Unlock()
+	for prefetchLimit > 0 && prefetchActive >= prefetchLimit {
+		prefetchCond.Wait()
+	}
+	if prefetchLimit <= 0 {
+		return false
+	}
+	prefetchActive++
+	return true
+}
+
+func releasePrefetchSlot() {
+	prefetchMu.Lock()
+	prefetchActive--
+	prefetchCond.Signal()
+	prefetchMu.Unlock()
+}
+
+func pruneThumbDiskCache(thumbsDir string, maxFiles int) {
+	if maxFiles <= 0 || thumbsDir == "" {
+		return
+	}
+	pruneMu.Lock()
+	defer pruneMu.Unlock()
+
+	entries, err := os.ReadDir(thumbsDir)
+	if err != nil {
+		return
+	}
+	type diskEntry struct {
+		name    string
+		path    string
+		modTime time.Time
+	}
+	jpgs := make([]diskEntry, 0, len(entries))
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || strings.HasPrefix(name, ".") || !strings.HasSuffix(strings.ToLower(name), ".jpg") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		jpgs = append(jpgs, diskEntry{
+			name:    name,
+			path:    filepath.Join(thumbsDir, name),
+			modTime: info.ModTime(),
+		})
+	}
+	if len(jpgs) <= maxFiles {
+		return
+	}
+	sort.Slice(jpgs, func(i, j int) bool {
+		if !jpgs[i].modTime.Equal(jpgs[j].modTime) {
+			return jpgs[i].modTime.Before(jpgs[j].modTime)
+		}
+		return jpgs[i].name < jpgs[j].name
+	})
+	removeCount := len(jpgs) - maxFiles
+	for i := 0; i < removeCount; i++ {
+		_ = os.Remove(jpgs[i].path)
+	}
+	fetchingMu.Lock()
+	clear(knownLocalThumbs)
+	fetchingMu.Unlock()
 }
 
 func thumbMinBytes(variant string) int64 {
@@ -546,22 +634,24 @@ func FetchThumbnailAsync(id string) {
 		defer asyncWG.Done()
 		downloaded := false
 
-		fetchSem <- struct{}{}
-		func() {
-			defer func() { <-fetchSem }()
-			thumbsDir := filepath.Join(getThumbCacheDir(), "thumbs")
-			if err := os.MkdirAll(thumbsDir, 0o755); err != nil {
-				return
-			}
-
-			for _, variant := range variants {
-				target := filepath.Join(thumbsDir, fmt.Sprintf("%s_%s.jpg", cleanID, variant))
-				if err := downloadThumbToFile(cleanID, variant, target, thumbMinBytes(variant)); err == nil {
-					downloaded = true
+		if acquirePrefetchSlot() {
+			func() {
+				defer releasePrefetchSlot()
+				thumbsDir := filepath.Join(getThumbCacheDir(), "thumbs")
+				if err := os.MkdirAll(thumbsDir, 0o755); err != nil {
 					return
 				}
-			}
-		}()
+
+				for _, variant := range variants {
+					target := filepath.Join(thumbsDir, fmt.Sprintf("%s_%s.jpg", cleanID, variant))
+					if err := downloadThumbToFile(cleanID, variant, target, thumbMinBytes(variant)); err == nil {
+						downloaded = true
+						pruneThumbDiskCache(thumbsDir, maxThumbDiskFiles)
+						return
+					}
+				}
+			}()
+		}
 
 		fetchingMu.Lock()
 		delete(fetchingMap, cleanID)
@@ -716,10 +806,10 @@ func prepareKittyAsync(cacheKey, id, file string, width, height int) {
 
 func videoImageID(id string, cols, rows int) uint32 {
 	h := fnv.New32a()
-	_, _ = h.Write([]byte(fmt.Sprintf("%s_%dx%d", cleanThumbID(id), cols, rows)))
+	_, _ = fmt.Fprintf(h, "%s_%dx%d", cleanThumbID(id), cols, rows)
 	// 24-bit non-zero ID (1 .. 16,777,215) so it fits in 24-bit RGB foreground color
 	val := h.Sum32() & 0xFFFFFF
-	if val == 0 || val == brandImgID {
+	if val == 0 {
 		val++
 	}
 	return val
@@ -789,44 +879,6 @@ func formatKittyPlaceholders(imgID uint32, cols, rows int) string {
 	}
 
 	return strings.Join(lines, "\n")
-}
-
-// RenderBrandLogo renders a crisp antialiased YouTube play-badge + wordmark PNG
-// via Kitty Unicode placeholders for Ghostty/Kitty, or returns "" when unsupported.
-func RenderBrandLogo(cols, rows int) string {
-	if !isKittyGraphicsSupported() || cols <= 0 || rows <= 0 || cols > len(kittyDiacritics) || rows > len(kittyDiacritics) {
-		return ""
-	}
-	cacheKey := fmt.Sprintf("__brand_logo_%dx%d", cols, rows)
-	if entry, ok := thumbCacheLRU.get(cacheKey); ok && kittyLRU.touch(brandImgID) {
-		return entry.ansi
-	}
-
-	if !kittyLRU.touch(brandImgID) {
-		pngBytes, err := renderYouTubeBrandPNG()
-		if err != nil {
-			return ""
-		}
-		if err := ensureKittyImageUploaded(brandImgID, true, func() error {
-			return transmitKittyPNG(brandImgID, pngBytes, cols, rows)
-		}); err != nil {
-			return ""
-		}
-	}
-
-	out := formatKittyPlaceholders(brandImgID, cols, rows)
-	thumbCacheLRU.put(cacheKey, thumbCacheValue{ansi: out, kittyImgID: brandImgID}, true)
-	return out
-}
-
-//go:embed logo.png
-var embeddedBrandLogoPNG []byte
-
-func renderYouTubeBrandPNG() ([]byte, error) {
-	if len(embeddedBrandLogoPNG) == 0 {
-		return nil, fmt.Errorf("empty embedded brand logo")
-	}
-	return embeddedBrandLogoPNG, nil
 }
 
 // uploadKittyImage decodes the image, scales it cleanly to 480x270 PNG in memory, and sends it to /dev/tty

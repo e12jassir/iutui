@@ -104,6 +104,59 @@ func (s *State) activeOrSelectedVideo() (model.Video, bool) {
 	return s.SelectedVideo()
 }
 
+func (s *State) targetVideoForShare() (model.Video, bool) {
+	if v, ok := s.SelectedVideo(); ok && strings.TrimSpace(v.ID) != "" {
+		return v, true
+	}
+	v, ok := s.activeOrSelectedVideo()
+	if !ok || strings.TrimSpace(v.ID) == "" {
+		return model.Video{}, false
+	}
+	return v, true
+}
+
+// CopySelectedURL copies the YouTube URL of the selected (or active playing) video via SystemIntegration.
+func (s *State) CopySelectedURL() (*State, tea.Cmd) {
+	if s.Deps.System == nil {
+		return s, nil
+	}
+	v, ok := s.targetVideoForShare()
+	if !ok {
+		return s, nil
+	}
+	url, _, _ := model.BuildTargetURL(v.ID, false)
+	sys := s.Deps.System
+	toast := s.toastCmd(s.Catalog().App.ToastLinkCopied)
+	copyCmd := func() tea.Msg {
+		if err := sys.CopyText(url); err != nil {
+			return ActionResultMsg{Err: err}
+		}
+		return nil
+	}
+	return s, tea.Batch(toast, copyCmd)
+}
+
+// OpenSelectedBrowser opens the YouTube URL of the selected (or active playing) video in the system browser.
+func (s *State) OpenSelectedBrowser() (*State, tea.Cmd) {
+	if s.Deps.System == nil {
+		return s, nil
+	}
+	v, ok := s.targetVideoForShare()
+	if !ok {
+		return s, nil
+	}
+	url, _, _ := model.BuildTargetURL(v.ID, false)
+	sys := s.Deps.System
+	toast := s.toastCmd(s.Catalog().App.ToastOpeningBrowser)
+	openCmd := func() tea.Msg {
+		if err := sys.OpenURL(url); err != nil {
+			return ActionResultMsg{Err: err}
+		}
+		return nil
+	}
+	return s, tea.Batch(toast, openCmd)
+}
+
 // ToggleSaveVideo persists watch-later state for v via Store.
 func (s *State) ToggleSaveVideo(v model.Video) (*State, tea.Cmd) {
 	if s.Deps.Store == nil {
@@ -590,6 +643,7 @@ func (s *State) OpenChapters() (*State, tea.Cmd) {
 
 // ToggleLyrics toggles the synced lyrics panel and fetches lyrics for the active or selected track.
 func (s *State) ToggleLyrics() (*State, tea.Cmd) {
+	defer s.syncMouseSnapshot()
 	if s.ShowLyrics {
 		s.ShowLyrics = false
 		return s, nil
@@ -713,9 +767,10 @@ func (s *State) AdjustLyricsOffset(delta float64) (*State, tea.Cmd) {
 	if s.Deps.LyricsClient != nil && s.LyricsVideoID != "" {
 		_ = s.Deps.LyricsClient.SetOffset(s.LyricsVideoID, next)
 	}
-	msg := "⏱ Sync letra: 0.0s"
+	as := s.Catalog().App
+	msg := as.ToastLyricsSyncReset
 	if next != 0 {
-		msg = fmt.Sprintf("⏱ Sync letra: %+.1fs", next)
+		msg = i18n.Format(as.ToastLyricsSyncFmt, map[string]string{"offset": fmt.Sprintf("%+.1f", next)})
 	}
 	return s, s.toastCmd(msg)
 }
@@ -737,13 +792,14 @@ func (s *State) CycleLyricsSource() (*State, tea.Cmd) {
 	if !s.ShowLyrics || strings.TrimSpace(s.LyricsTrack) == "" {
 		return s, nil
 	}
+	as := s.Catalog().App
 	var nextSrc, label string
 	if strings.HasPrefix(s.Lyrics.Source, "youtube") || s.LyricsPreferSource == lyrics.SourceYouTube {
 		nextSrc = lyrics.SourceLRCLib
-		label = "📝 Fuente: LRCLib"
+		label = as.ToastLyricsSourceLRCLib
 	} else {
 		nextSrc = lyrics.SourceYouTube
-		label = "📝 Fuente: YouTube CC"
+		label = as.ToastLyricsSourceYT
 	}
 
 	videoID := s.LyricsVideoID

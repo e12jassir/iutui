@@ -4,13 +4,18 @@ package i18n
 type ViewStrings struct {
 	// Quick selector
 	QuickNoMatches string
+	QuickBadgeLive string
 
 	// Player bar
-	PlayerTitle          string
-	PlayerOpening        string
-	PlayerNothingPlaying string
-	PlayerOpeningInMPV   string
-	PlayerSelected       string
+	PlayerTitle           string
+	PlayerOpening         string
+	PlayerNothingPlaying  string
+	PlayerOpeningInMPV    string
+	PlayerSelected        string
+	PlayerQueueBadge      string
+	PlayerQueueCountBadge string
+	PlayerSubBadge        string
+	PlayerSubActiveBadge  string
 
 	// Cards & grids
 	LoadingVideos      string
@@ -46,6 +51,7 @@ type ViewStrings struct {
 	TabPlaylists      string
 	TabLiked          string
 	TabDownloads      string
+	TabUnknown        string
 	ShortTabSubs      string
 	ShortTabDownloads string
 	ShortTabHistory   string
@@ -140,12 +146,17 @@ type ViewStrings struct {
 func esViewStrings() ViewStrings {
 	return ViewStrings{
 		QuickNoMatches: "  Sin coincidencias",
+		QuickBadgeLive: "🔴 EN VIVO",
 
-		PlayerTitle:          "Reproductor",
-		PlayerOpening:        "Abriendo...",
-		PlayerNothingPlaying: "Sin reproducción activa",
-		PlayerOpeningInMPV:   "Abriendo en mpv: {title}",
-		PlayerSelected:       "Seleccionado: {title}",
+		PlayerTitle:           "Reproductor",
+		PlayerOpening:         "Abriendo...",
+		PlayerNothingPlaying:  "Sin reproducción activa",
+		PlayerOpeningInMPV:    "Abriendo en mpv: {title}",
+		PlayerSelected:        "Seleccionado: {title}",
+		PlayerQueueBadge:      "󰲸 Cola",
+		PlayerQueueCountBadge: "󰲸 Cola ({n})",
+		PlayerSubBadge:        "󰂚 Sub",
+		PlayerSubActiveBadge:  "󰂞 Sub",
 
 		LoadingVideos:      "Cargando videos...",
 		LoadingLive:        "Buscando directos en vivo...",
@@ -254,6 +265,7 @@ func esViewStrings() ViewStrings {
 		TabPlaylists:      "Playlists",
 		TabLiked:          "Me gusta",
 		TabDownloads:      "Descargas",
+		TabUnknown:        "Desconocido",
 		ShortTabSubs:      "Subs",
 		ShortTabDownloads: "Desc",
 		ShortTabHistory:   "Hist",
@@ -265,12 +277,17 @@ func esViewStrings() ViewStrings {
 func enViewStrings() ViewStrings {
 	return ViewStrings{
 		QuickNoMatches: "  No matches",
+		QuickBadgeLive: "🔴 LIVE",
 
-		PlayerTitle:          "Player",
-		PlayerOpening:        "Opening...",
-		PlayerNothingPlaying: "Nothing playing",
-		PlayerOpeningInMPV:   "Opening in mpv: {title}",
-		PlayerSelected:       "Selected: {title}",
+		PlayerTitle:           "Player",
+		PlayerOpening:         "Opening...",
+		PlayerNothingPlaying:  "Nothing playing",
+		PlayerOpeningInMPV:    "Opening in mpv: {title}",
+		PlayerSelected:        "Selected: {title}",
+		PlayerQueueBadge:      "󰲸 Queue",
+		PlayerQueueCountBadge: "󰲸 Queue ({n})",
+		PlayerSubBadge:        "󰂚 Sub",
+		PlayerSubActiveBadge:  "󰂞 Sub",
 
 		LoadingVideos:      "Loading videos...",
 		LoadingLive:        "Searching live streams...",
@@ -381,6 +398,7 @@ func enViewStrings() ViewStrings {
 		TabPlaylists:      "Playlists",
 		TabLiked:          "Liked",
 		TabDownloads:      "Downloads",
+		TabUnknown:        "Unknown",
 		ShortTabSubs:      "Subs",
 		ShortTabDownloads: "Dls",
 		ShortTabHistory:   "Hist",

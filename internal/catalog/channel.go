@@ -1,7 +1,9 @@
 package catalog
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"os"
@@ -26,6 +28,18 @@ func FetchChannelVideos(
 	channelID string,
 	channelName string,
 	limit int,
+) ([]model.Video, error) {
+	return fetchChannelVideos(ctx, ytdlpBin, cookiesFile, channelID, channelName, limit, nil)
+}
+
+func fetchChannelVideos(
+	ctx context.Context,
+	ytdlpBin string,
+	cookiesFile string,
+	channelID string,
+	channelName string,
+	limit int,
+	extraArgs []string,
 ) ([]model.Video, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -69,6 +83,9 @@ func FetchChannelVideos(
 			args = append(args, "--cookies", cookies)
 		}
 	}
+	if len(extraArgs) > 0 {
+		args = append(args, extraArgs...)
+	}
 
 	args = append(args, target)
 
@@ -82,16 +99,163 @@ func FetchChannelVideos(
 }
 
 // ChannelVideos retrieves recent videos from the video's channel using this YTDLPCatalog's
-// configured binary path and cookie jar.
+// configured binary path, cookie jar, and extra yt-dlp arguments.
 func (c *YTDLPCatalog) ChannelVideos(ctx context.Context, v model.Video, limit int) ([]model.Video, error) {
 	bin := ""
 	cookies := ""
+	var extra []string
 	if c != nil {
 		bin = c.BinPath
 		cookies = c.cookieJarPath()
+		extra = c.extraArgs()
 	}
 	channelID, channelName := videoChannelRef(v)
-	return FetchChannelVideos(ctx, bin, cookies, channelID, channelName, limit)
+	return fetchChannelVideos(ctx, bin, cookies, channelID, channelName, limit, extra)
+}
+
+// ResolveChannelReference resolves a YouTube channel reference (UC ID, /channel/UC... URL,
+// @handle, /@handle URL, /c/..., or /user/...) into a canonical UC... channel ID and
+// optional display label. Direct UC references resolve in 0ms without network I/O.
+func ResolveChannelReference(ctx context.Context, ytdlpBin, rawRef string) (channelID, label string, err error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return "", "", err
+	}
+
+	ref := strings.TrimSpace(rawRef)
+	if ref == "" {
+		return "", "", fmt.Errorf("catalog: empty channel reference")
+	}
+
+	if feedURL := ChannelFeedURL(ref); feedURL != "" {
+		if cid := channelIDFromFeedURL(feedURL); strings.HasPrefix(cid, "UC") && len(cid) > 2 {
+			return cid, "", nil
+		}
+	}
+
+	channelURL, err := resolveChannelReferenceURL(ref)
+	if err != nil {
+		return "", "", err
+	}
+
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, defaultChannelFetchTimeout)
+		defer cancel()
+	}
+
+	bin := strings.TrimSpace(ytdlpBin)
+	if bin == "" {
+		bin = "yt-dlp"
+	}
+
+	args := []string{
+		"--no-warnings",
+		"--playlist-items", "1",
+		"--flat-playlist",
+		"--dump-single-json",
+		channelURL,
+	}
+
+	runner := &YTDLPCatalog{BinPath: bin}
+	out, err := runner.runYTDLP(ctx, args...)
+	if err != nil {
+		return "", "", err
+	}
+
+	var doc struct {
+		ID        string `json:"id"`
+		ChannelID string `json:"channel_id"`
+		Channel   string `json:"channel"`
+		Uploader  string `json:"uploader"`
+		Title     string `json:"title"`
+		Entries   []struct {
+			ChannelID string `json:"channel_id"`
+			Channel   string `json:"channel"`
+			Uploader  string `json:"uploader"`
+		} `json:"entries"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(out), &doc); err != nil {
+		return "", "", fmt.Errorf("catalog: decode channel json for %q: %w", ref, err)
+	}
+
+	cid := firstUCID(doc.ChannelID, doc.ID)
+	if cid == "" && len(doc.Entries) > 0 {
+		cid = firstUCID(doc.Entries[0].ChannelID)
+	}
+	if cid == "" {
+		return "", "", fmt.Errorf("catalog: could not resolve UC channel ID for %q", ref)
+	}
+
+	lbl := strings.TrimSpace(doc.Channel)
+	if lbl == "" {
+		lbl = strings.TrimSpace(doc.Uploader)
+	}
+	if lbl == "" && len(doc.Entries) > 0 {
+		lbl = strings.TrimSpace(doc.Entries[0].Channel)
+		if lbl == "" {
+			lbl = strings.TrimSpace(doc.Entries[0].Uploader)
+		}
+	}
+	if lbl == "" {
+		lbl = strings.TrimSuffix(strings.TrimSpace(doc.Title), " - Videos")
+	}
+
+	return cid, lbl, nil
+}
+
+func firstUCID(candidates ...string) string {
+	for _, raw := range candidates {
+		s := strings.TrimSpace(raw)
+		if strings.HasPrefix(s, "UC") && len(s) > 2 && !strings.ContainsAny(s, "/?# \t\r\n") {
+			return s
+		}
+	}
+	return ""
+}
+
+func resolveChannelReferenceURL(ref string) (string, error) {
+	if strings.HasPrefix(ref, "@") && len(ref) > 1 && !strings.ContainsAny(ref, " \t\r\n?#") {
+		handle := strings.TrimRight(ref, "/")
+		if handle == "@" {
+			return "", fmt.Errorf("catalog: invalid channel handle %q", ref)
+		}
+		return "https://www.youtube.com/" + handle, nil
+	}
+
+	candidate := ref
+	if !strings.Contains(candidate, "://") {
+		if !strings.Contains(strings.ToLower(candidate), "youtube.com/") {
+			return "", fmt.Errorf("catalog: unsupported channel reference %q", ref)
+		}
+		candidate = "https://" + candidate
+	}
+	u, err := url.Parse(candidate)
+	if err != nil {
+		return "", fmt.Errorf("catalog: invalid channel URL %q: %w", ref, err)
+	}
+	host := strings.ToLower(u.Hostname())
+	if host != "youtube.com" && !strings.HasSuffix(host, ".youtube.com") {
+		return "", fmt.Errorf("catalog: non-YouTube URL %q", ref)
+	}
+	cleanPath := strings.TrimRight(u.Path, "/")
+	if cleanPath == "" ||
+		(!strings.HasPrefix(cleanPath, "/@") &&
+			!strings.HasPrefix(cleanPath, "/c/") &&
+			!strings.HasPrefix(cleanPath, "/user/") &&
+			!strings.HasPrefix(cleanPath, "/channel/")) {
+		return "", fmt.Errorf("catalog: unsupported YouTube channel path in %q", ref)
+	}
+	if host == "youtube.com" || host == "m.youtube.com" {
+		u.Host = "www.youtube.com"
+	}
+	u.Scheme = "https"
+	u.Path = cleanPath
+	u.RawQuery = ""
+	u.Fragment = ""
+	return u.String(), nil
 }
 
 // ChannelVideos retrieves recent videos from the video's channel, delegating to

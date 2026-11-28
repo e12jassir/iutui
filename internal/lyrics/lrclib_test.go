@@ -744,4 +744,76 @@ func TestClientFetchWithOptions_DurationAndSourceRanking(t *testing.T) {
 			t.Fatalf("expected YT ASR without alternate, got %+v", got)
 		}
 	})
+
+	t.Run("separates ytCache by normalized language and forwards HL to InnerTube player", func(t *testing.T) {
+		lrcSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusNotFound)
+		}))
+		defer lrcSrv.Close()
+
+		var mu sync.Mutex
+		var seenHL []string
+		var ytSrv *httptest.Server
+		ytSrv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/player":
+				var req ytPlayerRequest
+				if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+					t.Fatalf("decode player req: %v", err)
+				}
+				mu.Lock()
+				seenHL = append(seenHL, req.Context.Client.HL)
+				mu.Unlock()
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"videoDetails": map[string]any{"title": "Bilingual", "author": "Artist"},
+					"captions": map[string]any{
+						"playerCaptionsTracklistRenderer": map[string]any{
+							"captionTracks": []map[string]any{
+								{"baseUrl": ytSrv.URL + "/tt-es", "languageCode": "es", "kind": ""},
+								{"baseUrl": ytSrv.URL + "/tt-en", "languageCode": "en", "kind": ""},
+							},
+						},
+					},
+				})
+			case "/tt-es":
+				_, _ = w.Write([]byte(`{"events":[{"tStartMs":1000,"segs":[{"utf8":"Línea en español"}]}]}`))
+			case "/tt-en":
+				_, _ = w.Write([]byte(`{"events":[{"tStartMs":1000,"segs":[{"utf8":"English line"}]}]}`))
+			}
+		}))
+		defer ytSrv.Close()
+
+		c := NewClient()
+		c.BaseURL = lrcSrv.URL
+		c.YouTubeEndpointURL = ytSrv.URL + "/player"
+
+		gotES, err := c.FetchWithOptions(context.Background(), "biling12345", "Bilingual", "Artist", FetchOptions{
+			PreferSource: SourceYouTube,
+			Lang:         "es",
+		})
+		if err != nil {
+			t.Fatalf("FetchWithOptions(es) error: %v", err)
+		}
+		if gotES.Language != "es" || len(gotES.Synced) != 1 || gotES.Synced[0].Text != "Línea en español" {
+			t.Fatalf("unexpected ES captions: %+v", gotES)
+		}
+
+		gotEN, err := c.FetchWithOptions(context.Background(), "biling12345", "Bilingual", "Artist", FetchOptions{
+			PreferSource: SourceYouTube,
+			Lang:         "en",
+		})
+		if err != nil {
+			t.Fatalf("FetchWithOptions(en) error: %v", err)
+		}
+		if gotEN.Language != "en" || len(gotEN.Synced) != 1 || gotEN.Synced[0].Text != "English line" {
+			t.Fatalf("expected EN captions instead of stale ES cache hit, got %+v", gotEN)
+		}
+
+		mu.Lock()
+		gotHLs := append([]string(nil), seenHL...)
+		mu.Unlock()
+		if !slices.Equal(gotHLs, []string{"es", "en"}) {
+			t.Fatalf("InnerTube HL sequence = %v, want [es en]", gotHLs)
+		}
+	})
 }

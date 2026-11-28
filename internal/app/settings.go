@@ -23,14 +23,15 @@ const (
 	SettingIdxSpeed         = 7
 	SettingIdxAutoplay      = 8
 	SettingIdxSponsorBlock  = 9
-	SettingIdxHideShorts    = 10
-	SettingIdxInterleave    = 11
-	SettingIdxFeedSize      = 12
-	SettingIdxSearchSize    = 13
-	SettingIdxCacheTTL      = 14
-	SettingIdxDownloadAudio = 15
-	SettingIdxCookies       = 16
-	SettingsRowCount        = 17
+	SettingIdxNotify        = 10
+	SettingIdxHideShorts    = 11
+	SettingIdxInterleave    = 12
+	SettingIdxFeedSize      = 13
+	SettingIdxSearchSize    = 14
+	SettingIdxCacheTTL      = 15
+	SettingIdxDownloadAudio = 16
+	SettingIdxCookies       = 17
+	SettingsRowCount        = 18
 )
 
 var (
@@ -232,9 +233,18 @@ func (s *State) SettingsRows() []SettingRow {
 			Label:    as.LblSponsorBlock,
 			Value:    onOff(s.SponsorBlock),
 			Desc:     as.DescSponsorBlock,
-			Shortcut: "b",
+			Shortcut: "B",
 			IsBool:   true,
 			Enabled:  s.SponsorBlock,
+		},
+		{
+			Index:   SettingIdxNotify,
+			Section: as.SecPlayback,
+			Label:   as.LblNotify,
+			Value:   onOff(s.Notify),
+			Desc:    as.DescNotify,
+			IsBool:  true,
+			Enabled: s.Notify,
 		},
 		{
 			Index:   SettingIdxHideShorts,
@@ -401,6 +411,7 @@ func (s *State) settingsModalRowAt(x, y int) (idx int, inside bool) {
 // AdjustSetting steps setting idx forward (delta >= 0) or backward (delta < 0),
 // applies runtime changes immediately, and persists updated YT_* values.
 func (s *State) AdjustSetting(idx, delta int) (*State, tea.Cmd) {
+	defer s.syncMouseSnapshot()
 	if delta == 0 {
 		delta = 1
 	}
@@ -594,6 +605,13 @@ func (s *State) AdjustSetting(idx, delta int) (*State, tea.Cmd) {
 
 	case SettingIdxSponsorBlock:
 		return s.ToggleSponsorBlock()
+
+	case SettingIdxNotify:
+		s.Notify = !s.Notify
+		return s, tea.Batch(
+			s.boolToast(s.Catalog().App.LblNotify, s.Notify),
+			s.saveBoolConfigCmd("YT_NOTIFY", s.Notify),
+		)
 
 	case SettingIdxHideShorts:
 		s.HideShorts = !s.HideShorts

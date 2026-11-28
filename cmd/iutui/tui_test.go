@@ -594,9 +594,6 @@ func TestNativeThumbsSetPreviewMode(t *testing.T) {
 	if rendered := tr.Render("abc123", 14, 5); !strings.Contains(rendered, "abc123") {
 		t.Fatalf("expected text placeholder render for BackendText, got:\n%s", rendered)
 	}
-	if brand := tr.RenderBrand(10, 4); brand != "" {
-		t.Fatalf("expected empty RenderBrand when not BackendKitty, got %q", brand)
-	}
 
 	tr.SetPreviewMode("chafa")
 	if got := tr.Backend(); got != thumbs.BackendChafa {

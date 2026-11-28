@@ -16,12 +16,11 @@ import (
 )
 
 const (
-	resumeFile        = "resume.json"
-	searchHistoryFile = "search_history.tsv"
-	defaultMaxResume  = 200
-	defaultMaxSearch  = 20
-	// LongVideoThresholdSeconds is the minimum duration (15 minutes) eligible for auto-resume.
-	LongVideoThresholdSeconds = 900.0
+	resumeFile           = "resume.json"
+	searchHistoryFile    = "search_history.tsv"
+	defaultMaxResume     = 200
+	defaultMaxSearch     = 20
+	defaultMaxMusicStats = 500
 )
 
 // ResumeEntry stores the last playback timestamp for a long-form video.
@@ -323,15 +322,26 @@ type TrackStat struct {
 }
 
 // ListeningStats persists per-track local plays, completions, and fast skips
-// inside StateDir/music_stats.json.
+// inside StateDir/music_stats.json capped at MaxEntries (default 500).
 type ListeningStats struct {
-	StateDir string
-	mu       sync.Mutex
+	StateDir   string
+	MaxEntries int
+	mu         sync.Mutex
 }
 
 // NewListeningStats constructs a ListeningStats store rooted at stateDir.
 func NewListeningStats(stateDir string) *ListeningStats {
-	return &ListeningStats{StateDir: stateDir}
+	return &ListeningStats{
+		StateDir:   stateDir,
+		MaxEntries: defaultMaxMusicStats,
+	}
+}
+
+func (l *ListeningStats) maxEntries() int {
+	if l != nil && l.MaxEntries > 0 {
+		return l.MaxEntries
+	}
+	return defaultMaxMusicStats
 }
 
 func (l *ListeningStats) path() string {
@@ -380,6 +390,7 @@ func (l *ListeningStats) RecordComplete(v model.Video) error {
 func (l *ListeningStats) RecordSkip(v model.Video) error {
 	return l.mutate(v, func(st *TrackStat) {
 		st.Skips++
+		st.LastPlayedAt = time.Now().UTC()
 	})
 }
 
@@ -412,11 +423,40 @@ func (l *ListeningStats) mutate(v model.Video, fn func(*TrackStat)) error {
 	}
 	fn(&st)
 	m[id] = st
+	pruneMusicStats(m, l.maxEntries())
 	data, err := json.Marshal(m)
 	if err != nil {
 		return err
 	}
 	return writeBytesAtomic(p, data)
+}
+
+func pruneMusicStats(entries map[string]TrackStat, maxEntries int) {
+	if maxEntries <= 0 || len(entries) <= maxEntries {
+		return
+	}
+	items := make([]TrackStat, 0, len(entries))
+	for id, st := range entries {
+		if st.VideoID == "" {
+			st.VideoID = id
+		}
+		items = append(items, st)
+	}
+	sort.Slice(items, func(i, j int) bool {
+		a, b := items[i], items[j]
+		if !a.LastPlayedAt.Equal(b.LastPlayedAt) {
+			return a.LastPlayedAt.After(b.LastPlayedAt)
+		}
+		engA := a.Completes*2 + a.Plays
+		engB := b.Completes*2 + b.Plays
+		if engA != engB {
+			return engA > engB
+		}
+		return a.VideoID > b.VideoID
+	})
+	for _, evicted := range items[maxEntries:] {
+		delete(entries, evicted.VideoID)
+	}
 }
 
 func readMusicStatsFile(path string) (map[string]TrackStat, error) {

@@ -123,10 +123,10 @@ func renderPlayerPanel(s *app.State, _ theme.Theme, width int, pal renderPalette
 	if activeID != "" && s.SavedIDs[activeID] {
 		saveStyle = accentBtnStyle
 	}
-	subLabel := "󰂚 Sub"
+	subLabel := vs.PlayerSubBadge
 	subStyle := btnStyle
 	if s.IsActiveSubscribed() {
-		subLabel = "󰂞 Sub"
+		subLabel = vs.PlayerSubActiveBadge
 		subStyle = spotifyGreenStyle
 	}
 	leftZone := " " + likeStyle.Render(likeGlyph) + "  " + saveStyle.Render("󰥔") + "  " + subStyle.Render(subLabel)
@@ -151,7 +151,7 @@ func renderPlayerPanel(s *app.State, _ theme.Theme, width int, pal renderPalette
 	}
 	row3 := truncateStyledLine(row3Plain, innerW)
 
-	return renderSpotatuiPanel(panelTitle, []string{row1, row2, row3}, width, 5, s.Focus == app.FocusPlayer, pal)
+	return renderSpotatuiPanel(panelTitle, []string{row1, row2, row3}, width, 5, false, pal)
 }
 
 func formatClock(seconds float64) string {

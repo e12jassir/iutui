@@ -146,6 +146,10 @@ func NewBubbleTeaEscapeFilter() func(tea.Model, tea.Msg) tea.Msg {
 // key fragments and filters out redundant MouseActionMotion events that would not
 // change hover selection, avoiding unnecessary View/TTY redraws on fast pointer sweeps.
 func NewBubbleTeaProgramFilter(s *State) func(tea.Model, tea.Msg) tea.Msg {
+	if s != nil {
+		s.programFilterAttached.Store(true)
+		s.syncMouseSnapshot()
+	}
 	var (
 		mu    sync.Mutex
 		guard EscapeGuard
@@ -161,7 +165,7 @@ func NewBubbleTeaProgramFilter(s *State) func(tea.Model, tea.Msg) tea.Msg {
 			}
 			return filtered
 		case tea.MouseMsg:
-			if m.Action == tea.MouseActionMotion && s != nil && !s.WouldMouseMotionChange(m.X, m.Y) {
+			if m.Action == tea.MouseActionMotion && s != nil && !s.wouldMouseMotionChangeAtomic(m.X, m.Y) {
 				return nil
 			}
 			return msg

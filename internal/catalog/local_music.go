@@ -43,7 +43,6 @@ type localRadioCandidate struct {
 	artistKey   string
 	videoType   string
 	durationSec int
-	consensus   int
 	rank        int
 }
 
@@ -333,7 +332,7 @@ func BuildLocalMusicFeed(
 		}
 	}
 
-	if cachePath != "" && len(out) > 0 {
+	if cachePath != "" && cacheTTL > 0 && len(out) > 0 {
 		_ = writeCacheFile(cachePath, out)
 	}
 	return out, true, nil

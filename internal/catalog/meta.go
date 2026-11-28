@@ -322,33 +322,19 @@ func (m *MetadataEnricher) fetchSingle(ctx context.Context, videoID string) (Vid
 		client = &http.Client{Timeout: 5 * time.Second}
 	}
 
-	reqBody, err := json.Marshal(struct {
-		Context struct {
-			Client struct {
-				ClientName    string `json:"clientName"`
-				ClientVersion string `json:"clientVersion"`
-				HL            string `json:"hl"`
-				GL            string `json:"gl"`
-			} `json:"client"`
-		} `json:"context"`
-		VideoID string `json:"videoId"`
-	}{
-		VideoID: videoID,
+	reqBody, err := json.Marshal(map[string]any{
+		"context": map[string]any{
+			"client": map[string]any{
+				"clientName":    "WEB",
+				"clientVersion": "2.20250101.00.00",
+				"hl":            "es",
+				"gl":            "CO",
+			},
+		},
+		"videoId": videoID,
 	})
 	if err != nil {
 		return VideoMeta{}, false
-	}
-
-	var parsedReq map[string]any
-	if err := json.Unmarshal(reqBody, &parsedReq); err == nil {
-		clientMap := parsedReq["context"].(map[string]any)["client"].(map[string]any)
-		clientMap["clientName"] = "WEB"
-		clientMap["clientVersion"] = "2.20250101.00.00"
-		clientMap["hl"] = "es"
-		clientMap["gl"] = "CO"
-		if rebuilt, merr := json.Marshal(parsedReq); merr == nil {
-			reqBody = rebuilt
-		}
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(reqBody))

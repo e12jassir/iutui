@@ -1,5 +1,5 @@
 // Package thumbs provides thumbnail rendering abstractions and backend detection
-// for the ytx terminal user interface.
+// for the iutui terminal user interface.
 package thumbs
 
 import (
@@ -42,12 +42,6 @@ type Renderer interface {
 	Prefetch(id string)
 	// Backend returns the rendering backend used by this Renderer.
 	Backend() Backend
-}
-
-// BrandRenderer is an optional interface for Renderers that can draw a
-// high-resolution brand logo in terminal cells.
-type BrandRenderer interface {
-	RenderBrand(width, height int) string
 }
 
 // DetectBackend determines the thumbnail rendering backend from environment values.

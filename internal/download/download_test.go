@@ -466,7 +466,7 @@ printf 'IUTUI_FILE|%%s\n' %q
 	}
 }
 
-func TestRunWithProgressFailurePreservesTwoLineMeta(t *testing.T) {
+func TestRunWithProgressFailureDoesNotWriteMetaAndCleansStaleMeta(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX shell script test")
 	}
@@ -494,14 +494,185 @@ exit 1
 		t.Fatalf("Enqueue() error = %q, want HTTP Error 403", err.Error())
 	}
 
-	rawMeta, readErr := os.ReadFile(filepath.Join(stateDir, "downloads", v.ID+".meta"))
-	if readErr != nil {
-		t.Fatalf("read meta: %v", readErr)
+	metaPath := filepath.Join(stateDir, "downloads", v.ID+".meta")
+	if _, statErr := os.Stat(metaPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("expected failed download NOT to leave .meta on disk, statErr=%v", statErr)
 	}
-	wantMeta := "Blocked\nChan\n"
-	if string(rawMeta) != wantMeta {
-		t.Fatalf("meta content = %q, want %q", string(rawMeta), wantMeta)
+
+	// A fresh Manager must NOT report failed downloads as 100% StatusDone.
+	fresh := NewManager(stateDir, dlDir, fakeBin)
+	diskItems, listErr := fresh.List()
+	if listErr != nil {
+		t.Fatalf("fresh.List() error: %v", listErr)
 	}
+	if len(diskItems) != 0 {
+		t.Fatalf("expected fresh.List() to be empty after failed download, got %+v", diskItems)
+	}
+
+	// Pre-seed a stale 3-line .meta pointing to a missing/empty output file -> List() must ignore and clean it.
+	metaDir := filepath.Join(stateDir, "downloads")
+	if err := os.MkdirAll(metaDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	staleMeta := filepath.Join(metaDir, "stale001.meta")
+	missingOut := filepath.Join(dlDir, "deleted.mp4")
+	if err := os.WriteFile(staleMeta, []byte("Deleted\nChan\n"+missingOut+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	itemsAfterStale, listErr := fresh.List()
+	if listErr != nil {
+		t.Fatalf("List() with stale meta error: %v", listErr)
+	}
+	if len(itemsAfterStale) != 0 {
+		t.Fatalf("expected stale .meta with missing output file to be skipped, got %+v", itemsAfterStale)
+	}
+	if _, statErr := os.Stat(staleMeta); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("expected stale .meta to be cleaned from disk, statErr=%v", statErr)
+	}
+}
+
+func TestRunWithProgressKillsProcessGroupOnCancel(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell script test")
+	}
+
+	stateDir := t.TempDir()
+	dlDir := t.TempDir()
+	tmpDir := t.TempDir()
+	childPIDFile := filepath.Join(tmpDir, "ffmpeg.pid")
+	fakeBin := filepath.Join(tmpDir, "yt-dlp")
+
+	script := fmt.Sprintf(`#!/bin/sh
+sleep 30 &
+child=$!
+printf '%%s\n' "$child" > %q
+printf 'IUTUI_PROG| 10.0%%%%|1.00MiB/s|00:20\n'
+wait "$child"
+`, childPIDFile)
+	if err := os.WriteFile(fakeBin, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake yt-dlp: %v", err)
+	}
+
+	startedCh := make(chan struct{}, 1)
+	m := NewManager(stateDir, dlDir, fakeBin)
+	m.OnProgress = func(it Item) {
+		if it.Progress == 10.0 {
+			select {
+			case startedCh <- struct{}{}:
+			default:
+			}
+		}
+	}
+
+	v := model.Video{ID: "pgkill1", Title: "With FFmpeg", Channel: "Chan"}
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- m.Enqueue(context.Background(), v, false)
+	}()
+
+	select {
+	case <-startedCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for download start")
+	}
+
+	if !m.Cancel(v.ID) {
+		t.Fatal("expected Cancel to return true")
+	}
+
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected context.Canceled, got %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for process group kill on Cancel")
+	}
+
+	metaPath := filepath.Join(stateDir, "downloads", v.ID+".meta")
+	if _, statErr := os.Stat(metaPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("expected cancelled download NOT to leave .meta on disk, statErr=%v", statErr)
+	}
+}
+
+func TestManagerConfigurableOptionsAndRace(t *testing.T) {
+	stateDir := t.TempDir()
+	dlDir := t.TempDir()
+	cookieJar := filepath.Join(t.TempDir(), "cookies.txt")
+	if err := os.WriteFile(cookieJar, []byte("# Netscape\n.youtube.com\tTRUE\t/\tTRUE\t0\tSID\tok\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	m := NewManager(stateDir, dlDir, "yt-dlp-mock")
+	m.SetCookieJar(cookieJar)
+	m.SetQuality(720)
+	m.SetExtraArgs([]string{"--js-runtimes", "deno"})
+
+	var gotVideoArgs, gotAudioArgs []string
+	m.Runner = func(ctx context.Context, bin string, args ...string) error {
+		if len(gotVideoArgs) == 0 {
+			gotVideoArgs = append([]string(nil), args...)
+		} else {
+			gotAudioArgs = append([]string(nil), args...)
+		}
+		return nil
+	}
+
+	if err := m.Enqueue(context.Background(), model.Video{ID: "vidOpt01", Title: "Vid", Channel: "Ch"}, false); err != nil {
+		t.Fatalf("video Enqueue error: %v", err)
+	}
+	wantVideo := []string{
+		"-f", "bestvideo[height<=720]+bestaudio/best[height<=720]/best",
+		"--cookies", cookieJar,
+		"--js-runtimes", "deno",
+		"-o", filepath.Join(dlDir, "%(title)s.%(ext)s"),
+		"--", "https://www.youtube.com/watch?v=vidOpt01",
+	}
+	if !reflect.DeepEqual(gotVideoArgs, wantVideo) {
+		t.Fatalf("video args = %v, want %v", gotVideoArgs, wantVideo)
+	}
+
+	if err := m.Enqueue(context.Background(), model.Video{ID: "audOpt02", Title: "Aud", Channel: "Ch"}, true); err != nil {
+		t.Fatalf("audio Enqueue error: %v", err)
+	}
+	wantAudio := []string{
+		"-x", "--audio-format", "mp3", "--embed-thumbnail",
+		"--cookies", cookieJar,
+		"--js-runtimes", "deno",
+		"-o", filepath.Join(dlDir, "%(title)s.%(ext)s"),
+		"--", "https://www.youtube.com/watch?v=audOpt02",
+	}
+	if !reflect.DeepEqual(gotAudioArgs, wantAudio) {
+		t.Fatalf("audio args = %v, want %v", gotAudioArgs, wantAudio)
+	}
+
+	m.Runner = func(ctx context.Context, bin string, args ...string) error {
+		return nil
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 6; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for j := 0; j < 10; j++ {
+				m.SetQuality((id + j) * 120)
+				if j%2 == 0 {
+					m.SetCookieJar(cookieJar)
+					m.SetExtraArgs([]string{"--geo-bypass"})
+				} else {
+					m.SetCookieJar("")
+					m.SetExtraArgs(nil)
+				}
+				_ = m.Enqueue(context.Background(), model.Video{
+					ID:      fmt.Sprintf("race%d_%d", id, j),
+					Title:   "Race",
+					Channel: "Chan",
+				}, j%2 == 1)
+			}
+		}(i)
+	}
+	wg.Wait()
 }
 
 func TestMaxConcurrentBoundsConcurrency(t *testing.T) {

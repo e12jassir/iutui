@@ -22,6 +22,7 @@ type AppStrings struct {
 	LblSpeed         string
 	LblAutoplay      string
 	LblSponsorBlock  string
+	LblNotify        string
 	LblHideShorts    string
 	LblInterleave    string
 	LblFeedSize      string
@@ -66,6 +67,7 @@ type AppStrings struct {
 	DescSpeed         string
 	DescAutoplay      string
 	DescSponsorBlock  string
+	DescNotify        string
 	DescHideShorts    string
 	DescInterleave    string
 	DescFeedSize      string
@@ -94,11 +96,38 @@ type AppStrings struct {
 	ChipVideos    string
 	ChipUnwatched string
 
+	// Quality modal presets & badges
+	QualOptMaxLabel   string
+	QualOptMaxDesc    string
+	QualOpt1080Label  string
+	QualOpt1080Desc   string
+	QualOpt720Label   string
+	QualOpt720Desc    string
+	QualOpt360Label   string
+	QualOpt360Desc    string
+	QualOptAudioLabel string
+	QualOptAudioDesc  string
+	BadgeAudioOnly    string
+	BadgeQualitySaver string // {q}
+	ToastQualityFmt   string // {label}
+	ToastAudioModeFmt string // {label}
+
 	// Playback toasts & messages
 	ToastAutoplayOn         string
 	ToastAutoplayOff        string
 	ToastResumePlayback     string
 	ToastPausePlayback      string
+	ToastOpenMPV            string // {title}
+	ToastPlayAudioOnly      string // {title}
+	ToastOpenMix            string // {title}
+	ToastPlayOffline        string // {title}
+	ToastResumingAt         string // {pos}
+	ToastNextTrack          string
+	ToastPrevTrack          string
+	ToastTrackStart         string
+	TrackFallbackN          string // {n}
+	ToastQueuePlay          string // {title}
+	ToastSpeedFmt           string // {speed}
 	ToastQueued             string // {count}, {title}
 	ToastRemovedFromQueue   string
 	ToastQueueCleared       string
@@ -114,8 +143,13 @@ type AppStrings struct {
 	ToastSubtitlesOff       string
 	ToastPiPOn              string
 	ToastPiPOff             string
+	ToastChapterFmt         string // {title}
+	ToastVolumeUp           string // {delta}
+	ToastVolumeDown         string // {delta}
 
 	// Actions toasts & messages
+	ToastLinkCopied            string
+	ToastOpeningBrowser        string
 	ToastDownloadsUnconfigured string
 	ToastDownloading           string // {title}
 	ToastLikeUnavailable       string
@@ -126,30 +160,36 @@ type AppStrings struct {
 	ToastNoChapters            string
 	ToastSelectTrackFirst      string
 	ToastLyricsSyncReset       string
+	ToastLyricsSyncFmt         string // {offset}
+	ToastLyricsSourceLRCLib    string
+	ToastLyricsSourceYT        string
 
 	// Update toasts & errors
-	ErrLoadTab        string // {tab}, {err}
-	ErrSearch         string // {err}
-	ErrSave           string // {err}
-	ToastSaved        string // {title}
-	ToastUnsaved      string
-	ErrLike           string // {err}
-	ToastLiked        string // {title}
-	ToastUnliked      string
-	ToastSessionFeed  string
-	ToastSessionFound string
-	ErrGeneric        string // {err}
-	ErrLiveSearch     string // {err}
-	ToastNoLiveNow    string
-	ErrDownload       string // {err}
-	ToastDownloaded   string // {title}
-	ErrToggleVideo    string // {err}
-	ErrLoadChannel    string // {err}
-	ErrSubscribe      string // {err}
-	ToastSubscribed   string // {channel}
-	ToastUnsubscribed string // {channel}
-	ErrReadChapters   string // {err}
-	ErrRepeat         string // {err}
+	ErrCatalogUnconfigured string
+	ErrLyricsNotFound      string
+	ErrLyricsFmt           string // {err}
+	ErrLoadTab             string // {tab}, {err}
+	ErrSearch              string // {err}
+	ErrSave                string // {err}
+	ToastSaved             string // {title}
+	ToastUnsaved           string
+	ErrLike                string // {err}
+	ToastLiked             string // {title}
+	ToastUnliked           string
+	ToastSessionFeed       string
+	ToastSessionFound      string
+	ErrGeneric             string // {err}
+	ErrLiveSearch          string // {err}
+	ToastNoLiveNow         string
+	ErrDownload            string // {err}
+	ToastDownloaded        string // {title}
+	ErrToggleVideo         string // {err}
+	ErrLoadChannel         string // {err}
+	ErrSubscribe           string // {err}
+	ToastSubscribed        string // {channel}
+	ToastUnsubscribed      string // {channel}
+	ErrReadChapters        string // {err}
+	ErrRepeat              string // {err}
 }
 
 func esAppStrings() AppStrings {
@@ -169,8 +209,9 @@ func esAppStrings() AppStrings {
 		LblDefaultMode:   "Modo reproducción",
 		LblVolume:        "Volumen mpv",
 		LblSpeed:         "Velocidad mpv",
-		LblAutoplay:      "Autoplay [A]:",
+		LblAutoplay:      "Autoplay",
 		LblSponsorBlock:  "SponsorBlock",
+		LblNotify:        "Notificaciones",
 		LblHideShorts:    "Ocultar Shorts",
 		LblInterleave:    "Mezclar canales",
 		LblFeedSize:      "Tamaño del feed",
@@ -213,6 +254,7 @@ func esAppStrings() AppStrings {
 		DescSpeed:         "Velocidad de reproducción aplicada al instante (0.5x a 2x)",
 		DescAutoplay:      "Avanza automáticamente al siguiente video al terminar",
 		DescSponsorBlock:  "Omite patrocinadores e intros automáticamente en mpv",
+		DescNotify:        "Muestra notificación del sistema al cambiar de pista",
 		DescHideShorts:    "Filtra videos verticales cortos (<= 60s o #shorts) de los feeds",
 		DescInterleave:    "Intercala canales en Inicio, Música y Suscripciones para variar",
 		DescFeedSize:      "Cantidad máxima de videos cargados por pestaña de catálogo",
@@ -239,17 +281,43 @@ func esAppStrings() AppStrings {
 		ChipVideos:    "Videos",
 		ChipUnwatched: "No vistos",
 
-		ToastAutoplayOn:         "Autoplay: ACTIVADO",
-		ToastAutoplayOff:        "Autoplay: DESACTIVADO",
+		QualOptMaxLabel:   "Máxima (4K / Best)",
+		QualOptMaxDesc:    "Máxima nitidez disponible (~4-15 GB/h)",
+		QualOpt1080Label:  "1080p Full HD",
+		QualOpt1080Desc:   "Alta definición (~2.5 GB/h)",
+		QualOpt720Label:   "720p HD",
+		QualOpt720Desc:    "Equilibrado · recomendado (~1.0 GB/h)",
+		QualOpt360Label:   "360p Ahorro",
+		QualOpt360Desc:    "Ahorro de datos (~250 MB/h)",
+		QualOptAudioLabel: "Solo Audio",
+		QualOptAudioDesc:  "Sin ventana de video (~50 MB/h)",
+		BadgeAudioOnly:    "Solo Audio",
+		BadgeQualitySaver: "{q}p Ahorro",
+		ToastQualityFmt:   "🎬 Calidad: {label}",
+		ToastAudioModeFmt: "🎧 Modo: {label}",
+
+		ToastAutoplayOn:         "🔁 Autoplay: ACTIVADO",
+		ToastAutoplayOff:        "⏹ Autoplay: DESACTIVADO",
 		ToastResumePlayback:     "▶ Continuando reproducción",
 		ToastPausePlayback:      "⏸ Reproducción en pausa",
+		ToastOpenMPV:            "▶ Abriendo en mpv: {title}",
+		ToastPlayAudioOnly:      "🎧 Solo audio: {title}",
+		ToastOpenMix:            "📻 Abriendo Mix: {title}",
+		ToastPlayOffline:        "💾 Sin conexión: {title}",
+		ToastResumingAt:         "⏩ Reanudando en {pos}",
+		ToastNextTrack:          "⏭ Siguiente",
+		ToastPrevTrack:          "⏮ Anterior",
+		ToastTrackStart:         "⏮ Inicio de pista",
+		TrackFallbackN:          "Pista {n}",
+		ToastQueuePlay:          "▶ Cola: {title}",
+		ToastSpeedFmt:           "⚡ Velocidad {speed}x",
 		ToastQueued:             "En cola ({count}): {title}",
 		ToastRemovedFromQueue:   "✕ Quitado de la cola",
 		ToastQueueCleared:       "🗑 Cola vaciada",
 		ToastRepeatUnsupported:  "Repetir no soportado",
 		ToastHotSwapUnavailable: "Cambio de video en caliente no disponible",
-		ToastSponsorBlockOn:     "SponsorBlock: ACTIVADO",
-		ToastSponsorBlockOff:    "SponsorBlock: DESACTIVADO",
+		ToastSponsorBlockOn:     "🛡 SponsorBlock: ACTIVADO",
+		ToastSponsorBlockOff:    "🛡 SponsorBlock: DESACTIVADO",
 		ToastRepeatOn:           "🔁 Repetir: ACTIVADO",
 		ToastRepeatOff:          "🔁 Repetir: DESACTIVADO",
 		ToastVideoEnabled:       "🎬 Video activado",
@@ -258,7 +326,12 @@ func esAppStrings() AppStrings {
 		ToastSubtitlesOff:       "Subtítulos desactivados",
 		ToastPiPOn:              "Picture-in-Picture activado (siempre arriba)",
 		ToastPiPOff:             "Picture-in-Picture desactivado",
+		ToastChapterFmt:         "⏩ Capítulo: {title}",
+		ToastVolumeUp:           "🔊 Volumen +{delta}",
+		ToastVolumeDown:         "🔉 Volumen -{delta}",
 
+		ToastLinkCopied:            "🔗 Enlace copiado",
+		ToastOpeningBrowser:        "🌐 Abriendo en navegador",
 		ToastDownloadsUnconfigured: "Descargas no configuradas",
 		ToastDownloading:           "⬇ Descargando: {title}",
 		ToastLikeUnavailable:       "Me gusta no disponible",
@@ -269,29 +342,35 @@ func esAppStrings() AppStrings {
 		ToastNoChapters:            "Sin capítulos disponibles",
 		ToastSelectTrackFirst:      "Selecciona o reproduce un tema primero",
 		ToastLyricsSyncReset:       "⏱ Sync letra: 0.0s",
+		ToastLyricsSyncFmt:         "⏱ Sync letra: {offset}s",
+		ToastLyricsSourceLRCLib:    "📝 Fuente: LRCLib",
+		ToastLyricsSourceYT:        "📝 Fuente: YouTube CC",
 
-		ErrLoadTab:        "Error cargando {tab}: {err}",
-		ErrSearch:         "Error buscando: {err}",
-		ErrSave:           "Error al guardar: {err}",
-		ToastSaved:        "★ Guardado: {title}",
-		ToastUnsaved:      "Quitado de guardados",
-		ErrLike:           "Error en Me gusta: {err}",
-		ToastLiked:        "♥ Me gusta: {title}",
-		ToastUnliked:      "Quitado de Me gusta",
-		ToastSessionFeed:  "🍪 Sesión detectada · cargando tu feed...",
-		ToastSessionFound: "🍪 Sesión de navegador detectada",
-		ErrGeneric:        "Error: {err}",
-		ErrLiveSearch:     "Error buscando directos: {err}",
-		ToastNoLiveNow:    "Sin directos en vivo ahora mismo",
-		ErrDownload:       "Error descargando: {err}",
-		ToastDownloaded:   "✓ Descargado: {title}",
-		ErrToggleVideo:    "Error alternando video: {err}",
-		ErrLoadChannel:    "Error cargando canal: {err}",
-		ErrSubscribe:      "Error de suscripción: {err}",
-		ToastSubscribed:   "★ Suscrito: {channel}",
-		ToastUnsubscribed: "Suscripción quitada: {channel}",
-		ErrReadChapters:   "Error leyendo capítulos: {err}",
-		ErrRepeat:         "Error en repetir: {err}",
+		ErrCatalogUnconfigured: "catálogo no configurado",
+		ErrLyricsNotFound:      "Sin letra encontrada",
+		ErrLyricsFmt:           "Error de letra: {err}",
+		ErrLoadTab:             "Error cargando {tab}: {err}",
+		ErrSearch:              "Error buscando: {err}",
+		ErrSave:                "Error al guardar: {err}",
+		ToastSaved:             "★ Guardado: {title}",
+		ToastUnsaved:           "Quitado de guardados",
+		ErrLike:                "Error en Me gusta: {err}",
+		ToastLiked:             "♥ Me gusta: {title}",
+		ToastUnliked:           "Quitado de Me gusta",
+		ToastSessionFeed:       "🍪 Sesión detectada · cargando tu feed...",
+		ToastSessionFound:      "🍪 Sesión de navegador detectada",
+		ErrGeneric:             "Error: {err}",
+		ErrLiveSearch:          "Error buscando directos: {err}",
+		ToastNoLiveNow:         "Sin directos en vivo ahora mismo",
+		ErrDownload:            "Error descargando: {err}",
+		ToastDownloaded:        "✓ Descargado: {title}",
+		ErrToggleVideo:         "Error alternando video: {err}",
+		ErrLoadChannel:         "Error cargando canal: {err}",
+		ErrSubscribe:           "Error de suscripción: {err}",
+		ToastSubscribed:        "★ Suscrito: {channel}",
+		ToastUnsubscribed:      "Suscripción quitada: {channel}",
+		ErrReadChapters:        "Error leyendo capítulos: {err}",
+		ErrRepeat:              "Error en repetir: {err}",
 	}
 }
 
@@ -312,8 +391,9 @@ func enAppStrings() AppStrings {
 		LblDefaultMode:   "Playback mode",
 		LblVolume:        "mpv volume",
 		LblSpeed:         "mpv speed",
-		LblAutoplay:      "Autoplay [A]:",
+		LblAutoplay:      "Autoplay",
 		LblSponsorBlock:  "SponsorBlock",
+		LblNotify:        "Notifications",
 		LblHideShorts:    "Hide Shorts",
 		LblInterleave:    "Mix channels",
 		LblFeedSize:      "Feed size",
@@ -356,6 +436,7 @@ func enAppStrings() AppStrings {
 		DescSpeed:         "Playback speed applied immediately (0.5x to 2x)",
 		DescAutoplay:      "Automatically advances to the next video when finished",
 		DescSponsorBlock:  "Automatically skips sponsors and intros in mpv",
+		DescNotify:        "Show desktop notification when track changes",
 		DescHideShorts:    "Filters short vertical videos (<= 60s or #shorts) from feeds",
 		DescInterleave:    "Interleaves channels in Home, Music, and Subscriptions for variety",
 		DescFeedSize:      "Maximum number of videos loaded per catalog tab",
@@ -382,17 +463,43 @@ func enAppStrings() AppStrings {
 		ChipVideos:    "Videos",
 		ChipUnwatched: "Unwatched",
 
-		ToastAutoplayOn:         "Autoplay: ON",
-		ToastAutoplayOff:        "Autoplay: OFF",
+		QualOptMaxLabel:   "Max (4K / Best)",
+		QualOptMaxDesc:    "Highest available sharpness (~4-15 GB/h)",
+		QualOpt1080Label:  "1080p Full HD",
+		QualOpt1080Desc:   "High definition (~2.5 GB/h)",
+		QualOpt720Label:   "720p HD",
+		QualOpt720Desc:    "Balanced · recommended (~1.0 GB/h)",
+		QualOpt360Label:   "360p Saver",
+		QualOpt360Desc:    "Data saver (~250 MB/h)",
+		QualOptAudioLabel: "Audio Only",
+		QualOptAudioDesc:  "No video window (~50 MB/h)",
+		BadgeAudioOnly:    "Audio Only",
+		BadgeQualitySaver: "{q}p Saver",
+		ToastQualityFmt:   "🎬 Quality: {label}",
+		ToastAudioModeFmt: "🎧 Mode: {label}",
+
+		ToastAutoplayOn:         "🔁 Autoplay: ON",
+		ToastAutoplayOff:        "⏹ Autoplay: OFF",
 		ToastResumePlayback:     "▶ Resuming playback",
 		ToastPausePlayback:      "⏸ Playback paused",
+		ToastOpenMPV:            "▶ Opening in mpv: {title}",
+		ToastPlayAudioOnly:      "🎧 Audio only: {title}",
+		ToastOpenMix:            "📻 Opening Mix: {title}",
+		ToastPlayOffline:        "💾 Offline: {title}",
+		ToastResumingAt:         "⏩ Resuming at {pos}",
+		ToastNextTrack:          "⏭ Next",
+		ToastPrevTrack:          "⏮ Previous",
+		ToastTrackStart:         "⏮ Track start",
+		TrackFallbackN:          "Track {n}",
+		ToastQueuePlay:          "▶ Queue: {title}",
+		ToastSpeedFmt:           "⚡ Speed {speed}x",
 		ToastQueued:             "Queued ({count}): {title}",
 		ToastRemovedFromQueue:   "✕ Removed from queue",
 		ToastQueueCleared:       "🗑 Queue cleared",
 		ToastRepeatUnsupported:  "Repeat not supported",
 		ToastHotSwapUnavailable: "Hot video switching unavailable",
-		ToastSponsorBlockOn:     "SponsorBlock: ON",
-		ToastSponsorBlockOff:    "SponsorBlock: OFF",
+		ToastSponsorBlockOn:     "🛡 SponsorBlock: ON",
+		ToastSponsorBlockOff:    "🛡 SponsorBlock: OFF",
 		ToastRepeatOn:           "🔁 Repeat: ON",
 		ToastRepeatOff:          "🔁 Repeat: OFF",
 		ToastVideoEnabled:       "🎬 Video enabled",
@@ -401,7 +508,12 @@ func enAppStrings() AppStrings {
 		ToastSubtitlesOff:       "Subtitles disabled",
 		ToastPiPOn:              "Picture-in-Picture enabled (always on top)",
 		ToastPiPOff:             "Picture-in-Picture disabled",
+		ToastChapterFmt:         "⏩ Chapter: {title}",
+		ToastVolumeUp:           "🔊 Volume +{delta}",
+		ToastVolumeDown:         "🔉 Volume -{delta}",
 
+		ToastLinkCopied:            "🔗 Link copied",
+		ToastOpeningBrowser:        "🌐 Opening in browser",
 		ToastDownloadsUnconfigured: "Downloads not configured",
 		ToastDownloading:           "⬇ Downloading: {title}",
 		ToastLikeUnavailable:       "Like unavailable",
@@ -412,28 +524,34 @@ func enAppStrings() AppStrings {
 		ToastNoChapters:            "No chapters available",
 		ToastSelectTrackFirst:      "Select or play a track first",
 		ToastLyricsSyncReset:       "⏱ Lyrics sync: 0.0s",
+		ToastLyricsSyncFmt:         "⏱ Lyrics sync: {offset}s",
+		ToastLyricsSourceLRCLib:    "📝 Source: LRCLib",
+		ToastLyricsSourceYT:        "📝 Source: YouTube CC",
 
-		ErrLoadTab:        "Error loading {tab}: {err}",
-		ErrSearch:         "Error searching: {err}",
-		ErrSave:           "Error saving: {err}",
-		ToastSaved:        "★ Saved: {title}",
-		ToastUnsaved:      "Removed from saved",
-		ErrLike:           "Error liking: {err}",
-		ToastLiked:        "♥ Liked: {title}",
-		ToastUnliked:      "Removed from liked",
-		ToastSessionFeed:  "🍪 Session detected · loading your feed...",
-		ToastSessionFound: "🍪 Browser session detected",
-		ErrGeneric:        "Error: {err}",
-		ErrLiveSearch:     "Error searching live streams: {err}",
-		ToastNoLiveNow:    "No live streams right now",
-		ErrDownload:       "Error downloading: {err}",
-		ToastDownloaded:   "✓ Downloaded: {title}",
-		ErrToggleVideo:    "Error toggling video: {err}",
-		ErrLoadChannel:    "Error loading channel: {err}",
-		ErrSubscribe:      "Subscription error: {err}",
-		ToastSubscribed:   "★ Subscribed: {channel}",
-		ToastUnsubscribed: "Unsubscribed: {channel}",
-		ErrReadChapters:   "Error reading chapters: {err}",
-		ErrRepeat:         "Error toggling repeat: {err}",
+		ErrCatalogUnconfigured: "catalog not configured",
+		ErrLyricsNotFound:      "No lyrics found",
+		ErrLyricsFmt:           "Lyrics error: {err}",
+		ErrLoadTab:             "Error loading {tab}: {err}",
+		ErrSearch:              "Error searching: {err}",
+		ErrSave:                "Error saving: {err}",
+		ToastSaved:             "★ Saved: {title}",
+		ToastUnsaved:           "Removed from saved",
+		ErrLike:                "Error liking: {err}",
+		ToastLiked:             "♥ Liked: {title}",
+		ToastUnliked:           "Removed from liked",
+		ToastSessionFeed:       "🍪 Session detected · loading your feed...",
+		ToastSessionFound:      "🍪 Browser session detected",
+		ErrGeneric:             "Error: {err}",
+		ErrLiveSearch:          "Error searching live streams: {err}",
+		ToastNoLiveNow:         "No live streams right now",
+		ErrDownload:            "Error downloading: {err}",
+		ToastDownloaded:        "✓ Downloaded: {title}",
+		ErrToggleVideo:         "Error toggling video: {err}",
+		ErrLoadChannel:         "Error loading channel: {err}",
+		ErrSubscribe:           "Subscription error: {err}",
+		ToastSubscribed:        "★ Subscribed: {channel}",
+		ToastUnsubscribed:      "Unsubscribed: {channel}",
+		ErrReadChapters:        "Error reading chapters: {err}",
+		ErrRepeat:              "Error toggling repeat: {err}",
 	}
 }

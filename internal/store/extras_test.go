@@ -1,10 +1,15 @@
 package store
 
 import (
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
 	"testing"
 	"time"
+
+	"github.com/e12jassir/iutui/internal/model"
 )
 
 func TestResumeStore_LongVideosOnlyAndCap(t *testing.T) {
@@ -75,5 +80,49 @@ func TestSearchHistory_RecordDedupeAndCap(t *testing.T) {
 	want := []string{"canserbero", "PINK FLOYD", "diomedes diaz"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("SearchHistory.List() = %v, want %v", got, want)
+	}
+}
+
+func TestListeningStats_BoundsEntriesAndPersistsAtomically(t *testing.T) {
+	dir := t.TempDir()
+	seeded := make(map[string]TrackStat, 505)
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	for i := 1; i <= 505; i++ {
+		id := fmt.Sprintf("trk%08d", i)
+		seeded[id] = TrackStat{
+			VideoID:      id,
+			Title:        fmt.Sprintf("Track %d", i),
+			Artist:       "Artist",
+			Plays:        1,
+			LastPlayedAt: base.Add(time.Duration(i) * time.Minute),
+		}
+	}
+	rawSeed, err := json.Marshal(seeded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, musicStatsFile), rawSeed, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	ls := NewListeningStats(dir)
+	if err := ls.RecordPlay(model.Video{
+		ID:       "trk00000506",
+		Title:    "Newest Track",
+		Channel:  "Soda Stereo",
+		Duration: "03:30",
+	}); err != nil {
+		t.Fatalf("RecordPlay error: %v", err)
+	}
+
+	snap := ls.Snapshot()
+	if len(snap) != 500 {
+		t.Fatalf("Snapshot() len = %d, want bounded 500", len(snap))
+	}
+	if _, ok := snap["trk00000506"]; !ok {
+		t.Fatal("expected newest track trk00000506 to be retained")
+	}
+	if _, ok := snap["trk00000001"]; ok {
+		t.Fatal("expected oldest track trk00000001 to be evicted")
 	}
 }

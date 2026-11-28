@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/e12jassir/iutui/internal/model"
+	"github.com/e12jassir/iutui/internal/platform"
 )
 
 // Status represents the lifecycle state of a download item.
@@ -58,11 +59,53 @@ type Manager struct {
 	Runner        Runner
 	OnProgress    func(Item)
 
-	mu      sync.Mutex
-	items   map[string]*Item
-	order   []string
-	sem     chan struct{}
-	cancels map[string]context.CancelFunc
+	mu        sync.Mutex
+	cookieJar string
+	quality   int
+	extraArgs []string
+	items     map[string]*Item
+	order     []string
+	sem       chan struct{}
+	cancels   map[string]context.CancelFunc
+}
+
+// SetCookieJar updates the Netscape cookie jar path passed to yt-dlp when valid and non-empty.
+func (m *Manager) SetCookieJar(path string) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	m.cookieJar = strings.TrimSpace(path)
+	m.mu.Unlock()
+}
+
+// SetQuality updates the maximum video height for non-audio downloads (0 = no limit).
+func (m *Manager) SetQuality(q int) {
+	if m == nil {
+		return
+	}
+	if q < 0 {
+		q = 0
+	}
+	m.mu.Lock()
+	m.quality = q
+	m.mu.Unlock()
+}
+
+// SetExtraArgs updates additional CLI flags passed to yt-dlp during downloads.
+func (m *Manager) SetExtraArgs(args []string) {
+	if m == nil {
+		return
+	}
+	var copied []string
+	for _, a := range args {
+		if s := strings.TrimSpace(a); s != "" {
+			copied = append(copied, s)
+		}
+	}
+	m.mu.Lock()
+	m.extraArgs = copied
+	m.mu.Unlock()
 }
 
 // NewManager creates a Manager configured with the given state directory,
@@ -81,9 +124,8 @@ func NewManager(stateDir, downloadDir, ytdlpBin string) *Manager {
 	}
 }
 
-// Enqueue writes a .meta file atomically under StateDir/downloads/<id>.meta,
-// tracks the download in the queue, and executes yt-dlp to download the video
-// or audio track.
+// Enqueue tracks the download in the queue, executes yt-dlp to download the video
+// or audio track, and writes StateDir/downloads/<id>.meta atomically only upon success.
 func (m *Manager) Enqueue(ctx context.Context, v model.Video, audioOnly bool) error {
 	if err := validateVideoID(v.ID); err != nil {
 		return err
@@ -98,12 +140,6 @@ func (m *Manager) Enqueue(ctx context.Context, v model.Video, audioOnly bool) er
 	}
 
 	outputTemplate := filepath.Join(dest, "%(title)s.%(ext)s")
-
-	if m.StateDir != "" {
-		if err := writeMetaAtomic(m.downloadsDir(), v); err != nil {
-			return err
-		}
-	}
 
 	dlCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -162,6 +198,13 @@ func (m *Manager) Enqueue(ctx context.Context, v model.Video, audioOnly bool) er
 
 	m.mu.Lock()
 	item.Status = StatusDownloading
+	quality := m.quality
+	cookieJar := m.cookieJar
+	var extraArgs []string
+	if len(m.extraArgs) > 0 {
+		extraArgs = make([]string, len(m.extraArgs))
+		copy(extraArgs, m.extraArgs)
+	}
 	dlSnap := *item
 	onProg = m.OnProgress
 	m.mu.Unlock()
@@ -169,7 +212,7 @@ func (m *Manager) Enqueue(ctx context.Context, v model.Video, audioOnly bool) er
 		onProg(dlSnap)
 	}
 
-	args := buildArgs(v.ID, outputTemplate, audioOnly)
+	args := buildArgs(v.ID, outputTemplate, audioOnly, quality, cookieJar, extraArgs)
 
 	var err error
 	if runner != nil {
@@ -182,11 +225,13 @@ func (m *Manager) Enqueue(ctx context.Context, v model.Video, audioOnly bool) er
 		m.mu.Lock()
 		filePath := item.FilePath
 		m.mu.Unlock()
-		if filePath != "" && m.StateDir != "" {
+		if m.StateDir != "" {
 			if metaErr := writeMetaAtomicWithPath(m.downloadsDir(), v, filePath); metaErr != nil {
 				err = metaErr
 			}
 		}
+	} else {
+		m.cleanInvalidMeta(v.ID)
 	}
 
 	m.mu.Lock()
@@ -296,9 +341,14 @@ func (m *Manager) List() ([]Item, error) {
 		if _, ok := seen[id]; ok {
 			continue
 		}
-		v, filePath, err := readMeta(filepath.Join(dlDir, entry.Name()), id)
+		metaPath := filepath.Join(dlDir, entry.Name())
+		v, filePath, err := readMeta(metaPath, id)
 		if err != nil {
 			return nil, err
+		}
+		if filePath != "" && !isValidLocalFile(filePath) {
+			_ = os.Remove(metaPath)
+			continue
 		}
 		diskItems = append(diskItems, Item{
 			Video:    v,
@@ -332,6 +382,7 @@ func (m *Manager) ensureInitLocked() {
 }
 
 func (m *Manager) finishFailed(videoID string, item *Item, err error) {
+	m.cleanInvalidMeta(videoID)
 	m.mu.Lock()
 	if m.items[videoID] == item {
 		delete(m.cancels, videoID)
@@ -344,6 +395,21 @@ func (m *Manager) finishFailed(videoID string, item *Item, err error) {
 
 	if onProg != nil {
 		onProg(snap)
+	}
+}
+
+func (m *Manager) cleanInvalidMeta(videoID string) {
+	dlDir := m.downloadsDir()
+	if dlDir == "" || validateVideoID(videoID) != nil {
+		return
+	}
+	metaPath := filepath.Join(dlDir, videoID+".meta")
+	_, diskPath, err := readMeta(metaPath, videoID)
+	if err != nil {
+		return
+	}
+	if !isValidLocalFile(diskPath) {
+		_ = os.Remove(metaPath)
 	}
 }
 
@@ -364,7 +430,14 @@ func (m *Manager) runWithProgress(ctx context.Context, bin string, item *Item, a
 	fullArgs = append(fullArgs, args...)
 
 	cmd := exec.CommandContext(ctx, bin, fullArgs...)
-	cmd.WaitDelay = 2 * time.Second
+	platform.SetProcessGroup(cmd)
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		return platform.KillProcessGroup(cmd.Process.Pid)
+	}
+	cmd.WaitDelay = 100 * time.Millisecond
 
 	pr, pw := io.Pipe()
 	cmd.Stdout = pw
@@ -518,18 +591,22 @@ func isValidLocalFile(path string) bool {
 	return !info.IsDir() && info.Size() > 0
 }
 
-func buildArgs(videoID, outputTemplate string, audioOnly bool) []string {
+func buildArgs(videoID, outputTemplate string, audioOnly bool, quality int, cookieJar string, extraArgs []string) []string {
 	url := "https://www.youtube.com/watch?v=" + videoID
 	var args []string
 	if audioOnly {
 		args = append(args, "-x", "--audio-format", "mp3", "--embed-thumbnail")
+	} else if quality > 0 {
+		args = append(args, "-f", fmt.Sprintf("bestvideo[height<=%d]+bestaudio/best[height<=%d]/best", quality, quality))
+	}
+	if isValidLocalFile(cookieJar) {
+		args = append(args, "--cookies", cookieJar)
+	}
+	if len(extraArgs) > 0 {
+		args = append(args, extraArgs...)
 	}
 	args = append(args, "-o", outputTemplate, "--", url)
 	return args
-}
-
-func writeMetaAtomic(dir string, v model.Video) error {
-	return writeMetaAtomicWithPath(dir, v, "")
 }
 
 func writeMetaAtomicWithPath(dir string, v model.Video, filePath string) error {
@@ -557,6 +634,10 @@ func writeMetaAtomicWithPath(dir string, v model.Video, filePath string) error {
 	if _, err := tmp.WriteString(content); err != nil {
 		_ = tmp.Close()
 		return fmt.Errorf("download: write temp meta file: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("download: sync temp meta file: %w", err)
 	}
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("download: close temp meta file: %w", err)

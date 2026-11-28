@@ -2,7 +2,9 @@ package app
 
 import (
 	"fmt"
+	"strconv"
 
+	"github.com/e12jassir/iutui/internal/i18n"
 	"github.com/mattn/go-runewidth"
 )
 
@@ -72,6 +74,8 @@ func (s *State) PlayerBarLayout() PlayerBarRects {
 		VolStr: volStr,
 	}
 
+	vs := s.Catalog().Views
+
 	// Row 1 queue badge (hidden only while an active Toast occupies the right slot).
 	if s.Toast == "" {
 		queueCount := len(s.Queue)
@@ -79,9 +83,9 @@ func (s *State) PlayerBarLayout() PlayerBarRects {
 			queueCount = s.PlayerStatus.PlaylistCount
 		}
 		if queueCount > 1 {
-			r.QueueText = fmt.Sprintf("󰲸 Cola (%d)", queueCount)
+			r.QueueText = i18n.Format(vs.PlayerQueueCountBadge, map[string]string{"n": strconv.Itoa(queueCount)})
 		} else {
-			r.QueueText = "󰲸 Cola"
+			r.QueueText = vs.PlayerQueueBadge
 		}
 		badgeMax := max(10, innerW/3)
 		textW := runewidth.StringWidth(r.QueueText)
@@ -95,11 +99,16 @@ func (s *State) PlayerBarLayout() PlayerBarRects {
 	}
 
 	// Row 3 left zone starts at screen column 2 (after border at 0 and " " at 1).
-	// Tokens: "󰋕" (1) + "  " (2) + "󰥔" (1) + "  " (2) + "󰂚 Sub" (5) => cols 2..12.
+	// Tokens: "󰋕" (1) + "  " (2) + "󰥔" (1) + "  " (2) + subLabel (subW).
+	subLabel := vs.PlayerSubBadge
+	if s.IsActiveSubscribed() {
+		subLabel = vs.PlayerSubActiveBadge
+	}
+	subW := max(1, runewidth.StringWidth(subLabel))
 	r.LikeX0, r.LikeX1 = 1, 3
 	r.SaveX0, r.SaveX1 = 4, 6
-	r.SubX0, r.SubX1 = 7, 13
-	leftEndCol := 12 // col inside innerW (1 leading + 11 glyphs = 12)
+	r.SubX0, r.SubX1 = 7, 7+subW+1
+	leftEndCol := 7 + subW // col inside innerW (1 leading + 6 + subW)
 
 	// Center zone: "󰒮  󰑟  󰏤  󰑝  󰒭" => 1 + 2 + 1 + 2 + 1 + 2 + 1 + 2 + 1 = 13 cols.
 	const centerW = 13
