@@ -182,7 +182,7 @@ func (c *IPCClient) isCurrentPlay(seq uint64) bool {
 }
 
 // Play starts playback of v using the active socket or launches mpv directly.
-// Any active or in-flight playback is immediately interrupted so the latest Play wins.
+// The latest request cancels earlier preparation and replaces playback once its target is ready to load.
 func (c *IPCClient) Play(ctx context.Context, v model.Video, mode string) error {
 	return c.playWithResume(ctx, v, mode, 0, false)
 }
@@ -228,6 +228,15 @@ func (c *IPCClient) playWithResume(ctx context.Context, v model.Video, mode stri
 		defer stopWatch()
 	}
 
+	// Keep the current track playing while the replacement target resolves.
+	plan := c.resolvePlayTarget(waitCtx, v, mode)
+	if !c.isCurrentPlay(seq) || c.ctx.Err() != nil {
+		return nil
+	}
+	if ctx != nil && ctx.Err() != nil {
+		return ctx.Err()
+	}
+
 	skipReconnect, ok := c.cutActivePlayback(waitCtx, seq)
 	if !ok {
 		return nil
@@ -245,11 +254,6 @@ func (c *IPCClient) playWithResume(ctx context.Context, v model.Video, mode stri
 		if st.IsRunning {
 			c.broadcast(st)
 		}
-	}
-
-	plan := c.resolvePlayTarget(waitCtx, v, mode)
-	if !c.isCurrentPlay(seq) || c.ctx.Err() != nil {
-		return nil
 	}
 
 	if err := c.playOnSingleMPV(ctx, waitCtx, seq, v, plan, skipReconnect, startPos, startPaused); err != nil {

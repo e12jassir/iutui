@@ -637,7 +637,7 @@ exit 0`, finalArgsFile))
 	})
 }
 
-func TestIPCClient_PlayStopsPreviousImmediatelyAndLatestWins(t *testing.T) {
+func TestIPCClient_PlayReplacesPreviousAndLatestWins(t *testing.T) {
 	t.Run("sends stop before loading replacement video and falls back cleanly on stale stream", func(t *testing.T) {
 		var (
 			mu   sync.Mutex
@@ -746,8 +746,14 @@ esac
 		var (
 			mu    sync.Mutex
 			loads []string
+			stops int
 		)
 		srv := startTestMPVServer(t, func(conn net.Conn, cmd []any, reqID int64) {
+			if fmt.Sprint(cmd[0]) == "stop" {
+				mu.Lock()
+				stops++
+				mu.Unlock()
+			}
 			if len(cmd) >= 2 && fmt.Sprint(cmd[0]) == "loadfile" {
 				mu.Lock()
 				loads = append(loads, fmt.Sprint(cmd[1]))
@@ -771,6 +777,13 @@ esac
 			}),
 		)
 		defer client.Close()
+
+		if err := client.Play(context.Background(), model.Video{ID: "first123456", Title: "First"}, "window"); err != nil {
+			t.Fatalf("first Play failed: %v", err)
+		}
+		mu.Lock()
+		stops = 0
+		mu.Unlock()
 
 		// Start Prefetch for slow video so Play enters WaitOrGet.
 		client.Prefetch(model.Video{ID: "slow1234567", Title: "Slow"})
@@ -818,6 +831,9 @@ esac
 			if strings.Contains(url, "slow") {
 				t.Fatalf("superseded slow Play should not load after/during fast Play, got loads=%v", loads)
 			}
+		}
+		if stops != 1 {
+			t.Fatalf("expected only the winning replacement to stop the active track, got %d stops", stops)
 		}
 	})
 
