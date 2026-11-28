@@ -95,9 +95,24 @@ func WithLaunchDefaults(opts LaunchOpts) IPCOption {
 		if opts.FastPlayback {
 			c.resolver = NewStreamResolver(opts.YtdlpBin, opts.Quality)
 			c.resolver.SetCookieJar(opts.CookieJarPath)
+			c.resolver.SetExtraArgs(opts.YtdlpArgs)
 			if opts.AudioOnly {
 				c.resolver.SetAudioOnly(true)
 			}
+			if opts.PrefetchLimit != nil {
+				c.resolver.SetPrefetchLimit(*opts.PrefetchLimit)
+			}
+		}
+	}
+}
+
+// WithPrefetchLimit configures the concurrency limit for background stream prefetching (0 disables Prefetch).
+func WithPrefetchLimit(n int) IPCOption {
+	return func(c *IPCClient) {
+		c.prefetchLimit = n
+		c.prefetchLimitSet = true
+		if c.resolver != nil {
+			c.resolver.SetPrefetchLimit(n)
 		}
 	}
 }
@@ -150,15 +165,17 @@ type ipcMessage struct {
 
 // IPCClient implements Engine over a persistent mpv JSON IPC UNIX domain socket.
 type IPCClient struct {
-	socketFinder   func() string
-	initialBackoff time.Duration
-	maxBackoff     time.Duration
-	cmdTimeout     time.Duration
-	launchMu       sync.RWMutex
-	launchDefaults LaunchOpts
-	lastVideo      model.Video
-	lastMode       string
-	resolver       *StreamResolver
+	socketFinder     func() string
+	initialBackoff   time.Duration
+	maxBackoff       time.Duration
+	cmdTimeout       time.Duration
+	launchMu         sync.RWMutex
+	launchDefaults   LaunchOpts
+	lastVideo        model.Video
+	lastMode         string
+	resolver         *StreamResolver
+	prefetchLimitSet bool
+	prefetchLimit    int
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -174,12 +191,14 @@ type IPCClient struct {
 	mpvProc       *os.Process
 	procAudioOnly bool
 
-	playMu         sync.Mutex
-	playSeq        atomic.Uint64
-	playCancel     context.CancelFunc
-	step3Mu        sync.Mutex
-	fallbackPlayMu sync.Mutex
-	playFallback   playFallbackState
+	playMu               sync.Mutex
+	playSeq              atomic.Uint64
+	playCancel           context.CancelFunc
+	step3Mu              sync.Mutex
+	fallbackPlayMu       sync.Mutex
+	playFallback         playFallbackState
+	currentPath          string
+	playlistRecoveredVID string
 
 	autoplay            atomic.Bool
 	fallbackMu          sync.RWMutex
@@ -193,7 +212,10 @@ type IPCClient struct {
 	completedSeeds        []RadioTrack
 	metaMu                sync.RWMutex
 	trackMeta             map[string]RadioTrack
+	resolvedURLToID       map[string]string
+	resolvedURLOrder      []string
 	playlistMu            sync.Mutex
+	playlistOpMu          sync.Mutex
 	userQueuedIDs         []string
 	playedHistoryIDs      []string
 	extendingSeq          uint64
@@ -238,21 +260,22 @@ type IPCClient struct {
 func NewIPCClient(opts ...IPCOption) *IPCClient {
 	ctx, cancel := context.WithCancel(context.Background())
 	c := &IPCClient{
-		socketFinder:   FindSocket,
-		initialBackoff: 100 * time.Millisecond,
-		maxBackoff:     5 * time.Second,
-		cmdTimeout:     2 * time.Second,
-		fadeDuration:   180 * time.Millisecond,
-		sbClient:       NewSponsorBlockClient(),
-		nowFn:          time.Now,
-		ctx:            ctx,
-		cancel:         cancel,
-		done:           make(chan struct{}),
-		wakeCh:         make(chan struct{}, 1),
-		pending:        make(map[int64]chan ipcResponse),
-		status:         Status{Speed: 1.0, PlaylistPos: -1},
-		subs:           make(map[uint64]chan Status),
-		trackMeta:      make(map[string]RadioTrack),
+		socketFinder:    FindSocket,
+		initialBackoff:  100 * time.Millisecond,
+		maxBackoff:      5 * time.Second,
+		cmdTimeout:      2 * time.Second,
+		fadeDuration:    180 * time.Millisecond,
+		sbClient:        NewSponsorBlockClient(),
+		nowFn:           time.Now,
+		ctx:             ctx,
+		cancel:          cancel,
+		done:            make(chan struct{}),
+		wakeCh:          make(chan struct{}, 1),
+		pending:         make(map[int64]chan ipcResponse),
+		status:          Status{Speed: 1.0, PlaylistPos: -1},
+		subs:            make(map[uint64]chan Status),
+		trackMeta:       make(map[string]RadioTrack),
+		resolvedURLToID: make(map[string]string),
 	}
 	c.autoplay.Store(true)
 	c.sponsorBlock.Store(true)
@@ -260,6 +283,12 @@ func NewIPCClient(opts ...IPCOption) *IPCClient {
 		if opt != nil {
 			opt(c)
 		}
+	}
+	if c.prefetchLimitSet && c.resolver != nil {
+		c.resolver.SetPrefetchLimit(c.prefetchLimit)
+	}
+	if c.radioClient != nil && strings.TrimSpace(c.launchDefaults.CookieJarPath) != "" {
+		c.radioClient.SetCookiesPath(c.launchDefaults.CookieJarPath)
 	}
 
 	// Attempt an immediate non-blocking connect so callers see an active socket right away.
@@ -412,6 +441,7 @@ func (c *IPCClient) handleLine(line []byte) {
 		c.applyPropertyChange(msg.Name, msg.Data)
 	case "playback-restart", "file-loaded":
 		c.clearDirectStreamFallback(0)
+		c.clearPlaylistFallbackRecovery()
 		if c.fadeDuration > 0 && c.pendingFadeIn.Swap(false) {
 			fseq, fctx := c.beginFade()
 			c.spawnFadeIn(fctx, fseq, c.fadeInDuration())
@@ -429,6 +459,8 @@ func (c *IPCClient) handleLine(line []byte) {
 		if msg.Reason == "error" {
 			if fb, ok := c.takeDirectStreamFallback(); ok {
 				c.spawnDirectStreamFallback(fb)
+			} else if vid := c.takePlaylistDirectStreamFallback(st.VideoID); vid != "" {
+				c.spawnPlaylistDirectStreamFallback(vid)
 			}
 		} else if msg.Reason == "eof" {
 			c.clearSponsorBlockState(0)
@@ -462,9 +494,11 @@ func (c *IPCClient) spawnClearForcedTitle() {
 func (c *IPCClient) applyPropertyChange(name string, data any) {
 	c.statusMu.Lock()
 	prevPaused := c.status.Paused
+	prevCount := c.status.PlaylistCount
 	changed := false
 	timePosUpdated := false
 	playlistPosChanged := false
+	playlistCountGrew := false
 	newPos := -1
 	pathVideoID := ""
 	switch name {
@@ -515,8 +549,14 @@ func (c *IPCClient) applyPropertyChange(name string, data any) {
 		}
 	case "playlist-count":
 		if f, ok := toFloat64(data); ok {
-			c.status.PlaylistCount = int(f)
-			changed = true
+			cnt := int(f)
+			if c.status.PlaylistCount != cnt {
+				c.status.PlaylistCount = cnt
+				changed = true
+				if prevCount <= 1 && cnt > 1 {
+					playlistCountGrew = true
+				}
+			}
 		}
 	case "playlist-pos":
 		if f, ok := toFloat64(data); ok {
@@ -533,7 +573,8 @@ func (c *IPCClient) applyPropertyChange(name string, data any) {
 		}
 	case "path":
 		if s, ok := data.(string); ok {
-			if vid := ExtractYouTubeID(s); vid != "" {
+			c.setCurrentPath(s)
+			if vid := c.extractTrackVideoID(s); vid != "" {
 				if c.status.VideoID != vid {
 					c.status.VideoID = vid
 					changed = true
@@ -544,9 +585,12 @@ func (c *IPCClient) applyPropertyChange(name string, data any) {
 					changed = true
 				}
 			}
-		} else if data == nil && c.status.VideoID != "" {
-			c.status.VideoID = ""
-			changed = true
+		} else if data == nil {
+			c.setCurrentPath("")
+			if c.status.VideoID != "" {
+				c.status.VideoID = ""
+				changed = true
+			}
 		}
 	case "speed":
 		if f, ok := toFloat64(data); ok {
@@ -573,11 +617,13 @@ func (c *IPCClient) applyPropertyChange(name string, data any) {
 	}
 	if playlistPosChanged && newPos >= 0 {
 		if c.resolver != nil {
-			go c.prefetchUpcomingTracks(newPos, st.PlaylistCount)
+			c.spawnPrefetchUpcomingTracks(newPos, st.PlaylistCount)
 		}
 		if c.autoplay.Load() && c.radioClient != nil && st.PlaylistCount > 1 && newPos >= st.PlaylistCount-2 {
-			go c.maybeExtendRadio(st.VideoID)
+			c.spawnMaybeExtendRadio(st.VideoID)
 		}
+	} else if playlistCountGrew && st.PlaylistPos >= 0 && c.resolver != nil {
+		c.spawnPrefetchUpcomingTracks(st.PlaylistPos, st.PlaylistCount)
 	}
 	if name == "pause" && prevPaused && !st.Paused && c.fadeDuration > 0 {
 		c.fadeMu.Lock()
@@ -648,6 +694,8 @@ func (c *IPCClient) handleDisconnect(conn net.Conn) {
 	c.failPending(ErrNotConnected)
 	c.clearSponsorBlockState(0)
 	c.clearDirectStreamFallback(0)
+	c.setCurrentPath("")
+	c.clearPlaylistFallbackRecovery()
 	c.resetFadeState()
 
 	c.statusMu.Lock()
@@ -702,10 +750,6 @@ func (c *IPCClient) signalWake() {
 	case c.wakeCh <- struct{}{}:
 	default:
 	}
-}
-
-func (c *IPCClient) tryConnectImmediate(maxWait time.Duration) bool {
-	return c.tryConnectImmediateCtx(c.ctx, maxWait)
 }
 
 func (c *IPCClient) tryConnectImmediateCtx(ctx context.Context, maxWait time.Duration) bool {
@@ -983,6 +1027,9 @@ func (c *IPCClient) Pause(ctx context.Context) error {
 }
 
 func (c *IPCClient) switchPlaylistTrack(ctx context.Context, cmd string) error {
+	if c.resolver != nil {
+		c.maybeSwapPlaylistTargetWithCachedCDN(ctx, cmd, -1)
+	}
 	if c.fadeDuration > 0 && c.isAudioActivelyPlaying() {
 		seq, fctx := c.beginFade()
 		mergedCtx, cancelMerged := c.mergeFadeCtx(fctx, ctx)
@@ -1252,12 +1299,34 @@ func (c *IPCClient) SetLaunchMode(ctx context.Context, mode string) error {
 	}
 }
 
-// SetCookieJar updates the cookie jar path for future mpv launches and the stream resolver.
+// SetCookieJar updates the cookie jar path for future mpv launches, the stream resolver, and smart radio.
 func (c *IPCClient) SetCookieJar(path string) {
+	if c == nil {
+		return
+	}
+	trimmed := strings.TrimSpace(path)
 	c.launchMu.Lock()
-	c.launchDefaults.CookieJarPath = strings.TrimSpace(path)
+	c.launchDefaults.CookieJarPath = trimmed
 	if c.resolver != nil {
-		c.resolver.SetCookieJar(c.launchDefaults.CookieJarPath)
+		c.resolver.SetCookieJar(trimmed)
+	}
+	rc := c.radioClient
+	c.launchMu.Unlock()
+	if rc != nil {
+		rc.SetCookiesPath(trimmed)
+	}
+}
+
+// SetPrefetchLimit updates the concurrency limit for background stream prefetching (0 disables Prefetch).
+func (c *IPCClient) SetPrefetchLimit(n int) {
+	if c == nil {
+		return
+	}
+	c.launchMu.Lock()
+	c.prefetchLimit = n
+	c.prefetchLimitSet = true
+	if c.resolver != nil {
+		c.resolver.SetPrefetchLimit(n)
 	}
 	c.launchMu.Unlock()
 }
@@ -1399,7 +1468,7 @@ func (c *IPCClient) Playlist(ctx context.Context) ([]PlaylistItem, error) {
 		item := PlaylistItem{Index: i}
 		if fn, ok := m["filename"].(string); ok {
 			item.Filename = fn
-			item.VideoID = ExtractYouTubeID(fn)
+			item.VideoID = c.extractTrackVideoID(fn)
 		}
 		if title, ok := m["title"].(string); ok {
 			item.Title = title
@@ -1445,6 +1514,9 @@ func (c *IPCClient) Playlist(ctx context.Context) ([]PlaylistItem, error) {
 func (c *IPCClient) PlayPlaylistIndex(ctx context.Context, index int) error {
 	if index < 0 {
 		return fmt.Errorf("invalid playlist index: %d", index)
+	}
+	if c.resolver != nil {
+		c.maybeSwapPlaylistTargetWithCachedCDN(ctx, "", index)
 	}
 	if _, err := c.sendCommand(ctx, "set_property", "playlist-pos", index); err != nil {
 		return err

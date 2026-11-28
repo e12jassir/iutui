@@ -395,7 +395,6 @@ func TestIPCClient_DisconnectResetsRunningAndReconnects(t *testing.T) {
 	deadline = time.After(2 * time.Second)
 	for !seenReset {
 		if !client.Status().IsRunning {
-			seenReset = true
 			break
 		}
 		select {
@@ -682,6 +681,7 @@ func TestIPCClient_PlayReplacesPreviousAndLatestWins(t *testing.T) {
 				Mode:         "window",
 				Quality:      720,
 				FastPlayback: true,
+				YtdlpBin:     writeFakeYTDLP(t, "exit 1"),
 			}),
 		)
 		defer client.Close()
@@ -824,7 +824,7 @@ esac
 
 		mu.Lock()
 		defer mu.Unlock()
-		if len(loads) == 0 || loads[len(loads)-1] != "https://www.youtube.com/watch?v=fast7654321" {
+		if len(loads) == 0 || loads[len(loads)-1] != "https://cdn.example.com/fast.mp4" {
 			t.Fatalf("expected fast video to be the final loaded URL, got loads=%v", loads)
 		}
 		for _, url := range loads {
@@ -1285,6 +1285,7 @@ func TestIPCClient_PlayClearsStickyAudioFilesBeforeLoadfile(t *testing.T) {
 			Mode:         "window",
 			Quality:      720,
 			FastPlayback: true,
+			YtdlpBin:     writeFakeYTDLP(t, "exit 1"),
 		}),
 	)
 	defer client.Close()
@@ -1424,7 +1425,7 @@ esac
 		mu.Unlock()
 
 		wantLoads := [][]string{
-			{"https://www.youtube.com/watch?v=autoSeed111", "replace"},
+			{"https://cdn.example.com/prefetched-next.mp4", "replace"},
 			{"https://www.youtube.com/watch?v=autoNext001", "append"},
 			{"https://www.youtube.com/watch?v=autoNext002", "append"},
 		}
@@ -1540,7 +1541,7 @@ esac
 				mu.Unlock()
 
 				wantLoads := [][]string{
-					{"https://www.youtube.com/watch?v=seedNoMix01", "replace"},
+					{"https://cdn.example.com/fallback-prefetched.mp4", "replace"},
 					{"https://www.youtube.com/watch?v=feedTrack01", "append"},
 					{"https://www.youtube.com/watch?v=feedTrack02", "append"},
 				}
@@ -1622,7 +1623,7 @@ esac
 		mu.Unlock()
 
 		wantLoads := [][]string{
-			{"https://www.youtube.com/watch?v=manualVid01", "replace"},
+			{"https://cdn.example.com/single.mp4", "replace"},
 			{"https://www.youtube.com/watch?v=liveStream1", "replace"},
 		}
 		if len(gotLoads) != len(wantLoads) {
@@ -4453,6 +4454,400 @@ func TestCycleSubtitles(t *testing.T) {
 		t.Fatal("expected subVis=false after second toggle")
 	}
 	mu.Unlock()
+}
+
+func TestIPCClient_PlaylistHotSwapAndResolvedURLTracking(t *testing.T) {
+	type plEntry struct {
+		filename string
+		title    string
+		current  bool
+	}
+	var (
+		mu       sync.Mutex
+		playlist = []plEntry{
+			{filename: "https://www.youtube.com/watch?v=seedSong001", title: "Soda Stereo - Signos", current: true},
+			{filename: "https://www.youtube.com/watch?v=nextSong001", title: "Gustavo Cerati - Puente"},
+			{filename: "https://www.youtube.com/watch?v=nextSong002", title: "Bad Artist - Spam Song"},
+		}
+		cmds [][]any
+	)
+
+	var srv *testMPVServer
+	srv = startTestMPVServer(t, func(conn net.Conn, cmd []any, reqID int64) {
+		if len(cmd) > 0 && fmt.Sprint(cmd[0]) != "observe_property" {
+			mu.Lock()
+			cmds = append(cmds, slices.Clone(cmd))
+			switch fmt.Sprint(cmd[0]) {
+			case "get_property":
+				if len(cmd) >= 2 && fmt.Sprint(cmd[1]) == "playlist" {
+					data := make([]any, len(playlist))
+					for i, e := range playlist {
+						data[i] = map[string]any{
+							"filename": e.filename,
+							"title":    e.title,
+							"current":  e.current,
+						}
+					}
+					mu.Unlock()
+					_ = srv.SendJSON(conn, map[string]any{"data": data, "error": "success", "request_id": reqID})
+					return
+				}
+			case "loadfile":
+				if len(cmd) >= 3 && fmt.Sprint(cmd[2]) == "append" {
+					title := ""
+					if len(cmd) >= 5 {
+						if opts, ok := cmd[4].(map[string]any); ok {
+							title, _ = opts["force-media-title"].(string)
+						}
+					}
+					playlist = append(playlist, plEntry{filename: fmt.Sprint(cmd[1]), title: title})
+				}
+			case "playlist-move":
+				if len(cmd) >= 3 {
+					fromF, ok1 := toFloat64(cmd[1])
+					toF, ok2 := toFloat64(cmd[2])
+					from, to := int(fromF), int(toF)
+					if ok1 && ok2 && from >= 0 && from < len(playlist) && to >= 0 && to < len(playlist) && from > to {
+						item := playlist[from]
+						playlist = append(playlist[:from], playlist[from+1:]...)
+						playlist = append(playlist[:to], append([]plEntry{item}, playlist[to:]...)...)
+					}
+				}
+			case "playlist-remove":
+				if len(cmd) >= 2 {
+					idxF, ok := toFloat64(cmd[1])
+					idx := int(idxF)
+					if ok && idx >= 0 && idx < len(playlist) {
+						playlist = append(playlist[:idx], playlist[idx+1:]...)
+					}
+				}
+			}
+			mu.Unlock()
+		}
+		_ = srv.SendJSON(conn, map[string]any{"data": nil, "error": "success", "request_id": reqID})
+	})
+
+	ytdlp := writeFakeYTDLP(t, `
+for last; do :; done
+id=${last#*=}
+printf 'https://rr2---sn-0ox.googlevideo.com/videoplayback?id=%s\n' "$id"
+`)
+
+	client := NewIPCClient(
+		WithSocketPath(srv.sockPath),
+		WithCommandTimeout(2*time.Second),
+		WithFadeDuration(0),
+		WithLaunchDefaults(LaunchOpts{
+			SocketPath:   srv.sockPath,
+			AudioOnly:    true,
+			Mode:         "audio",
+			YtdlpBin:     ytdlp,
+			FastPlayback: true,
+		}),
+	)
+	defer client.Close()
+
+	var serverConn net.Conn
+	select {
+	case serverConn = <-srv.accepts:
+	case <-time.After(time.Second):
+		t.Fatal("server did not accept connection")
+	}
+
+	client.cacheRadioTracks([]RadioTrack{
+		{ID: "seedSong001", Title: "Signos", Artist: "Soda Stereo"},
+		{ID: "nextSong001", Title: "Puente", Artist: "Gustavo Cerati"},
+		{ID: "nextSong002", Title: "Spam Song", Artist: "Bad Artist"},
+	})
+
+	_ = srv.SendJSON(serverConn, map[string]any{"event": "property-change", "name": "playlist-count", "data": float64(3)})
+	_ = srv.SendJSON(serverConn, map[string]any{"event": "property-change", "name": "playlist-pos", "data": float64(0)})
+
+	wantCDN1 := "https://rr2---sn-0ox.googlevideo.com/videoplayback?id=nextSong001"
+	wantCDN2 := "https://rr2---sn-0ox.googlevideo.com/videoplayback?id=nextSong002"
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		ok := len(playlist) == 3 && playlist[1].filename == wantCDN1 && playlist[2].filename == wantCDN2
+		mu.Unlock()
+		if ok {
+			break
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+
+	mu.Lock()
+	gotPl := slices.Clone(playlist)
+	mu.Unlock()
+	if len(gotPl) != 3 || gotPl[1].filename != wantCDN1 || gotPl[2].filename != wantCDN2 {
+		t.Fatalf("expected mpv playlist entries 1 & 2 hot-swapped to direct CDN URLs, got %+v", gotPl)
+	}
+
+	// Playlist() must still report the original YouTube VideoIDs and hydrated titles for CDN URLs!
+	items, err := client.Playlist(context.Background())
+	if err != nil {
+		t.Fatalf("Playlist() error: %v", err)
+	}
+	if len(items) != 3 || items[1].VideoID != "nextSong001" || items[1].Title != "Gustavo Cerati - Puente" || items[2].VideoID != "nextSong002" {
+		t.Fatalf("expected Playlist() to preserve VideoID and Title on CDN URLs, got %+v", items)
+	}
+
+	// Observing path=<cdnURL> must recover VideoID and Title via extractTrackVideoID.
+	_ = srv.SendJSON(serverConn, map[string]any{"event": "property-change", "name": "path", "data": wantCDN1})
+	deadline = time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		st := client.Status()
+		if st.VideoID == "nextSong001" && st.Title == "Gustavo Cerati - Puente" {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if st := client.Status(); st.VideoID != "nextSong001" || st.Title != "Gustavo Cerati - Puente" {
+		t.Fatalf("expected path=<cdnURL> to update Status VideoID & Title, got %+v", st)
+	}
+}
+
+func TestIPCClient_SwitchTrackAndPlayPlaylistIndexUseCachedCDN(t *testing.T) {
+	type plEntry struct {
+		filename string
+		title    string
+		current  bool
+	}
+	var (
+		mu       sync.Mutex
+		playlist = []plEntry{
+			{filename: "https://www.youtube.com/watch?v=trackIdx000", title: "Track 0", current: true},
+			{filename: "https://www.youtube.com/watch?v=trackIdx001", title: "Track 1"},
+			{filename: "https://www.youtube.com/watch?v=trackIdx002", title: "Track 2"},
+		}
+	)
+
+	var srv *testMPVServer
+	srv = startTestMPVServer(t, func(conn net.Conn, cmd []any, reqID int64) {
+		mu.Lock()
+		switch fmt.Sprint(cmd[0]) {
+		case "get_property":
+			if len(cmd) >= 2 && fmt.Sprint(cmd[1]) == "playlist" {
+				data := make([]any, len(playlist))
+				for i, e := range playlist {
+					data[i] = map[string]any{"filename": e.filename, "title": e.title, "current": e.current}
+				}
+				mu.Unlock()
+				_ = srv.SendJSON(conn, map[string]any{"data": data, "error": "success", "request_id": reqID})
+				return
+			}
+		case "loadfile":
+			if len(cmd) >= 3 && fmt.Sprint(cmd[2]) == "append" {
+				playlist = append(playlist, plEntry{filename: fmt.Sprint(cmd[1])})
+			}
+		case "playlist-move":
+			if len(cmd) >= 3 {
+				fromF, _ := toFloat64(cmd[1])
+				toF, _ := toFloat64(cmd[2])
+				from, to := int(fromF), int(toF)
+				if from > to && from < len(playlist) {
+					it := playlist[from]
+					playlist = append(playlist[:from], playlist[from+1:]...)
+					playlist = append(playlist[:to], append([]plEntry{it}, playlist[to:]...)...)
+				}
+			}
+		case "playlist-remove":
+			if len(cmd) >= 2 {
+				idxF, _ := toFloat64(cmd[1])
+				idx := int(idxF)
+				if idx >= 0 && idx < len(playlist) {
+					playlist = append(playlist[:idx], playlist[idx+1:]...)
+				}
+			}
+		}
+		mu.Unlock()
+		_ = srv.SendJSON(conn, map[string]any{"data": nil, "error": "success", "request_id": reqID})
+	})
+
+	client := NewIPCClient(
+		WithSocketPath(srv.sockPath),
+		WithFadeDuration(0),
+		WithLaunchDefaults(LaunchOpts{
+			SocketPath:   srv.sockPath,
+			AudioOnly:    true,
+			Mode:         "audio",
+			FastPlayback: true,
+			YtdlpBin:     writeFakeYTDLP(t, "exit 1"),
+		}),
+	)
+	defer client.Close()
+
+	select {
+	case <-srv.accepts:
+	case <-time.After(time.Second):
+		t.Fatal("server did not accept connection")
+	}
+
+	client.resolver.mu.Lock()
+	client.resolver.audioCache["trackIdx001"] = ResolvedStream{
+		AudioURL:  "https://cdn.example.com/cached-track1.m4a",
+		ExpiresAt: time.Now().Add(5 * time.Minute),
+	}
+	client.resolver.audioCache["trackIdx002"] = ResolvedStream{
+		AudioURL:  "https://cdn.example.com/cached-track2.m4a",
+		ExpiresAt: time.Now().Add(5 * time.Minute),
+	}
+	client.resolver.mu.Unlock()
+
+	if err := client.Next(context.Background()); err != nil {
+		t.Fatalf("Next() error: %v", err)
+	}
+	mu.Lock()
+	got1 := playlist[1].filename
+	mu.Unlock()
+	if got1 != "https://cdn.example.com/cached-track1.m4a" {
+		t.Fatalf("expected Next() to hot-swap index 1 with cached CDN URL, got %q", got1)
+	}
+
+	if err := client.PlayPlaylistIndex(context.Background(), 2); err != nil {
+		t.Fatalf("PlayPlaylistIndex(2) error: %v", err)
+	}
+	mu.Lock()
+	got2 := playlist[2].filename
+	mu.Unlock()
+	if got2 != "https://cdn.example.com/cached-track2.m4a" {
+		t.Fatalf("expected PlayPlaylistIndex(2) to hot-swap index 2 with cached CDN URL, got %q", got2)
+	}
+}
+
+func TestIPCClient_EndFileErrorOnPlaylistCDNStreamRecoversToWatchURL(t *testing.T) {
+	var (
+		mu            sync.Mutex
+		loadURLs      []string
+		servePlaylist atomic.Bool
+	)
+	var srv *testMPVServer
+	srv = startTestMPVServer(t, func(conn net.Conn, cmd []any, reqID int64) {
+		if servePlaylist.Load() && len(cmd) >= 2 && fmt.Sprint(cmd[0]) == "get_property" && fmt.Sprint(cmd[1]) == "playlist" {
+			_ = srv.SendJSON(conn, map[string]any{
+				"data": []any{
+					map[string]any{"filename": "https://www.youtube.com/watch?v=seed0000001", "current": true},
+					map[string]any{"filename": "https://www.youtube.com/watch?v=expPlaylist"},
+				},
+				"error":      "success",
+				"request_id": reqID,
+			})
+			return
+		}
+		if len(cmd) >= 2 && fmt.Sprint(cmd[0]) == "loadfile" {
+			mu.Lock()
+			loadURLs = append(loadURLs, fmt.Sprint(cmd[1]))
+			mu.Unlock()
+		}
+		_ = srv.SendJSON(conn, map[string]any{"data": nil, "error": "success", "request_id": reqID})
+	})
+
+	client := NewIPCClient(
+		WithSocketPath(srv.sockPath),
+		WithFadeDuration(0),
+		WithLaunchDefaults(LaunchOpts{
+			SocketPath:   srv.sockPath,
+			AudioOnly:    true,
+			Mode:         "audio",
+			FastPlayback: true,
+			YtdlpBin:     writeFakeYTDLP(t, "exit 1"),
+		}),
+	)
+	defer client.Close()
+
+	var serverConn net.Conn
+	select {
+	case serverConn = <-srv.accepts:
+	case <-time.After(time.Second):
+		t.Fatal("server did not accept connection")
+	}
+
+	// Simulate an already-running playlist advancing to an expired CDN URL (no armed playFallback).
+	expiredCDN := "https://rr5---sn-expired.googlevideo.com/videoplayback?expire=1"
+	client.resolver.mu.Lock()
+	client.resolver.audioCache["expPlaylist"] = ResolvedStream{
+		AudioURL:  expiredCDN,
+		ExpiresAt: time.Now().Add(5 * time.Minute),
+	}
+	client.resolver.mu.Unlock()
+	client.cacheRadioTracks([]RadioTrack{{ID: "expPlaylist", Title: "Trátame Suavemente", Artist: "Soda Stereo"}})
+
+	servePlaylist.Store(true)
+	if err := client.PlayPlaylistIndex(context.Background(), 1); err != nil {
+		t.Fatalf("PlayPlaylistIndex(1): %v", err)
+	}
+	servePlaylist.Store(false)
+
+	_ = srv.SendJSON(serverConn, map[string]any{"event": "property-change", "name": "path", "data": expiredCDN})
+	time.Sleep(20 * time.Millisecond)
+	_ = srv.SendJSON(serverConn, map[string]any{"event": "end-file", "reason": "error"})
+
+	wantWatch := "https://www.youtube.com/watch?v=expPlaylist"
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		hasWatch := slices.Contains(loadURLs, wantWatch)
+		mu.Unlock()
+		if hasWatch {
+			break
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+
+	mu.Lock()
+	gotLoads := slices.Clone(loadURLs)
+	mu.Unlock()
+	if !slices.Contains(gotLoads, wantWatch) {
+		t.Fatalf("expected playlist CDN failure to reload %q, got %v", wantWatch, gotLoads)
+	}
+	if _, ok := client.resolver.GetCachedForMode("expPlaylist", true); ok {
+		t.Fatal("expected expired playlist CDN stream to be invalidated in StreamResolver")
+	}
+}
+
+func TestIPCClient_PlayFromViaIPCPreservesStartPosAndPropagatesCookieJarToRadio(t *testing.T) {
+	srv := startTestMPVServer(t, nil)
+	rc := NewRadioClient()
+	client := NewIPCClient(
+		WithSocketPath(srv.sockPath),
+		WithFadeDuration(0),
+		WithRadioClient(rc),
+		WithLaunchDefaults(LaunchOpts{
+			SocketPath:   srv.sockPath,
+			AudioOnly:    true,
+			Mode:         "audio",
+			FastPlayback: true,
+			YtdlpBin:     writeFakeYTDLP(t, "printf 'https://cdn.example.com/resume.m4a\\n'"),
+		}),
+	)
+	defer client.Close()
+	client.SetAutoplay(false)
+
+	select {
+	case <-srv.accepts:
+	case <-time.After(time.Second):
+		t.Fatal("server did not accept connection")
+	}
+
+	if err := client.PlayFrom(context.Background(), model.Video{ID: "resumeIPC01", Title: "Resume IPC"}, "audio", 73.5); err != nil {
+		t.Fatalf("PlayFrom failed: %v", err)
+	}
+	if got := client.Status().TimePos; got != 73.5 {
+		t.Fatalf("Status().TimePos after IPC PlayFrom = %v, want 73.5", got)
+	}
+
+	client.SetCookieJar("/tmp/propagated-cookies.txt")
+	if rc.cookiesPath != "/tmp/propagated-cookies.txt" {
+		t.Fatalf("RadioClient cookiesPath = %q, want /tmp/propagated-cookies.txt", rc.cookiesPath)
+	}
+
+	client.SetPrefetchLimit(0)
+	client.Prefetch(model.Video{ID: "noPrefetch1", Title: "Disabled"})
+	time.Sleep(40 * time.Millisecond)
+	if _, ok := client.resolver.GetCachedForMode("noPrefetch1", true); ok {
+		t.Fatal("expected IPCClient.SetPrefetchLimit(0) to disable background Prefetch")
+	}
 }
 
 func TestTogglePiP(t *testing.T) {

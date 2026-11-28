@@ -26,6 +26,8 @@ type LaunchOpts struct {
 	CookieJarPath string
 	FastPlayback  bool
 	YtdlpBin      string
+	YtdlpArgs     []string
+	PrefetchLimit *int
 	AllowPlaylist bool
 	IsLive        bool
 	StartPos      float64
@@ -107,8 +109,11 @@ func BuildMPVArgs(opts LaunchOpts) []string {
 		playlistOpt = "yes-playlist="
 	}
 	if opts.FastPlayback && !opts.AllowPlaylist {
-		// Skip cookies on fast single-video launches without capping quality via android client.
-		args = append(args, "--ytdl-raw-options=no-playlist=")
+		if opts.AudioOnly || opts.Mode == "audio" || (opts.Quality > 0 && opts.Quality <= 480) {
+			args = append(args, "--ytdl-raw-options=no-playlist=,extractor-args="+fastAndroidExtractorArgs)
+		} else {
+			args = append(args, "--ytdl-raw-options=no-playlist=,extractor-args="+fastHDExtractorArgs)
+		}
 	} else if opts.CookieJarPath != "" {
 		args = append(args, "--ytdl-raw-options=cookies="+opts.CookieJarPath+","+playlistOpt)
 	} else if opts.FastPlayback {
@@ -116,6 +121,8 @@ func BuildMPVArgs(opts LaunchOpts) []string {
 	} else if opts.AllowPlaylist {
 		args = append(args, "--ytdl-raw-options=yes-playlist=")
 	}
+
+	args = appendYtdlpRawArgs(args, opts.YtdlpArgs)
 
 	if opts.AudioFile != "" {
 		perFileArgs = append(perFileArgs, "--audio-file="+opts.AudioFile)
@@ -134,6 +141,41 @@ func BuildMPVArgs(opts LaunchOpts) []string {
 		}
 	}
 
+	return args
+}
+
+func appendYtdlpRawArgs(args []string, ytdlpArgs []string) []string {
+	for i := 0; i < len(ytdlpArgs); i++ {
+		raw := strings.TrimSpace(ytdlpArgs[i])
+		if raw == "" {
+			continue
+		}
+		switch raw {
+		case "-4":
+			args = append(args, "--ytdl-raw-options-append=force-ipv4=")
+			continue
+		case "-6":
+			args = append(args, "--ytdl-raw-options-append=force-ipv6=")
+			continue
+		}
+		if strings.HasPrefix(raw, "--") {
+			kv := strings.TrimPrefix(raw, "--")
+			if kv == "" {
+				continue
+			}
+			if strings.Contains(kv, "=") {
+				args = append(args, "--ytdl-raw-options-append="+kv)
+			} else if i+1 < len(ytdlpArgs) && !strings.HasPrefix(strings.TrimSpace(ytdlpArgs[i+1]), "-") {
+				val := strings.TrimSpace(ytdlpArgs[i+1])
+				args = append(args, "--ytdl-raw-options-append="+kv+"="+val)
+				i++
+			} else {
+				args = append(args, "--ytdl-raw-options-append="+kv+"=")
+			}
+		} else if strings.Contains(raw, "=") {
+			args = append(args, "--ytdl-raw-options-append="+raw)
+		}
+	}
 	return args
 }
 

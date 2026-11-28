@@ -149,8 +149,24 @@ func (c *IPCClient) RecordFastSkip(v model.Video) {
 	c.tasteMu.Unlock()
 
 	if artistKey != "" && c.isConnected() && c.ctx.Err() == nil {
-		go c.pruneSkippedArtistFromPlaylist(artistKey)
+		c.spawnPruneSkippedArtist(artistKey)
 	}
+}
+
+func (c *IPCClient) spawnPruneSkippedArtist(artistKey string) {
+	c.subMu.Lock()
+	canSpawn := !c.closed && c.ctx.Err() == nil
+	if canSpawn {
+		c.wg.Add(1)
+	}
+	c.subMu.Unlock()
+	if !canSpawn {
+		return
+	}
+	go func() {
+		defer c.wg.Done()
+		c.pruneSkippedArtistFromPlaylist(artistKey)
+	}()
 }
 
 func (c *IPCClient) pruneSkippedArtistFromPlaylist(artistKey string) {
@@ -192,7 +208,7 @@ func (c *IPCClient) pruneSkippedArtistFromPlaylist(artistKey string) {
 		if it.Index <= curPos {
 			continue
 		}
-		vid := ExtractYouTubeID(it.Filename)
+		vid := c.extractTrackVideoID(it.Filename)
 		if vid != "" && userQ[vid] {
 			continue
 		}
@@ -409,25 +425,281 @@ func (c *IPCClient) appendTrackToMPV(ctx context.Context, tr RadioTrack, appendM
 	return err
 }
 
+const maxResolvedURLMappings = 256
+
+func (c *IPCClient) registerResolvedURL(cdnURL, videoID string) {
+	cdnURL = strings.TrimSpace(cdnURL)
+	vid := ExtractYouTubeID(videoID)
+	if vid == "" {
+		vid = strings.TrimSpace(videoID)
+	}
+	if cdnURL == "" || vid == "" {
+		return
+	}
+	c.metaMu.Lock()
+	defer c.metaMu.Unlock()
+	if c.resolvedURLToID == nil {
+		c.resolvedURLToID = make(map[string]string, 32)
+	}
+	if _, exists := c.resolvedURLToID[cdnURL]; !exists {
+		c.resolvedURLOrder = append(c.resolvedURLOrder, cdnURL)
+		for len(c.resolvedURLOrder) > maxResolvedURLMappings {
+			oldest := c.resolvedURLOrder[0]
+			c.resolvedURLOrder = c.resolvedURLOrder[1:]
+			delete(c.resolvedURLToID, oldest)
+		}
+	}
+	c.resolvedURLToID[cdnURL] = vid
+}
+
+func (c *IPCClient) extractTrackVideoID(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return ""
+	}
+	if vid := ExtractYouTubeID(trimmed); vid != "" {
+		return vid
+	}
+	c.metaMu.RLock()
+	vid := c.resolvedURLToID[trimmed]
+	c.metaMu.RUnlock()
+	return vid
+}
+
+func (c *IPCClient) hasResolvedVideoID(videoID string) bool {
+	if videoID == "" {
+		return false
+	}
+	c.metaMu.RLock()
+	defer c.metaMu.RUnlock()
+	for _, vid := range c.resolvedURLToID {
+		if vid == videoID {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *IPCClient) wantAudioOnlyPlayback() bool {
+	if c.hasManagedProc() {
+		return c.isProcAudioOnly()
+	}
+	c.launchMu.RLock()
+	ao := c.launchDefaults.AudioOnly || c.launchDefaults.Mode == "audio"
+	c.launchMu.RUnlock()
+	return ao
+}
+
+func (c *IPCClient) spawnPrefetchUpcomingTracks(pos, count int) {
+	if c.resolver == nil || pos < 0 || pos+1 >= count {
+		return
+	}
+	c.subMu.Lock()
+	canSpawn := !c.closed && c.ctx.Err() == nil
+	if canSpawn {
+		c.wg.Add(1)
+	}
+	c.subMu.Unlock()
+	if !canSpawn {
+		return
+	}
+	go func() {
+		defer c.wg.Done()
+		c.prefetchUpcomingTracks(pos, count)
+	}()
+}
+
+func (c *IPCClient) spawnMaybeExtendRadio(activeVideoID string) {
+	c.subMu.Lock()
+	canSpawn := !c.closed && c.ctx.Err() == nil
+	if canSpawn {
+		c.wg.Add(1)
+	}
+	c.subMu.Unlock()
+	if !canSpawn {
+		return
+	}
+	go func() {
+		defer c.wg.Done()
+		c.maybeExtendRadio(activeVideoID)
+	}()
+}
+
+func (c *IPCClient) hotSwapPlaylistSlotWithStream(ctx context.Context, targetIdx int, vid, fallbackTitle string, st ResolvedStream, wantAudio bool, requireFutureSlot bool) bool {
+	var cdnURL, audioFile string
+	if wantAudio {
+		cdnURL = strings.TrimSpace(st.AudioURL)
+		if cdnURL == "" {
+			cdnURL = strings.TrimSpace(st.VideoURL)
+		}
+	} else {
+		cdnURL = strings.TrimSpace(st.VideoURL)
+		audioFile = strings.TrimSpace(st.AudioURL)
+	}
+	if cdnURL == "" {
+		return false
+	}
+
+	c.playlistOpMu.Lock()
+	defer c.playlistOpMu.Unlock()
+
+	items, err := c.Playlist(ctx)
+	if err != nil || targetIdx < 0 || targetIdx >= len(items) {
+		return false
+	}
+	curPos := c.Status().PlaylistPos
+	if curPos < 0 {
+		for _, it := range items {
+			if it.Current {
+				curPos = it.Index
+				break
+			}
+		}
+	}
+	if requireFutureSlot && curPos >= 0 && targetIdx <= curPos {
+		return false
+	}
+	targetItem := items[targetIdx]
+	if ExtractYouTubeID(targetItem.Filename) != vid {
+		// Already swapped or playlist changed underneath us.
+		return false
+	}
+
+	title := ""
+	if disp, ok := c.lookupDisplayTitle(vid); ok && disp != "" {
+		title = disp
+	} else if trimmed := strings.TrimSpace(targetItem.Title); trimmed != "" && !strings.HasPrefix(trimmed, "http") {
+		title = trimmed
+	} else {
+		title = strings.TrimSpace(fallbackTitle)
+	}
+
+	c.registerResolvedURL(cdnURL, vid)
+	opts := map[string]any{}
+	if title != "" {
+		opts["force-media-title"] = title
+	}
+	if audioFile != "" {
+		opts["audio-file"] = audioFile
+	}
+
+	var appendErr error
+	if len(opts) > 0 {
+		_, appendErr = c.sendCommand(ctx, "loadfile", cdnURL, "append", -1, opts)
+	}
+	if len(opts) == 0 || appendErr != nil {
+		if ctx.Err() != nil {
+			return false
+		}
+		_, appendErr = c.sendCommand(ctx, "loadfile", cdnURL, "append")
+	}
+	if appendErr != nil {
+		return false
+	}
+
+	newLastIdx := len(items)
+	if newLastIdx > targetIdx {
+		if _, err := c.sendCommand(ctx, "playlist-move", newLastIdx, targetIdx); err != nil {
+			_, _ = c.sendCommand(ctx, "playlist-remove", newLastIdx)
+			return false
+		}
+		_, _ = c.sendCommand(ctx, "playlist-remove", targetIdx+1)
+	}
+	return true
+}
+
+func (c *IPCClient) maybeSwapPlaylistTargetWithCachedCDN(ctx context.Context, cmd string, explicitIdx int) {
+	if c.resolver == nil || !c.isConnected() {
+		return
+	}
+	swapCtx, cancel := context.WithTimeout(ctx, 800*time.Millisecond)
+	defer cancel()
+
+	items, err := c.Playlist(swapCtx)
+	if err != nil || len(items) == 0 {
+		return
+	}
+
+	targetIdx := explicitIdx
+	if targetIdx < 0 {
+		curPos := c.Status().PlaylistPos
+		if curPos < 0 {
+			for _, it := range items {
+				if it.Current {
+					curPos = it.Index
+					break
+				}
+			}
+		}
+		if curPos < 0 {
+			return
+		}
+		switch cmd {
+		case "playlist-next":
+			targetIdx = curPos + 1
+		case "playlist-prev":
+			targetIdx = curPos - 1
+		default:
+			return
+		}
+	}
+	if targetIdx < 0 || targetIdx >= len(items) {
+		return
+	}
+	vid := ExtractYouTubeID(items[targetIdx].Filename)
+	if vid == "" {
+		return
+	}
+	wantAudio := c.wantAudioOnlyPlayback()
+	if st, ok := c.resolver.GetCachedForMode(vid, wantAudio); ok {
+		c.hotSwapPlaylistSlotWithStream(swapCtx, targetIdx, vid, items[targetIdx].Title, st, wantAudio, false)
+	}
+}
+
 func (c *IPCClient) prefetchUpcomingTracks(pos, count int) {
 	if c.resolver == nil || pos < 0 || pos+1 >= count {
 		return
 	}
 	ctx, cancel := context.WithTimeout(c.ctx, 1500*time.Millisecond)
-	defer cancel()
 	items, err := c.Playlist(ctx)
+	cancel()
 	if err != nil {
 		return
 	}
+	wantAudio := c.wantAudioOnlyPlayback()
+
+	type targetSlot struct {
+		idx   int
+		vid   string
+		title string
+	}
+	var targets []targetSlot
 	for offset := 1; offset <= 2; offset++ {
 		idx := pos + offset
 		if idx < 0 || idx >= len(items) {
 			break
 		}
 		vid := ExtractYouTubeID(items[idx].Filename)
-		if vid != "" {
-			c.resolver.Prefetch(c.ctx, model.Video{ID: vid, Title: items[idx].Title})
+		if vid == "" {
+			continue
 		}
+		c.resolver.Prefetch(c.ctx, model.Video{ID: vid, Title: items[idx].Title})
+		targets = append(targets, targetSlot{idx: idx, vid: vid, title: items[idx].Title})
+	}
+
+	for _, t := range targets {
+		if c.ctx.Err() != nil || !c.isConnected() {
+			return
+		}
+		waitCtx, waitCancel := context.WithTimeout(c.ctx, streamResolveLimit)
+		st, ok := c.resolver.WaitOrGetForMode(waitCtx, t.vid, wantAudio, streamResolveLimit)
+		waitCancel()
+		if !ok || c.ctx.Err() != nil || !c.isConnected() {
+			continue
+		}
+		swapCtx, swapCancel := context.WithTimeout(c.ctx, 1500*time.Millisecond)
+		c.hotSwapPlaylistSlotWithStream(swapCtx, t.idx, t.vid, t.title, st, wantAudio, true)
+		swapCancel()
 	}
 }
 
@@ -463,16 +735,16 @@ func (c *IPCClient) maybeExtendRadio(activeVideoID string) {
 	items, err := c.Playlist(ctx)
 	if err == nil {
 		for _, it := range items {
-			if id := ExtractYouTubeID(it.Filename); id != "" {
+			if id := c.extractTrackVideoID(it.Filename); id != "" {
 				recentIDs = append(recentIDs, id)
 			}
 		}
 	}
 
-	seedID := ExtractYouTubeID(activeVideoID)
+	seedID := c.extractTrackVideoID(activeVideoID)
 	if seedID == "" && len(items) > 0 {
 		for i := len(items) - 1; i >= 0; i-- {
-			if id := ExtractYouTubeID(items[i].Filename); id != "" {
+			if id := c.extractTrackVideoID(items[i].Filename); id != "" {
 				seedID = id
 				break
 			}
@@ -516,23 +788,6 @@ func idsToRadioTracks(ids []string) []RadioTrack {
 			continue
 		}
 		out = append(out, RadioTrack{ID: id})
-	}
-	return out
-}
-
-func deduplicateTrackIDs(rawIDs []string, excludeID string) []string {
-	seen := map[string]struct{}{excludeID: {}}
-	var out []string
-	for _, id := range rawIDs {
-		id = strings.TrimSpace(id)
-		if id == "" {
-			continue
-		}
-		if _, dup := seen[id]; dup {
-			continue
-		}
-		seen[id] = struct{}{}
-		out = append(out, id)
 	}
 	return out
 }

@@ -14,14 +14,19 @@ import (
 	"time"
 
 	"github.com/e12jassir/iutui/internal/model"
+	"github.com/e12jassir/iutui/internal/platform"
 )
 
 const (
 	streamCacheTTL            = 15 * time.Minute
 	streamResolveLimit        = 12 * time.Second
+	defaultPrefetchLimit      = 4
+	maxPrefetchLimit          = 8
 	defaultInnerTubePlayerURL = "https://www.youtube.com/youtubei/v1/player?prettyPrint=false"
 	androidVRUserAgent        = "com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip"
 	iosPlayerUserAgent        = "com.google.ios.youtube/20.10.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X;)"
+	fastAndroidExtractorArgs  = "youtube:player_client=android;player_skip=webpage,configs"
+	fastHDExtractorArgs       = "youtube:player_skip=configs"
 )
 
 // ResolvedStream holds pre-resolved direct CDN stream URLs from yt-dlp or InnerTube.
@@ -36,19 +41,28 @@ type ResolvedStream struct {
 type StreamResolver struct {
 	ytdlpBin        string
 	cookieJar       string
+	extraArgs       []string
 	quality         int
 	audioOnly       bool
+	prefetchLimit   int
 	generation      uint64
+	genCtx          context.Context
+	genCancel       context.CancelFunc
 	enableInnerTube bool
 	innerTubeURL    string
 	httpClient      *http.Client
 
-	mu         sync.RWMutex
-	cache      map[string]ResolvedStream
-	audioCache map[string]ResolvedStream
-	inFlight   map[string]bool
-	inFlightCh map[string]chan struct{}
-	sem        chan struct{}
+	mu               sync.RWMutex
+	cache            map[string]ResolvedStream
+	audioCache       map[string]ResolvedStream
+	inFlight         map[string]bool
+	inFlightCh       map[string]chan struct{}
+	inFlightAudio    map[string]bool
+	promoted         map[string]bool
+	promotedCh       map[string]chan struct{}
+	interactiveCount int
+	interactiveIdle  chan struct{}
+	sem              chan struct{}
 }
 
 // NewStreamResolver constructs a StreamResolver bounded to 4 concurrent background yt-dlp lookups.
@@ -59,9 +73,13 @@ func NewStreamResolver(ytdlpBin string, quality int) *StreamResolver {
 	if ytdlpBin == "" {
 		ytdlpBin = "yt-dlp"
 	}
+	genCtx, genCancel := context.WithCancel(context.Background())
 	return &StreamResolver{
 		ytdlpBin:        ytdlpBin,
 		quality:         quality,
+		prefetchLimit:   defaultPrefetchLimit,
+		genCtx:          genCtx,
+		genCancel:       genCancel,
 		enableInnerTube: false,
 		innerTubeURL:    defaultInnerTubePlayerURL,
 		httpClient:      &http.Client{Timeout: 5 * time.Second},
@@ -69,7 +87,10 @@ func NewStreamResolver(ytdlpBin string, quality int) *StreamResolver {
 		audioCache:      make(map[string]ResolvedStream),
 		inFlight:        make(map[string]bool),
 		inFlightCh:      make(map[string]chan struct{}),
-		sem:             make(chan struct{}, 4),
+		inFlightAudio:   make(map[string]bool),
+		promoted:        make(map[string]bool),
+		promotedCh:      make(map[string]chan struct{}),
+		sem:             make(chan struct{}, defaultPrefetchLimit),
 	}
 }
 
@@ -94,6 +115,73 @@ func (r *StreamResolver) SetCookieJar(path string) {
 	r.mu.Unlock()
 }
 
+// SetExtraArgs configures extra yt-dlp CLI arguments.
+func (r *StreamResolver) SetExtraArgs(args []string) {
+	if r == nil {
+		return
+	}
+	var copied []string
+	if len(args) > 0 {
+		copied = make([]string, 0, len(args))
+		for _, a := range args {
+			if trimmed := strings.TrimSpace(a); trimmed != "" {
+				copied = append(copied, trimmed)
+			}
+		}
+	}
+	r.mu.Lock()
+	r.extraArgs = copied
+	r.mu.Unlock()
+}
+
+// SetPrefetchLimit configures the maximum concurrent background Prefetch lookups (0 disables Prefetch).
+func (r *StreamResolver) SetPrefetchLimit(n int) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if n <= 0 {
+		r.prefetchLimit = 0
+		return
+	}
+	limit := min(n, maxPrefetchLimit)
+	r.prefetchLimit = limit
+	if cap(r.sem) != limit {
+		r.sem = make(chan struct{}, limit)
+	}
+}
+
+func (r *StreamResolver) resetGenerationLocked() {
+	r.generation++
+	if r.genCancel != nil {
+		r.genCancel()
+	}
+	r.genCtx, r.genCancel = context.WithCancel(context.Background())
+	r.inFlight = make(map[string]bool)
+	r.inFlightCh = make(map[string]chan struct{})
+	r.inFlightAudio = make(map[string]bool)
+	r.promoted = make(map[string]bool)
+	r.promotedCh = make(map[string]chan struct{})
+}
+
+func (r *StreamResolver) beginInteractiveLocked() {
+	r.interactiveCount++
+	if r.interactiveIdle == nil {
+		r.interactiveIdle = make(chan struct{})
+	}
+}
+
+func (r *StreamResolver) endInteractiveLocked() {
+	if r.interactiveCount > 0 {
+		r.interactiveCount--
+	}
+	if r.interactiveCount == 0 && r.interactiveIdle != nil {
+		close(r.interactiveIdle)
+		r.interactiveIdle = nil
+	}
+}
+
 // SetYTDLPBin updates the yt-dlp binary path when non-empty.
 func (r *StreamResolver) SetYTDLPBin(bin string) {
 	if r == nil || bin == "" {
@@ -111,10 +199,8 @@ func (r *StreamResolver) SetQuality(quality int) {
 	}
 	r.mu.Lock()
 	r.quality = quality
-	r.generation++
 	r.cache = make(map[string]ResolvedStream)
-	r.inFlight = make(map[string]bool)
-	r.inFlightCh = make(map[string]chan struct{})
+	r.resetGenerationLocked()
 	r.mu.Unlock()
 }
 
@@ -126,9 +212,7 @@ func (r *StreamResolver) SetAudioOnly(audioOnly bool) {
 	r.mu.Lock()
 	if r.audioOnly != audioOnly {
 		r.audioOnly = audioOnly
-		r.generation++
-		r.inFlight = make(map[string]bool)
-		r.inFlightCh = make(map[string]chan struct{})
+		r.resetGenerationLocked()
 	}
 	r.mu.Unlock()
 }
@@ -182,9 +266,142 @@ func (r *StreamResolver) WaitOrGet(ctx context.Context, videoID string, maxWait 
 }
 
 // WaitOrGetForMode returns a cached or resolved stream matching audioOnly mode.
-// Interactive playback lookups resolve directly on a priority lane without
-// waiting behind background Prefetch semaphore slots.
+// Interactive playback lookups coalesce in-flight resolutions and run on a
+// priority lane decoupled from maxWait while pausing new background Prefetches.
 func (r *StreamResolver) WaitOrGetForMode(ctx context.Context, videoID string, audioOnly bool, maxWait time.Duration) (ResolvedStream, bool) {
+	if r == nil || videoID == "" {
+		return ResolvedStream{}, false
+	}
+	if seed := model.MixSeedVideoID(videoID); seed != "" {
+		videoID = seed
+	}
+	if st, ok := r.GetCachedForMode(videoID, audioOnly); ok {
+		return st, true
+	}
+	if maxWait <= 0 {
+		return ResolvedStream{}, false
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	r.mu.Lock()
+	targetMap := r.cache
+	if audioOnly {
+		targetMap = r.audioCache
+	}
+	if cached, ok := targetMap[videoID]; ok && !time.Now().After(cached.ExpiresAt) {
+		r.mu.Unlock()
+		return cached, true
+	}
+
+	generation := r.generation
+	genCtx := r.genCtx
+	if genCtx == nil {
+		genCtx, r.genCancel = context.WithCancel(context.Background())
+		r.genCtx = genCtx
+	}
+
+	if ch, ok := r.inFlightCh[videoID]; ok && r.inFlightAudio[videoID] == audioOnly {
+		r.promoted[videoID] = true
+		if pch, pok := r.promotedCh[videoID]; pok {
+			close(pch)
+			delete(r.promotedCh, videoID)
+		}
+		r.beginInteractiveLocked()
+		r.mu.Unlock()
+
+		defer func() {
+			r.mu.Lock()
+			r.endInteractiveLocked()
+			r.mu.Unlock()
+		}()
+
+		timer := time.NewTimer(maxWait)
+		defer timer.Stop()
+
+		select {
+		case <-ch:
+			return r.GetCachedForMode(videoID, audioOnly)
+		case <-timer.C:
+			return ResolvedStream{}, false
+		case <-ctx.Done():
+			return ResolvedStream{}, false
+		case <-genCtx.Done():
+			return ResolvedStream{}, false
+		}
+	}
+
+	done := make(chan struct{})
+	r.inFlight[videoID] = true
+	r.inFlightCh[videoID] = done
+	r.inFlightAudio[videoID] = audioOnly
+	r.promoted[videoID] = true
+	r.beginInteractiveLocked()
+	r.mu.Unlock()
+
+	go func() {
+		defer func() {
+			r.mu.Lock()
+			if r.generation == generation && r.inFlightCh[videoID] == done {
+				delete(r.inFlight, videoID)
+				delete(r.inFlightCh, videoID)
+				delete(r.inFlightAudio, videoID)
+				delete(r.promoted, videoID)
+				delete(r.promotedCh, videoID)
+			}
+			r.mu.Unlock()
+			close(done)
+		}()
+
+		lookupCtx, cancel := context.WithTimeout(genCtx, streamResolveLimit)
+		defer cancel()
+
+		st, resolved := r.resolveForMode(lookupCtx, videoID, audioOnly)
+		if !resolved {
+			return
+		}
+		r.mu.Lock()
+		if generation == r.generation {
+			if audioOnly {
+				if r.audioCache == nil {
+					r.audioCache = make(map[string]ResolvedStream)
+				}
+				r.audioCache[videoID] = st
+			} else {
+				if r.cache == nil {
+					r.cache = make(map[string]ResolvedStream)
+				}
+				r.cache[videoID] = st
+			}
+		}
+		r.mu.Unlock()
+	}()
+
+	defer func() {
+		r.mu.Lock()
+		r.endInteractiveLocked()
+		r.mu.Unlock()
+	}()
+
+	timer := time.NewTimer(maxWait)
+	defer timer.Stop()
+
+	select {
+	case <-done:
+		return r.GetCachedForMode(videoID, audioOnly)
+	case <-timer.C:
+		return ResolvedStream{}, false
+	case <-ctx.Done():
+		return ResolvedStream{}, false
+	case <-genCtx.Done():
+		return ResolvedStream{}, false
+	}
+}
+
+// WaitForPrefetch waits up to maxWait for an already-queued background Prefetch
+// without promoting it to interactive priority or spawning new subprocesses.
+func (r *StreamResolver) WaitForPrefetch(ctx context.Context, videoID string, audioOnly bool, maxWait time.Duration) (ResolvedStream, bool) {
 	if r == nil || videoID == "" {
 		return ResolvedStream{}, false
 	}
@@ -203,15 +420,17 @@ func (r *StreamResolver) WaitOrGetForMode(ctx context.Context, videoID string, a
 
 	r.mu.RLock()
 	ch, ok := r.inFlightCh[videoID]
-	inFlightMatchesMode := r.audioOnly == audioOnly
-	generation := r.generation
-	useInnerTube := r.enableInnerTube
+	matches := r.inFlightAudio[videoID] == audioOnly
+	genCtx := r.genCtx
 	r.mu.RUnlock()
+	if !ok || !matches {
+		return r.GetCachedForMode(videoID, audioOnly)
+	}
 
-	if ok && inFlightMatchesMode {
-		timer := time.NewTimer(maxWait)
-		defer timer.Stop()
+	timer := time.NewTimer(maxWait)
+	defer timer.Stop()
 
+	if genCtx != nil {
 		select {
 		case <-ch:
 			return r.GetCachedForMode(videoID, audioOnly)
@@ -219,41 +438,31 @@ func (r *StreamResolver) WaitOrGetForMode(ctx context.Context, videoID string, a
 			return ResolvedStream{}, false
 		case <-ctx.Done():
 			return ResolvedStream{}, false
+		case <-genCtx.Done():
+			return ResolvedStream{}, false
 		}
 	}
-
-	if !audioOnly && !useInnerTube {
-		return r.GetCached(videoID)
-	}
-
-	// Priority lane: interactive Play resolves immediately without blocking on Prefetch sem.
-	lookupCtx, cancel := context.WithTimeout(ctx, maxWait)
-	defer cancel()
-
-	st, resolved := r.resolveForMode(lookupCtx, videoID, audioOnly)
-	if !resolved {
+	select {
+	case <-ch:
+		return r.GetCachedForMode(videoID, audioOnly)
+	case <-timer.C:
+		return ResolvedStream{}, false
+	case <-ctx.Done():
 		return ResolvedStream{}, false
 	}
-	r.mu.Lock()
-	if generation == r.generation {
-		if audioOnly {
-			if r.audioCache == nil {
-				r.audioCache = make(map[string]ResolvedStream)
-			}
-			r.audioCache[videoID] = st
-		} else {
-			if r.cache == nil {
-				r.cache = make(map[string]ResolvedStream)
-			}
-			r.cache[videoID] = st
-		}
-	}
-	r.mu.Unlock()
-	return st, true
 }
 
 // Prefetch resolves stream URLs for v in the background if not already cached or in flight.
 func (r *StreamResolver) Prefetch(ctx context.Context, v model.Video) {
+	r.prefetchInternal(ctx, v, nil)
+}
+
+// PrefetchForMode resolves stream URLs for v in the specified audioOnly mode in the background.
+func (r *StreamResolver) PrefetchForMode(ctx context.Context, v model.Video, audioOnly bool) {
+	r.prefetchInternal(ctx, v, &audioOnly)
+}
+
+func (r *StreamResolver) prefetchInternal(ctx context.Context, v model.Video, modeOverride *bool) {
 	if r == nil || v.ID == "" {
 		return
 	}
@@ -268,7 +477,14 @@ func (r *StreamResolver) Prefetch(ctx context.Context, v model.Video) {
 	}
 
 	r.mu.Lock()
+	if r.prefetchLimit <= 0 {
+		r.mu.Unlock()
+		return
+	}
 	wantAudio := r.audioOnly
+	if modeOverride != nil {
+		wantAudio = *modeOverride
+	}
 	targetMap := r.cache
 	if wantAudio {
 		targetMap = r.audioCache
@@ -277,35 +493,117 @@ func (r *StreamResolver) Prefetch(ctx context.Context, v model.Video) {
 		r.mu.Unlock()
 		return
 	}
-	if r.inFlight[v.ID] {
+	if r.inFlight[v.ID] && r.inFlightAudio[v.ID] == wantAudio {
 		r.mu.Unlock()
 		return
 	}
 	done := make(chan struct{})
+	promCh := make(chan struct{})
+	if r.inFlightAudio == nil {
+		r.inFlightAudio = make(map[string]bool)
+	}
+	if r.promoted == nil {
+		r.promoted = make(map[string]bool)
+	}
+	if r.promotedCh == nil {
+		r.promotedCh = make(map[string]chan struct{})
+	}
+	if r.genCtx == nil {
+		r.genCtx, r.genCancel = context.WithCancel(context.Background())
+	}
 	r.inFlight[v.ID] = true
 	r.inFlightCh[v.ID] = done
+	r.inFlightAudio[v.ID] = wantAudio
+	r.promoted[v.ID] = false
+	r.promotedCh[v.ID] = promCh
 	generation := r.generation
+	genCtx := r.genCtx
+	sem := r.sem
 	r.mu.Unlock()
+
+	waitForInteractiveIdle := func() bool {
+		for {
+			r.mu.RLock()
+			waitIdle := r.interactiveIdle
+			isPromoted := r.promoted[v.ID]
+			r.mu.RUnlock()
+			if waitIdle == nil || isPromoted {
+				return true
+			}
+			select {
+			case <-waitIdle:
+			case <-promCh:
+				return true
+			case <-ctx.Done():
+				return false
+			case <-genCtx.Done():
+				return false
+			}
+		}
+	}
 
 	go func() {
 		defer func() {
 			r.mu.Lock()
-			if r.generation == generation {
+			if r.generation == generation && r.inFlightCh[v.ID] == done {
 				delete(r.inFlight, v.ID)
 				delete(r.inFlightCh, v.ID)
+				delete(r.inFlightAudio, v.ID)
+				delete(r.promoted, v.ID)
+				delete(r.promotedCh, v.ID)
 			}
 			r.mu.Unlock()
 			close(done)
 		}()
 
-		select {
-		case r.sem <- struct{}{}:
-			defer func() { <-r.sem }()
-		case <-ctx.Done():
+		if !waitForInteractiveIdle() {
 			return
 		}
 
-		lookupCtx, cancel := context.WithTimeout(ctx, streamResolveLimit)
+		r.mu.RLock()
+		isPromoted := r.promoted[v.ID]
+		r.mu.RUnlock()
+
+		if !isPromoted {
+			select {
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+			case <-promCh:
+				isPromoted = true
+			case <-ctx.Done():
+				return
+			case <-genCtx.Done():
+				return
+			}
+			if !isPromoted && !waitForInteractiveIdle() {
+				return
+			}
+		}
+
+		r.mu.RLock()
+		isPromoted = r.promoted[v.ID]
+		r.mu.RUnlock()
+
+		baseCtx := genCtx
+		var stopCtxWatch func() bool
+		var mergeCancel context.CancelFunc
+		if !isPromoted && ctx != context.Background() && ctx != context.TODO() {
+			if ctx.Err() != nil {
+				return
+			}
+			baseCtx, mergeCancel = context.WithCancel(genCtx)
+			stopCtxWatch = context.AfterFunc(ctx, mergeCancel)
+		}
+		if mergeCancel != nil {
+			defer func() {
+				if stopCtxWatch != nil {
+					stopCtxWatch()
+				}
+				mergeCancel()
+			}()
+		}
+
+		lookupCtx, cancel := context.WithTimeout(baseCtx, streamResolveLimit)
 		defer cancel()
 
 		st, ok := r.resolveForMode(lookupCtx, v.ID, wantAudio)
@@ -343,6 +641,7 @@ func (r *StreamResolver) resolveForMode(ctx context.Context, videoID string, aud
 	q := r.quality
 	bin := r.ytdlpBin
 	cookieJar := r.cookieJar
+	extraArgs := append([]string(nil), r.extraArgs...)
 	useInnerTube := r.enableInnerTube
 	endpoint := r.innerTubeURL
 	hc := r.httpClient
@@ -383,14 +682,27 @@ func (r *StreamResolver) resolveForMode(ctx context.Context, videoID string, aud
 		}
 	}
 
-	// Attempt 1: Fast cookieless android yt-dlp fallback.
-	if st, ok := normalizeResult(runResolve(ctx, bin, videoID, fmtStr, "")); ok {
-		return st, true
+	if audioOnly || (q > 0 && q <= 480) {
+		// Attempt 1: Fast cookieless android client skipping webpage + configs (~0.6s-4.5s, no JS/Deno).
+		if st, ok := normalizeResult(runResolve(ctx, bin, videoID, fmtStr, "", fastAndroidExtractorArgs, extraArgs)); ok {
+			return st, true
+		}
+		// Attempt 2: Cookieless fallback skipping configs when android client rejects the video.
+		if ctx.Err() == nil {
+			if st, ok := normalizeResult(runResolve(ctx, bin, videoID, fmtStr, "", fastHDExtractorArgs, extraArgs)); ok {
+				return st, true
+			}
+		}
+	} else {
+		// Attempt 1 (HD/4K): Cookieless lookup skipping redundant config roundtrips while preserving >=720p.
+		if st, ok := normalizeResult(runResolve(ctx, bin, videoID, fmtStr, "", fastHDExtractorArgs, extraArgs)); ok {
+			return st, true
+		}
 	}
 
-	// Attempt 2: Retry with cookies only for restricted/private videos when valid.
+	// Final attempt: Retry with cookies only for restricted/private videos when valid.
 	if ctx.Err() == nil && isValidCookieJar(cookieJar) {
-		return normalizeResult(runResolve(ctx, bin, videoID, fmtStr, cookieJar))
+		return normalizeResult(runResolve(ctx, bin, videoID, fmtStr, cookieJar, "", extraArgs))
 	}
 	return ResolvedStream{}, false
 }
@@ -575,7 +887,7 @@ func pickInnerTubeStreams(resp innerTubePlayerResp, audioOnly bool, maxHeight in
 	return ResolvedStream{}, false
 }
 
-func runResolve(ctx context.Context, bin, videoID, fmtStr, cookieJar string) (ResolvedStream, bool) {
+func runResolve(ctx context.Context, bin, videoID, fmtStr, cookieJar, extractorArgs string, extraArgs []string) (ResolvedStream, bool) {
 	target := "https://www.youtube.com/watch?v=" + videoID
 
 	args := []string{
@@ -584,12 +896,27 @@ func runResolve(ctx context.Context, bin, videoID, fmtStr, cookieJar string) (Re
 		"--no-check-certificates",
 		"--socket-timeout", "8",
 	}
+	if extractorArgs != "" {
+		args = append(args, "--extractor-args", extractorArgs)
+	}
 	if cookieJar != "" {
 		args = append(args, "--cookies", cookieJar)
+	}
+	if len(extraArgs) > 0 {
+		args = append(args, extraArgs...)
 	}
 	args = append(args, "-S", "proto:https", "-f", fmtStr, "-g", target)
 
 	cmd := exec.CommandContext(ctx, bin, args...)
+	platform.SetProcessGroup(cmd)
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		return platform.KillProcessGroup(cmd.Process.Pid)
+	}
+	cmd.WaitDelay = 100 * time.Millisecond
+
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	if err := cmd.Run(); err != nil {

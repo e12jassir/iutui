@@ -1,16 +1,23 @@
 package player
 
 import (
+	"bufio"
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/e12jassir/iutui/internal/platform"
 )
+
+var standaloneReqID atomic.Int64
 
 // Status represents the current mpv playback state.
 type Status struct {
@@ -86,25 +93,60 @@ func SendCommand(args ...any) (string, error) {
 	}
 	defer conn.Close()
 
+	reader := bufio.NewReaderSize(conn, 64*1024)
+	return sendCommandOnConn(conn, reader, args...)
+}
+
+func sendCommandOnConn(conn net.Conn, reader *bufio.Reader, args ...any) (string, error) {
+	reqID := standaloneReqID.Add(1)
 	payload, err := json.Marshal(map[string]any{
-		"command": args,
+		"command":    args,
+		"request_id": reqID,
 	})
 	if err != nil {
 		return "", err
 	}
 
-	conn.SetDeadline(time.Now().Add(800 * time.Millisecond))
+	_ = conn.SetDeadline(time.Now().Add(800 * time.Millisecond))
 	if _, err := conn.Write(append(payload, '\n')); err != nil {
 		return "", err
 	}
 
-	buf := make([]byte, 8192)
-	n, err := conn.Read(buf)
-	if err != nil {
-		return "", err
+	for {
+		line, err := reader.ReadBytes('\n')
+		trimmed := bytes.TrimSpace(line)
+		if len(trimmed) > 0 {
+			var env struct {
+				Event     string `json:"event"`
+				RequestID *int64 `json:"request_id"`
+				Error     string `json:"error"`
+			}
+			if jErr := json.Unmarshal(trimmed, &env); jErr == nil {
+				if env.Event != "" {
+					// Ignore asynchronous mpv events interleaved on the socket.
+					if err != nil {
+						return "", err
+					}
+					continue
+				}
+				if env.RequestID != nil {
+					if *env.RequestID == reqID {
+						return string(line), nil
+					}
+					if err != nil {
+						return "", err
+					}
+					continue
+				}
+				if env.Error != "" {
+					return string(line), nil
+				}
+			}
+		}
+		if err != nil {
+			return "", err
+		}
 	}
-
-	return string(buf[:n]), nil
 }
 
 // TogglePause toggles playback pause state in mpv.
@@ -125,12 +167,6 @@ func Prev() error {
 	return err
 }
 
-// AddVolume changes playback volume by delta (e.g. +5, -5).
-func AddVolume(delta float64) error {
-	_, err := SendCommand("add", "volume", delta)
-	return err
-}
-
 // Seek seeks relative seconds in mpv.
 func Seek(seconds int) error {
 	_, err := SendCommand("seek", fmt.Sprintf("%d", seconds))
@@ -144,9 +180,21 @@ func GetStatus() (Status, error) {
 		return Status{IsRunning: false}, nil
 	}
 
-	// Helper to get property
+	conn, err := net.DialTimeout("unix", sockPath, 500*time.Millisecond)
+	if err != nil {
+		if errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ENOENT) {
+			// Stale socket left over by a dead mpv process; remove it so FindSocket stays clean.
+			_ = os.Remove(sockPath)
+		}
+		return Status{IsRunning: false, PlaylistPos: -1}, nil
+	}
+	defer conn.Close()
+
+	reader := bufio.NewReaderSize(conn, 64*1024)
+
+	// Helper to get property over the established connection.
 	getProp := func(prop string) (any, error) {
-		res, err := SendCommand("get_property", prop)
+		res, err := sendCommandOnConn(conn, reader, "get_property", prop)
 		if err != nil {
 			return nil, err
 		}
@@ -162,11 +210,9 @@ func GetStatus() (Status, error) {
 
 	st := Status{IsRunning: false, PlaylistPos: -1}
 
-	// Verify mpv actually responds to an IPC property query before marking IsRunning = true
+	// Verify mpv actually responds to an IPC property query before marking IsRunning = true.
 	paused, err := getProp("pause")
 	if err != nil {
-		// Stale socket left over by a dead mpv process; remove it so FindSocket stays clean
-		_ = os.Remove(sockPath)
 		return Status{IsRunning: false, PlaylistPos: -1}, nil
 	}
 

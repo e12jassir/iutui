@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/e12jassir/iutui/internal/model"
@@ -455,5 +456,60 @@ func TestRadioClient_FetchMultiSeedRadio(t *testing.T) {
 	}
 	if shared.ConsensusCount != 2 {
 		t.Fatalf("expected sharedSong1 ConsensusCount=2 across primary+extra seed, got %+v", tracks)
+	}
+}
+
+func TestRadioClient_DefaultCacheCookiesAndConcurrentSetCookiesPath(t *testing.T) {
+	cacheHome := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", cacheHome)
+
+	rc := NewRadioClient()
+	wantDefault := filepath.Join(cacheHome, "iutui", "cookies.txt")
+	if rc.cookiesPath != wantDefault {
+		t.Fatalf("NewRadioClient() default cookiesPath = %q, want %q", rc.cookiesPath, wantDefault)
+	}
+
+	cookiePath := filepath.Join(t.TempDir(), "updated-cookies.txt")
+	cookieContent := "# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t0\tSAPISID\tdynamic_sapisid\n"
+	if err := os.WriteFile(cookiePath, []byte(cookieContent), 0o600); err != nil {
+		t.Fatalf("write cookies: %v", err)
+	}
+
+	var mu sync.Mutex
+	var sawDynamicAuth bool
+	ytmSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.Header.Get("Cookie"), "SAPISID=dynamic_sapisid") && strings.HasPrefix(r.Header.Get("Authorization"), "SAPISIDHASH ") {
+			mu.Lock()
+			sawDynamicAuth = true
+			mu.Unlock()
+		}
+		_, _ = w.Write([]byte(`{
+			"contents": {"playlistPanelRenderer": {"contents": [
+				{"playlistPanelVideoRenderer": {"videoId": "seedDyn0001", "title": {"runs": [{"text": "Song"}]}, "longBylineText": {"runs": [{"text": "Artist"}]}, "lengthText": {"runs": [{"text": "3:30"}]}, "navigationEndpoint": {"watchEndpoint": {"watchEndpointMusicSupportedConfigs": {"watchEndpointMusicConfig": {"musicVideoType": "MUSIC_VIDEO_TYPE_ATV"}}}}}}
+			]}}
+		}`))
+	}))
+	defer ytmSrv.Close()
+
+	rc = NewRadioClient(WithRadioBaseURL(ytmSrv.URL))
+	rc.SetCookiesPath(cookiePath)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 6; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			if idx%2 == 0 {
+				rc.SetCookiesPath(cookiePath)
+			}
+			_, _ = rc.FetchRadio(context.Background(), "seedDyn0001", 10)
+		}(i)
+	}
+	wg.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if !sawDynamicAuth {
+		t.Fatal("expected SetCookiesPath to supply SAPISID cookies to FetchRadio")
 	}
 }

@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/e12jassir/iutui/internal/model"
+	"github.com/e12jassir/iutui/internal/platform"
+	"strconv"
 )
 
 func writeFakeYTDLP(t *testing.T, body string) string {
@@ -793,6 +795,345 @@ func TestStreamResolver_DisablesUnverifiedInnerTubeByDefaultAndInvalidatesCache(
 		}
 		if _, ok := r.GetCachedForMode("badVid00001", true); ok {
 			t.Fatal("expected audio cache entry to be evicted after Invalidate")
+		}
+	})
+}
+
+func TestStreamResolver_ProcessGroupCleanupOnTimeout(t *testing.T) {
+	tmpDir := t.TempDir()
+	childPIDFile := filepath.Join(tmpDir, "deno-child.pid")
+	bin := writeFakeYTDLP(t, fmt.Sprintf(`
+sleep 5 &
+child=$!
+printf '%%s\n' "$child" > %q
+wait "$child"
+`, childPIDFile))
+
+	r := NewStreamResolver(bin, 720)
+	ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
+	defer cancel()
+
+	if _, ok := r.resolve(ctx, "orphanVid01"); ok {
+		t.Fatal("expected resolve to time out")
+	}
+
+	rawPID, err := os.ReadFile(childPIDFile)
+	if err != nil {
+		t.Fatalf("read child pid: %v", err)
+	}
+	childPID, err := strconv.Atoi(strings.TrimSpace(string(rawPID)))
+	if err != nil || childPID <= 0 {
+		t.Fatalf("invalid child pid %q: %v", string(rawPID), err)
+	}
+	t.Cleanup(func() {
+		_ = platform.KillProcessGroup(childPID)
+	})
+
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for platform.ProcessAlive(childPID) && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if platform.ProcessAlive(childPID) {
+		t.Fatalf("expected child process %d in yt-dlp process group to be killed on ctx timeout", childPID)
+	}
+}
+
+func TestStreamResolver_ExtractorArgsFastPathAndFallbacks(t *testing.T) {
+	t.Run("audio-only and <=480p try android webpage,configs skip first, then configs skip, then cookies", func(t *testing.T) {
+		for _, tc := range []struct {
+			name      string
+			audioOnly bool
+			quality   int
+		}{
+			{name: "audio-only", audioOnly: true, quality: 720},
+			{name: "480p video", audioOnly: false, quality: 480},
+			{name: "360p video", audioOnly: false, quality: 360},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				tmpDir := t.TempDir()
+				cookieFile := filepath.Join(tmpDir, "cookies.txt")
+				if err := os.WriteFile(cookieFile, []byte("# Netscape HTTP Cookie File\n"), 0o600); err != nil {
+					t.Fatalf("write cookies: %v", err)
+				}
+
+				// Subcase 1: Attempt 1 (android fast-path) succeeds immediately.
+				calls1 := filepath.Join(tmpDir, "calls1.log")
+				bin1 := writeFakeYTDLP(t, fmt.Sprintf(`
+printf -- '---CALL---\n' >> %q
+printf '%%s\n' "$@" >> %q
+printf 'https://cdn.example.com/fast-android.m4a\n'
+`, calls1, calls1))
+				r1 := NewStreamResolver(bin1, tc.quality)
+				r1.SetCookieJar(cookieFile)
+				if _, ok := r1.resolveForMode(context.Background(), "fastVid001", tc.audioOnly); !ok {
+					t.Fatal("expected attempt 1 to succeed")
+				}
+				raw1, _ := os.ReadFile(calls1)
+				if strings.Count(string(raw1), "---CALL---") != 1 {
+					t.Fatalf("expected 1 call, got:\n%s", string(raw1))
+				}
+				if !strings.Contains(string(raw1), "--extractor-args\nyoutube:player_client=android;player_skip=webpage,configs\n") {
+					t.Fatalf("expected android fast-path extractor-args on attempt 1, got:\n%s", string(raw1))
+				}
+
+				// Subcase 2: Attempt 1 fails -> Attempt 2 (cookieless player_skip=configs) -> Attempt 3 (--cookies).
+				calls3 := filepath.Join(tmpDir, "calls3.log")
+				bin3 := writeFakeYTDLP(t, fmt.Sprintf(`
+printf -- '---CALL---\n' >> %q
+printf '%%s\n' "$@" >> %q
+for a in "$@"; do
+  if [ "$a" = "--cookies" ]; then
+    printf 'https://cdn.example.com/cookie-ok.m4a\n'
+    exit 0
+  fi
+done
+exit 1
+`, calls3, calls3))
+				r3 := NewStreamResolver(bin3, tc.quality)
+				r3.SetCookieJar(cookieFile)
+				st, ok := r3.resolveForMode(context.Background(), "restricted01", tc.audioOnly)
+				if !ok {
+					t.Fatalf("expected 3rd attempt with cookies to succeed, got st=%+v", st)
+				}
+				raw3, _ := os.ReadFile(calls3)
+				parts := strings.Split(strings.TrimPrefix(string(raw3), "---CALL---\n"), "---CALL---\n")
+				if len(parts) != 3 {
+					t.Fatalf("expected 3 attempts (android -> configs -> cookies), got %d:\n%s", len(parts), string(raw3))
+				}
+				if !strings.Contains(parts[0], "youtube:player_client=android;player_skip=webpage,configs") || strings.Contains(parts[0], "--cookies") {
+					t.Errorf("attempt 1 mismatch:\n%s", parts[0])
+				}
+				if !strings.Contains(parts[1], "--extractor-args\nyoutube:player_skip=configs\n") || strings.Contains(parts[1], "player_client=android") || strings.Contains(parts[1], "--cookies") {
+					t.Errorf("attempt 2 mismatch:\n%s", parts[1])
+				}
+				if !strings.Contains(parts[2], "--cookies\n"+cookieFile+"\n") {
+					t.Errorf("attempt 3 mismatch:\n%s", parts[2])
+				}
+			})
+		}
+	})
+
+	t.Run("HD/4K video uses player_skip=configs cookieless then cookies", func(t *testing.T) {
+		for _, q := range []int{720, 1080, 0} {
+			tmpDir := t.TempDir()
+			callsFile := filepath.Join(tmpDir, "calls.log")
+			bin := writeFakeYTDLP(t, fmt.Sprintf(`
+printf '%%s\n' "$@" > %q
+printf 'https://cdn.example.com/hd.mp4\nhttps://cdn.example.com/hd.m4a\n'
+`, callsFile))
+			r := NewStreamResolver(bin, q)
+			if _, ok := r.resolveForMode(context.Background(), "hdVid000001", false); !ok {
+				t.Fatalf("resolveForMode(q=%d) failed", q)
+			}
+			raw, _ := os.ReadFile(callsFile)
+			if !strings.Contains(string(raw), "--extractor-args\nyoutube:player_skip=configs\n") {
+				t.Fatalf("expected youtube:player_skip=configs for q=%d, got:\n%s", q, string(raw))
+			}
+			if strings.Contains(string(raw), "player_client=android") {
+				t.Fatalf("must not use android client for HD q=%d:\n%s", q, string(raw))
+			}
+		}
+	})
+}
+
+func TestStreamResolver_SetExtraArgs(t *testing.T) {
+	var nilResolver *StreamResolver
+	nilResolver.SetExtraArgs([]string{"--geo-bypass"})
+
+	argsFile := filepath.Join(t.TempDir(), "extra-args.txt")
+	bin := writeFakeYTDLP(t, fmt.Sprintf(`
+printf '%%s\n' "$@" > %q
+printf 'https://cdn.example.com/extra.mp4\n'
+`, argsFile))
+
+	r := NewStreamResolver(bin, 720)
+	extra := []string{"--geo-bypass", "--proxy", "http://127.0.0.1:8080"}
+	r.SetExtraArgs(extra)
+	extra[0] = "--mutated"
+
+	if _, ok := r.resolve(context.Background(), "extraVid001"); !ok {
+		t.Fatal("resolve failed")
+	}
+	raw, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("read args: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
+	if lines[len(lines)-1] != "https://www.youtube.com/watch?v=extraVid001" {
+		t.Fatalf("expected target URL to remain last arg, got %v", lines)
+	}
+	gotStr := string(raw)
+	if !strings.Contains(gotStr, "--geo-bypass\n--proxy\nhttp://127.0.0.1:8080\n") {
+		t.Fatalf("expected extra args in yt-dlp invocation, got:\n%s", gotStr)
+	}
+}
+
+func TestStreamResolver_SetPrefetchLimitAndInteractivePriority(t *testing.T) {
+	t.Run("SetPrefetchLimit(0) disables background Prefetch completely", func(t *testing.T) {
+		marker := filepath.Join(t.TempDir(), "called.txt")
+		bin := writeFakeYTDLP(t, fmt.Sprintf("touch %q\nprintf 'https://cdn.example.com/v.mp4\\n'\n", marker))
+
+		r := NewStreamResolver(bin, 720)
+		r.SetPrefetchLimit(0)
+		r.Prefetch(context.Background(), model.Video{ID: "disabledPf1"})
+		time.Sleep(60 * time.Millisecond)
+
+		if _, err := os.Stat(marker); !os.IsNotExist(err) {
+			t.Fatal("expected SetPrefetchLimit(0) not to spawn any background yt-dlp process")
+		}
+	})
+
+	t.Run("SetPrefetchLimit bounds concurrency and clamps at 8", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		startedDir := filepath.Join(tmpDir, "started")
+		_ = os.MkdirAll(startedDir, 0o755)
+		gate := filepath.Join(tmpDir, "gate")
+
+		bin := writeFakeYTDLP(t, fmt.Sprintf(`
+for last; do :; done
+id=${last#*=}
+touch "%s/$id"
+while [ ! -f %q ]; do sleep 0.01; done
+printf 'https://cdn.example.com/%%s.mp4\n' "$id"
+`, startedDir, gate))
+
+		r := NewStreamResolver(bin, 720)
+		r.SetPrefetchLimit(20)
+		if cap(r.sem) != 8 {
+			t.Fatalf("cap(r.sem) = %d after SetPrefetchLimit(20), want 8", cap(r.sem))
+		}
+		r.SetPrefetchLimit(2)
+		for _, id := range []string{"p1", "p2", "p3", "p4"} {
+			r.Prefetch(context.Background(), model.Video{ID: id})
+		}
+
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			entries, _ := os.ReadDir(startedDir)
+			if len(entries) >= 2 {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		time.Sleep(50 * time.Millisecond)
+		entries, _ := os.ReadDir(startedDir)
+		if len(entries) != 2 {
+			_ = os.WriteFile(gate, []byte("go"), 0o600)
+			t.Fatalf("active prefetch processes = %d, want 2", len(entries))
+		}
+		_ = os.WriteFile(gate, []byte("go"), 0o600)
+	})
+
+	t.Run("background Prefetch waits while interactive WaitOrGetForMode is active", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		playStarted := filepath.Join(tmpDir, "play-started")
+		playGate := filepath.Join(tmpDir, "play-gate")
+		bgStarted := filepath.Join(tmpDir, "bg-started")
+
+		bin := writeFakeYTDLP(t, fmt.Sprintf(`
+for last; do :; done
+case "$last" in
+  *playVid0001*)
+    touch %q
+    while [ ! -f %q ]; do sleep 0.01; done
+    printf 'https://cdn.example.com/play.m4a\n'
+    ;;
+  *bgVid000001*)
+    touch %q
+    printf 'https://cdn.example.com/bg.m4a\n'
+    ;;
+esac
+`, playStarted, playGate, bgStarted))
+
+		r := NewStreamResolver(bin, 720)
+		r.SetAudioOnly(true)
+
+		playDone := make(chan ResolvedStream, 1)
+		go func() {
+			st, _ := r.WaitOrGetForMode(context.Background(), "playVid0001", true, 2*time.Second)
+			playDone <- st
+		}()
+
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			if _, err := os.Stat(playStarted); err == nil {
+				break
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+
+		// Queue background Prefetch while interactive resolution is active.
+		r.Prefetch(context.Background(), model.Video{ID: "bgVid000001"})
+		time.Sleep(60 * time.Millisecond)
+		if _, err := os.Stat(bgStarted); !os.IsNotExist(err) {
+			_ = os.WriteFile(playGate, []byte("go"), 0o600)
+			t.Fatal("expected background Prefetch to wait while interactive WaitOrGetForMode is running")
+		}
+
+		_ = os.WriteFile(playGate, []byte("go"), 0o600)
+		st := <-playDone
+		if st.AudioURL != "https://cdn.example.com/play.m4a" {
+			t.Fatalf("unexpected interactive stream: %+v", st)
+		}
+
+		deadline = time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			if _, ok := r.GetCachedForMode("bgVid000001", true); ok {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatal("expected background Prefetch to resume and cache once interactive lookup finished")
+	})
+}
+
+func TestStreamResolver_WaitOrGetVideoModeAndTrueCoalescing(t *testing.T) {
+	t.Run("WaitOrGetForMode resolves video (!audioOnly) interactively and coalesces concurrent callers without killing on maxWait", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		countFile := filepath.Join(tmpDir, "count.log")
+		gate := filepath.Join(tmpDir, "gate")
+
+		bin := writeFakeYTDLP(t, fmt.Sprintf(`
+printf '1\n' >> %q
+while [ ! -f %q ]; do sleep 0.01; done
+printf 'https://cdn.example.com/video720.mp4\nhttps://cdn.example.com/audio720.m4a\n'
+`, countFile, gate))
+
+		r := NewStreamResolver(bin, 720)
+
+		// Caller 1 has a tiny maxWait (30ms) and times out, but must NOT kill yt-dlp!
+		if _, ok := r.WaitOrGetForMode(context.Background(), "coalVid0001", false, 30*time.Millisecond); ok {
+			t.Fatal("expected short maxWait caller to time out while gate is closed")
+		}
+
+		// Caller 2 & Caller 3 join concurrently with 2s maxWait and must share the same single process.
+		var wg sync.WaitGroup
+		results := make([]ResolvedStream, 2)
+		oks := make([]bool, 2)
+		for i := 0; i < 2; i++ {
+			wg.Add(1)
+			go func(idx int) {
+				defer wg.Done()
+				results[idx], oks[idx] = r.WaitOrGetForMode(context.Background(), "coalVid0001", false, 2*time.Second)
+			}(i)
+		}
+
+		time.Sleep(25 * time.Millisecond)
+		_ = os.WriteFile(gate, []byte("go"), 0o600)
+		wg.Wait()
+
+		for i := 0; i < 2; i++ {
+			if !oks[i] || results[i].VideoURL != "https://cdn.example.com/video720.mp4" || results[i].AudioURL != "https://cdn.example.com/audio720.m4a" {
+				t.Fatalf("caller %d got ok=%v st=%+v", i, oks[i], results[i])
+			}
+		}
+
+		raw, err := os.ReadFile(countFile)
+		if err != nil {
+			t.Fatalf("read count: %v", err)
+		}
+		if calls := len(strings.Split(strings.TrimSpace(string(raw)), "\n")); calls != 1 {
+			t.Fatalf("expected 1 coalesced yt-dlp subprocess across all 3 WaitOrGetForMode callers, got %d", calls)
 		}
 	})
 }

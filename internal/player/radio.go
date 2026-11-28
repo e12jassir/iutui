@@ -16,10 +16,12 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
 	"github.com/e12jassir/iutui/internal/model"
+	"github.com/e12jassir/iutui/internal/platform"
 )
 
 const (
@@ -509,7 +511,7 @@ func WithRadioYouTubeBaseURL(baseURL string) RadioClientOption {
 // WithRadioCookiesPath sets a Netscape cookies.txt path for SAPISIDHASH auth.
 func WithRadioCookiesPath(path string) RadioClientOption {
 	return func(c *RadioClient) {
-		c.cookiesPath = path
+		c.SetCookiesPath(path)
 	}
 }
 
@@ -520,6 +522,7 @@ type RadioClient struct {
 	http        *http.Client
 	ytmBaseURL  string
 	ytBaseURL   string
+	mu          sync.RWMutex
 	cookiesPath string
 }
 
@@ -530,13 +533,32 @@ func NewRadioClient(opts ...RadioClientOption) *RadioClient {
 		ytmBaseURL: defaultYTMusicBaseURL,
 		ytBaseURL:  defaultYouTubeBaseURL,
 	}
-	if home, err := os.UserHomeDir(); err == nil && home != "" {
-		c.cookiesPath = filepath.Join(home, ".config", "iutui", "cookies.txt")
+	if cacheDir := platform.ResolvePaths().CacheDir; cacheDir != "" {
+		c.cookiesPath = filepath.Join(cacheDir, "cookies.txt")
 	}
 	for _, opt := range opts {
 		opt(c)
 	}
 	return c
+}
+
+// SetCookiesPath updates the Netscape cookies.txt path for SAPISIDHASH auth.
+func (c *RadioClient) SetCookiesPath(path string) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	c.cookiesPath = strings.TrimSpace(path)
+	c.mu.Unlock()
+}
+
+func (c *RadioClient) getCookiesPath() string {
+	if c == nil {
+		return ""
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.cookiesPath
 }
 
 // FetchRadio fetches radio tracks seeded from seedID. It queries YouTube Music
@@ -765,7 +787,7 @@ func (c *RadioClient) fetchYTMusicNext(ctx context.Context, seedID string) ([]Ra
 		"playlistId":                    "RDAMVM" + seedID,
 	}
 
-	cookieHeader, sapisid := loadYouTubeCookies(c.cookiesPath)
+	cookieHeader, sapisid := loadYouTubeCookies(c.getCookiesPath())
 	if cookieHeader != "" && sapisid != "" {
 		raw, status, err := c.doNextPost(ctx, c.ytmBaseURL, payload, cookieHeader, sapisid, c.ytmBaseURL)
 		if err == nil && status >= 200 && status < 300 {

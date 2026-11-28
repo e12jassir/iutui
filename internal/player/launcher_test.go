@@ -186,7 +186,7 @@ func TestBuildMPVArgs_OptionsAndFlagInjection(t *testing.T) {
 			},
 		},
 		{
-			name: "fast playback adds warm flags, no-playlist, and android extractor args",
+			name: "fast playback adds warm flags, no-playlist, and skip configs extractor args",
 			opts: LaunchOpts{
 				URL:          "https://www.youtube.com/watch?v=abc123",
 				Mode:         "window",
@@ -206,7 +206,7 @@ func TestBuildMPVArgs_OptionsAndFlagInjection(t *testing.T) {
 				"--keep-open=no",
 				"--force-window=immediate",
 				"--ytdl-format=bestvideo+bestaudio/best",
-				"--ytdl-raw-options=no-playlist=",
+				"--ytdl-raw-options=no-playlist=,extractor-args=youtube:player_skip=configs",
 				"--",
 				"https://www.youtube.com/watch?v=abc123",
 			},
@@ -229,7 +229,7 @@ func TestBuildMPVArgs_OptionsAndFlagInjection(t *testing.T) {
 				"--demuxer-max-back-bytes=8MiB",
 				"--force-window=immediate",
 				"--ytdl-format=bestvideo+bestaudio/best",
-				"--ytdl-raw-options=no-playlist=",
+				"--ytdl-raw-options=no-playlist=,extractor-args=youtube:player_skip=configs",
 				"--",
 				"https://www.youtube.com/watch?v=abc123",
 			},
@@ -536,6 +536,69 @@ func TestBuildMPVArgs_PerFileOptionScoping(t *testing.T) {
 		sepIdx := slices.Index(got, "--")
 		if sepIdx < 0 || sepIdx+1 >= len(got) || got[sepIdx+1] != "--evil-flag" {
 			t.Fatalf("expected -- before dash-prefixed URL, got %v", got)
+		}
+	})
+}
+
+func TestBuildMPVArgs_FastPlaybackExtractorArgsAndYtdlpArgs(t *testing.T) {
+	const androidRaw = "--ytdl-raw-options=no-playlist=,extractor-args=youtube:player_client=android;player_skip=webpage,configs"
+	const hdRaw = "--ytdl-raw-options=no-playlist=,extractor-args=youtube:player_skip=configs"
+
+	cases := []struct {
+		name string
+		opts LaunchOpts
+		want string
+	}{
+		{
+			name: "audio mode uses android webpage,configs skip",
+			opts: LaunchOpts{Mode: "audio", FastPlayback: true, URL: "https://www.youtube.com/watch?v=abc"},
+			want: androidRaw,
+		},
+		{
+			name: "AudioOnly flag uses android webpage,configs skip",
+			opts: LaunchOpts{Mode: "window", AudioOnly: true, FastPlayback: true, URL: "https://www.youtube.com/watch?v=abc"},
+			want: androidRaw,
+		},
+		{
+			name: "480p video uses android webpage,configs skip",
+			opts: LaunchOpts{Mode: "window", Quality: 480, FastPlayback: true, URL: "https://www.youtube.com/watch?v=abc"},
+			want: androidRaw,
+		},
+		{
+			name: "720p video uses player_skip=configs",
+			opts: LaunchOpts{Mode: "window", Quality: 720, FastPlayback: true, URL: "https://www.youtube.com/watch?v=abc"},
+			want: hdRaw,
+		},
+		{
+			name: "1080p video uses player_skip=configs",
+			opts: LaunchOpts{Mode: "window", Quality: 1080, FastPlayback: true, URL: "https://www.youtube.com/watch?v=abc"},
+			want: hdRaw,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := BuildMPVArgs(tc.opts)
+			if !slices.Contains(got, tc.want) {
+				t.Fatalf("BuildMPVArgs() = %v, want %q", got, tc.want)
+			}
+		})
+	}
+
+	t.Run("YtdlpArgs appends ytdl-raw-options-append flags", func(t *testing.T) {
+		got := BuildMPVArgs(LaunchOpts{
+			Mode:      "window",
+			URL:       "https://www.youtube.com/watch?v=abc",
+			YtdlpArgs: []string{"--geo-bypass", "--proxy", "http://127.0.0.1:8080", "--extractor-retries=2"},
+		})
+		for _, want := range []string{
+			"--ytdl-raw-options-append=geo-bypass=",
+			"--ytdl-raw-options-append=proxy=http://127.0.0.1:8080",
+			"--ytdl-raw-options-append=extractor-retries=2",
+		} {
+			if !slices.Contains(got, want) {
+				t.Fatalf("BuildMPVArgs(YtdlpArgs) = %v, missing %q", got, want)
+			}
 		}
 	})
 }
